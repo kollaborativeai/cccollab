@@ -64,7 +64,6 @@ describe('SocketModeListener', () => {
       sessionManager: session,
       context,
       botUserId: 'U_BOT',
-      selfUserId: 'U_SELF',
       webClient: mockWebClient as never,
     })
   })

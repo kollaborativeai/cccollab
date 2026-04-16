@@ -17,7 +17,6 @@ interface SocketModeListenerOptions {
   sessionManager: SessionManager
   context: ActiveContext
   botUserId: string
-  selfUserId: string
   webClient: WebClient
 }
 
@@ -59,7 +58,6 @@ export class SocketModeListener {
   private readonly session: SessionManager
   private readonly context: ActiveContext
   private readonly botUserId: string
-  private readonly selfUserId: string
   private readonly webClient: WebClient
   private readonly userNameCache = new Map<string, string>()
   private currentRequest: http.ClientRequest | null = null
@@ -72,7 +70,6 @@ export class SocketModeListener {
     this.session = options.sessionManager
     this.context = options.context
     this.botUserId = options.botUserId
-    this.selfUserId = options.selfUserId
     this.webClient = options.webClient
   }
 

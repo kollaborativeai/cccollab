@@ -236,7 +236,7 @@ export async function handleTopicTool(
         })
       }
       const threadTs = result.ts ?? 'unknown'
-      deps.context.joinTopic(threadTs, topic, 'slack')
+      deps.context.joinTopic(threadTs, topic, 'slack', channelId)
       return `Topic started: "${topic}" in #${channelName}. This is now your active topic.`
     }
     case 'join_topic': {
@@ -277,7 +277,7 @@ export async function handleTopicTool(
       }
 
       const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: threadTs })
-      deps.context.joinTopic(threadTs, topicName, 'slack')
+      deps.context.joinTopic(threadTs, topicName, 'slack', channelId)
 
       const lines = [`Joined topic "${topicName}" in #${channelName}. This is now your active topic.`, '', 'Topic history:']
       for (const msg of replies.messages ?? []) {

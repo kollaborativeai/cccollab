@@ -15,7 +15,7 @@ export function createChannelTools() {
   return [
     {
       name: 'join_channel',
-      description: 'Join a Slack channel and set it as the active channel. Leaves the previous channel if any. Shows recent history.',
+      description: 'Join a Slack channel and set it as the active channel. Shows recent history.',
       inputSchema: {
         type: 'object' as const,
         properties: {

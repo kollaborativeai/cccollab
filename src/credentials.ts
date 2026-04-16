@@ -25,7 +25,7 @@ export function loadCredentials(): StoredCredentials | null {
 
 export function saveCredentials(creds: StoredCredentials): void {
   mkdirSync(CONFIG_DIR, { recursive: true })
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2))
+  writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 })
 }
 
 export function getCredentialsPath(): string {

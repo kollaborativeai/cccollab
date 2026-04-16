@@ -2,18 +2,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createIdentityTools, handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
 import { SessionManager } from '../../src/session.js'
 
+function recentTs(offsetSeconds = 0): string {
+  return (Math.floor(Date.now() / 1000) - offsetSeconds).toString() + '.000'
+}
+
 function createMockDeps(): IdentityToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     botClient: {
-      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '100.200' }) },
+      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: recentTs() }) },
       conversations: {
         history: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: ':robot_face: *[carlos | api | reviewer]* objective | Working on API', ts: '100.200' },
-            { text: ':robot_face: *[carlos | api | reviewer]* online | Objective: Idle', ts: '100.100' },
-            { text: ':robot_face: *[stefan | dispatcher | architect]* online', ts: '100.050' },
+            { text: ':robot_face: *[carlos | api | reviewer]* objective | Working on API', ts: recentTs(60) },
+            { text: ':robot_face: *[carlos | api | reviewer]* online | Objective: Idle', ts: recentTs(120) },
+            { text: ':robot_face: *[stefan | dispatcher | architect]* online', ts: recentTs(180) },
           ],
         }),
       },

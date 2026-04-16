@@ -46,10 +46,12 @@ export async function handleIdentityTool(
     }
     case 'who': {
       const result = await deps.botClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
+      const cutoffTs = (Date.now() / 1000 - 4 * 3600).toString()
       const sessions = new Map<string, { objective: string; ts: string }>()
       for (const msg of (result.messages ?? []).reverse()) {
         const text = msg.text ?? ''
         const ts = msg.ts ?? ''
+        if (ts < cutoffTs) continue
         const announceMatch = ANNOUNCE_PATTERN.exec(text)
         if (announceMatch) {
           const sessionName = announceMatch[1]!

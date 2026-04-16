@@ -74,9 +74,6 @@ async function startAuthenticated(config: Config) {
     throw new Error('Failed to determine bot user ID. Your credentials may be expired. Delete ' + getCredentialsPath() + ' and re-authenticate.')
   }
 
-  const userAuthResult = await postClient.auth.test()
-  const selfUserId = userAuthResult.user_id ?? ''
-
   // Detect worktree name
   let worktreeName: string | undefined
   try {
@@ -146,7 +143,6 @@ async function startAuthenticated(config: Config) {
     sessionManager: session,
     context,
     botUserId,
-    selfUserId,
     webClient: botClient,
   })
 

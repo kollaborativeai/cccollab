@@ -3,6 +3,7 @@ export type TopicSource = 'local' | 'slack'
 interface JoinedTopic {
   topicName: string
   source: TopicSource
+  channelId?: string  // which Slack channel this topic belongs to
 }
 
 export class ActiveContext {
@@ -31,11 +32,15 @@ export class ActiveContext {
 
   leaveSlackChannel(channelId: string): void {
     this.joinedChannels.delete(channelId)
-    // Clear topics from this channel
+    // Clear topics belonging to this channel
     for (const [key, topic] of this.joinedTopics) {
-      if (topic.source === 'slack') {
-        // We can't tell which Slack channel a topic belongs to from the Map alone
-        // For now, just remove the channel tracking
+      if (topic.channelId === channelId) {
+        this.joinedTopics.delete(key)
+        if (this.activeThreadTs === key) {
+          this.activeThreadTs = undefined
+          this.activeTopicName = undefined
+          this.activeTopicSource = undefined
+        }
       }
     }
     // If leaving the active channel, clear active
@@ -53,8 +58,8 @@ export class ActiveContext {
     return [...this.joinedChannels.entries()].map(([channelId, channelName]) => ({ channelId, channelName }))
   }
 
-  joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack'): void {
-    this.joinedTopics.set(threadTs, { topicName, source })
+  joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack', channelId?: string): void {
+    this.joinedTopics.set(threadTs, { topicName, source, channelId })
     this.activeThreadTs = threadTs
     this.activeTopicName = topicName
     this.activeTopicSource = source
