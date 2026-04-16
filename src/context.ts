@@ -66,6 +66,22 @@ export class ActiveContext {
     return this.activeTopicName
   }
 
+  findJoinedTopic(query: string): { threadTs: string; topicName: string } | null {
+    const q = query.toLowerCase()
+    const matches: Array<{ threadTs: string; topicName: string }> = []
+    for (const [threadTs, topicName] of this.joinedTopics) {
+      if (topicName.toLowerCase().includes(q)) {
+        matches.push({ threadTs, topicName })
+      }
+    }
+    if (matches.length === 1) return matches[0]!
+    return null
+  }
+
+  getJoinedTopics(): Array<{ threadTs: string; topicName: string }> {
+    return [...this.joinedTopics.entries()].map(([threadTs, topicName]) => ({ threadTs, topicName }))
+  }
+
   hasChannel(): boolean { return this.channelId !== undefined }
   hasTopic(): boolean { return this.activeThreadTs !== undefined }
 }

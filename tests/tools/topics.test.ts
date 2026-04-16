@@ -42,13 +42,13 @@ function createMockDeps(): TopicToolDeps {
 
 describe('Topic Tools', () => {
   describe('createTopicTools', () => {
-    it('returns 5 tool definitions', () => {
-      expect(createTopicTools()).toHaveLength(5)
+    it('returns 8 tool definitions', () => {
+      expect(createTopicTools()).toHaveLength(8)
     })
 
     it('has correct tool names', () => {
       const names = createTopicTools().map((t) => t.name)
-      expect(names).toEqual(['list_topics', 'start_topic', 'join_topic', 'send_message', 'resolve_topic'])
+      expect(names).toEqual(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
     })
   })
 
@@ -186,12 +186,8 @@ describe('Topic Tools', () => {
         })
       })
 
-      it('sends to channel when no topic is set', async () => {
-        const result = await handleTopicTool('send_message', { text: 'Hello channel' }, deps)
-        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
-          channel: 'C123', text: '*[stefan]*: Hello channel',
-        })
-        expect(result).toContain('#team-alpha-collab')
+      it('throws when no topic is joined', async () => {
+        await expect(handleTopicTool('send_message', { text: 'Hello' }, deps)).rejects.toThrow('No active topic')
       })
 
       it('throws when no active channel', async () => {

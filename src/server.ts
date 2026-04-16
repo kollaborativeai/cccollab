@@ -153,7 +153,7 @@ async function startAuthenticated(config: Config) {
 
   const identityToolNames = new Set(['introduce', 'who'])
   const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
-  const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'send_message', 'resolve_topic'])
+  const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
 
   const identityDeps = { session, botClient, registryChannelId }
   const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }

@@ -12,7 +12,7 @@ export interface TopicToolDeps {
   context: ActiveContext
 }
 
-const TOPIC_PATTERN = /^:(large_green_circle|white_check_mark): (.+)$/
+const TOPIC_PATTERN = /^:(large_green_circle|white_check_mark|red_circle): (.+)$/
 
 export function createTopicTools() {
   return [
@@ -23,6 +23,7 @@ export function createTopicTools() {
         type: 'object' as const,
         properties: {
           include_resolved: { type: 'boolean' as const, description: 'Include resolved topics (default: false)' },
+          include_deactivated: { type: 'boolean' as const, description: 'Include deactivated topics (default: false)' },
           hours: { type: 'number' as const, description: 'How many hours back to look (default: 24)' },
         },
         required: [],
@@ -54,34 +55,71 @@ export function createTopicTools() {
     },
     {
       name: 'send_message',
-      description: 'Send a message to the active topic (or active channel if no topic is set).',
+      description: 'Send a message to a topic. Defaults to the most recently joined topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           text: { type: 'string' as const, description: 'Message text' },
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to most recently joined topic.' },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'send_broadcast',
+      description: 'Send a top-level message to all subscribers of a channel. Not in a topic thread.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          text: { type: 'string' as const, description: 'Message text' },
+          channel: { type: 'string' as const, description: 'Channel name. Defaults to most recently joined channel.' },
         },
         required: ['text'],
       },
     },
     {
       name: 'resolve_topic',
-      description: 'Resolve the active topic with a summary. Updates the parent message emoji and clears the active topic.',
+      description: 'Resolve a topic with a summary. Defaults to most recently joined topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           summary: { type: 'string' as const, description: 'Resolution summary' },
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to most recently joined topic.' },
         },
         required: ['summary'],
+      },
+    },
+    {
+      name: 'deactivate_topic',
+      description: 'Deactivate a topic. It will be hidden from list_topics by default.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to most recently joined topic.' },
+        },
+      },
+    },
+    {
+      name: 'activate_topic',
+      description: 'Reactivate a previously deactivated topic.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match).' },
+        },
+        required: ['topic'],
       },
     },
   ]
 }
 
+type TopicState = 'active' | 'deactivated' | 'resolved'
+
 interface TopicInfo {
   topic: string
   threadTs: string
   replyCount: number
-  resolved: boolean
+  state: TopicState
 }
 
 async function fetchTopics(channelId: string, webClient: WebClient): Promise<TopicInfo[]> {
@@ -91,9 +129,10 @@ async function fetchTopics(channelId: string, webClient: WebClient): Promise<Top
     const text = msg.text ?? ''
     const match = TOPIC_PATTERN.exec(text)
     if (!match) continue
-    const resolved = match[1] === 'white_check_mark'
+    const emoji = match[1]!
+    const state: TopicState = emoji === 'white_check_mark' ? 'resolved' : emoji === 'red_circle' ? 'deactivated' : 'active'
     const topic = match[2]!
-    topics.push({ topic, threadTs: msg.ts ?? '', replyCount: msg.reply_count ?? 0, resolved })
+    topics.push({ topic, threadTs: msg.ts ?? '', replyCount: msg.reply_count ?? 0, state })
   }
   return topics
 }
@@ -103,25 +142,32 @@ export async function handleTopicTool(
 ): Promise<string> {
   switch (name) {
     case 'list_topics': {
-      const { include_resolved, hours = 24 } = args as { include_resolved?: boolean; hours?: number }
+      const { include_resolved, include_deactivated, hours = 24 } = args as {
+        include_resolved?: boolean; include_deactivated?: boolean; hours?: number
+      }
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
       const cutoffTs = (Date.now() / 1000 - hours * 3600).toString()
       const topics = await fetchTopics(channelId, deps.webClient)
       const filtered = topics.filter((t) => {
         if (t.threadTs < cutoffTs) return false
-        if (!include_resolved && t.resolved) return false
+        if (!include_resolved && t.state === 'resolved') return false
+        if (!include_deactivated && t.state === 'deactivated') return false
         return true
       })
       if (filtered.length === 0) {
-        return `No ${include_resolved ? '' : 'active '}topics in #${channelName} in the last ${hours}h.`
+        return `No active topics in #${channelName} in the last ${hours}h.`
+      }
+      const statusEmoji: Record<TopicState, string> = {
+        active: ':large_green_circle:',
+        deactivated: ':red_circle:',
+        resolved: ':white_check_mark:',
       }
       const lines = [`Topics in #${channelName} (last ${hours}h):`]
       for (const t of filtered) {
-        const status = t.resolved ? ':white_check_mark:' : ':large_green_circle:'
         const joined = deps.context.isTopicJoined(t.threadTs) ? ' <-- joined' : ''
         const active = t.threadTs === (deps.context.hasTopic() ? deps.context.getThreadTs() : null) ? ' (active)' : ''
-        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies)${joined}${active}`)
+        lines.push(`  ${statusEmoji[t.state]} "${t.topic}" (${t.replyCount} replies)${joined}${active}`)
       }
       return lines.join('\n')
     }
@@ -170,8 +216,8 @@ export async function handleTopicTool(
         if (matches.length > 1) {
           const lines = [`Multiple topics match "${topic}" in #${channelName}. Be more specific:`]
           for (const m of matches) {
-            const status = m.resolved ? ':white_check_mark:' : ':large_green_circle:'
-            lines.push(`  ${status} "${m.topic}"`)
+            const emoji: Record<TopicState, string> = { active: ':large_green_circle:', deactivated: ':red_circle:', resolved: ':white_check_mark:' }
+            lines.push(`  ${emoji[m.state]} "${m.topic}"`)
           }
           return lines.join('\n')
         }
@@ -193,22 +239,54 @@ export async function handleTopicTool(
       return lines.join('\n')
     }
     case 'send_message': {
-      const { text } = args as { text: string }
+      const { text, topic } = args as { text: string; topic?: string }
       const channelId = deps.context.getChannelId()
-      const channelName = deps.context.getChannelName()
-      if (deps.context.hasTopic()) {
-        const threadTs = deps.context.getThreadTs()
-        await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
-        return `Message sent in topic thread.`
+
+      let threadTs: string
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (!found) {
+          const joined = deps.context.getJoinedTopics()
+          if (joined.length === 0) return 'No joined topics. Use join_topic first.'
+          const lines = [`No joined topic matching "${topic}". Your joined topics:`]
+          for (const t of joined) lines.push(`  - "${t.topicName}"`)
+          return lines.join('\n')
+        }
+        threadTs = found.threadTs
       } else {
-        await deps.postClient.chat.postMessage({ channel: channelId, text: deps.session.fmt(text) })
-        return `Message sent in #${channelName}.`
+        threadTs = deps.context.getThreadTs()
       }
+
+      await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
+      return `Message sent.`
+    }
+    case 'send_broadcast': {
+      const { text, channel } = args as { text: string; channel?: string }
+      let channelId: string
+      let channelName: string
+      if (channel) {
+        channelId = await deps.subscriptionManager.resolveChannelId(channel)
+        channelName = channel
+      } else {
+        channelId = deps.context.getChannelId()
+        channelName = deps.context.getChannelName()
+      }
+      await deps.postClient.chat.postMessage({ channel: channelId, text: deps.session.fmt(text) })
+      return `Broadcast sent in #${channelName}.`
     }
     case 'resolve_topic': {
-      const { summary } = args as { summary: string }
+      const { summary, topic } = args as { summary: string; topic?: string }
       const channelId = deps.context.getChannelId()
-      const threadTs = deps.context.getThreadTs()
+
+      let threadTs: string
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (!found) return `No joined topic matching "${topic}".`
+        threadTs = found.threadTs
+      } else {
+        threadTs = deps.context.getThreadTs()
+      }
+
       const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: threadTs })
       const parentMsg = (replies.messages ?? [])[0]
       if (parentMsg?.text) {
@@ -221,6 +299,56 @@ export async function handleTopicTool(
       })
       deps.context.clearTopic()
       return `Topic resolved: ${summary}`
+    }
+    case 'deactivate_topic': {
+      const { topic } = args as { topic?: string }
+      const channelId = deps.context.getChannelId()
+
+      let threadTs: string
+      let topicName: string
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (!found) return `No joined topic matching "${topic}".`
+        threadTs = found.threadTs
+        topicName = found.topicName
+      } else {
+        threadTs = deps.context.getThreadTs()
+        topicName = deps.context.getTopicName() ?? 'topic'
+      }
+
+      const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: threadTs })
+      const parentMsg = (replies.messages ?? [])[0]
+      if (parentMsg?.text) {
+        const updatedText = parentMsg.text.replace(':large_green_circle:', ':red_circle:')
+        await deps.postClient.chat.update({ channel: channelId, ts: threadTs, text: updatedText })
+      }
+      deps.context.leaveTopic(threadTs)
+      return `Topic "${topicName}" deactivated.`
+    }
+    case 'activate_topic': {
+      const { topic } = args as { topic: string }
+      const channelId = deps.context.getChannelId()
+
+      // Search all topics including deactivated
+      const topics = await fetchTopics(channelId, deps.webClient)
+      const query = topic.toLowerCase()
+      const matches = topics.filter((t) => t.state === 'deactivated' && t.topic.toLowerCase().includes(query))
+
+      if (matches.length === 0) return `No deactivated topic matching "${topic}".`
+      if (matches.length > 1) {
+        const lines = [`Multiple deactivated topics match "${topic}". Be more specific:`]
+        for (const m of matches) lines.push(`  :red_circle: "${m.topic}"`)
+        return lines.join('\n')
+      }
+
+      const match = matches[0]!
+      const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: match.threadTs })
+      const parentMsg = (replies.messages ?? [])[0]
+      if (parentMsg?.text) {
+        const updatedText = parentMsg.text.replace(':red_circle:', ':large_green_circle:')
+        await deps.postClient.chat.update({ channel: channelId, ts: match.threadTs, text: updatedText })
+      }
+      return `Topic "${match.topic}" reactivated.`
     }
     default:
       throw new Error(`Unknown topic tool: ${name}`)
