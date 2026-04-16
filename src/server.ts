@@ -1,9 +1,8 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { WebClient } from '@slack/web-api'
-import { SocketModeClient } from '@slack/socket-mode'
 import { loadConfig } from './config.js'
 import { SessionManager } from './session.js'
 import { SubscriptionManager } from './subscriptions.js'
@@ -14,16 +13,58 @@ import { createIdentityTools, handleIdentityTool } from './tools/identity.js'
 import { createChannelTools, handleChannelTool } from './tools/channels.js'
 import { createTopicTools, handleTopicTool } from './tools/topics.js'
 
+const BROKER_URL = 'http://localhost:7850'
+
+async function ensureBroker(appToken: string): Promise<void> {
+  // Check if broker is already running via health endpoint
+  try {
+    const res = await fetch(`${BROKER_URL}/health`)
+    if (res.ok) return
+  } catch {
+    // Not running, spawn it
+  }
+
+  // Spawn broker as detached process
+  const brokerPath = new URL('./broker.ts', import.meta.url).pathname
+  const child = spawn('npx', ['tsx', brokerPath], {
+    env: { ...process.env, SLACK_APP_TOKEN: appToken },
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+
+  // Wait for broker to be ready (poll health endpoint)
+  for (let i = 0; i < 20; i++) {
+    await new Promise<void>((r) => setTimeout(r, 500))
+    try {
+      const res = await fetch(`${BROKER_URL}/health`)
+      if (res.ok) return
+    } catch {
+      // keep trying
+    }
+  }
+  throw new Error('Broker failed to start within 10 seconds')
+}
+
 async function main() {
   const config = loadConfig()
 
-  const webClient = new WebClient(config.slackBotToken)
-  const socketModeClient = new SocketModeClient({ appToken: config.slackAppToken })
+  const botClient = new WebClient(config.slackBotToken)
+  const postClient = config.slackUserToken ? new WebClient(config.slackUserToken) : botClient
 
-  const authResult = await webClient.auth.test()
+  await ensureBroker(config.slackAppToken)
+
+  const authResult = await botClient.auth.test()
   const botUserId = authResult.user_id ?? ''
   if (!botUserId) {
     throw new Error('Failed to determine bot user ID from auth.test(). Check your SLACK_BOT_TOKEN.')
+  }
+
+  if (config.slackUserToken) {
+    const userAuth = await postClient.auth.test()
+    console.error(`[slack-collab] Posting as user: ${userAuth.user} (${userAuth.user_id})`)
+  } else {
+    console.error('[slack-collab] No SLACK_USER_TOKEN - posting as bot. Run "npx tsx src/auth.ts" to authenticate.')
   }
 
   // Detect worktree name
@@ -51,12 +92,12 @@ async function main() {
   }
 
   const session = new SessionManager({ username: config.username, cwd: process.cwd(), worktreeName })
-  const subscriptions = new SubscriptionManager(webClient)
+  const subscriptions = new SubscriptionManager(botClient)
   const registryChannelId = await subscriptions.resolveChannelId(config.registryChannel)
   const context = new ActiveContext()
 
   const mcp = new Server(
-    { name: 'slack-collab', version: '1.0.0' },
+    { name: 'claudecode-slack-collab', version: '1.0.0' },
     {
       capabilities: {
         experimental: { 'claude/channel': {} },
@@ -85,8 +126,9 @@ async function main() {
 
   const messageBus = new MessageBus(mcp)
   const socketListener = new SocketModeListener({
-    socketClient: socketModeClient, messageBus, subscriptionManager: subscriptions,
-    sessionManager: session, botUserId, webClient,
+    brokerUrl: BROKER_URL,
+    messageBus, subscriptionManager: subscriptions,
+    sessionManager: session, botUserId, webClient: botClient,
   })
 
   const allTools = [...createIdentityTools(), ...createChannelTools(), ...createTopicTools()]
@@ -95,9 +137,9 @@ async function main() {
   const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
   const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'send_message', 'resolve_topic'])
 
-  const identityDeps = { session, webClient, registryChannelId }
-  const channelDeps = { session, webClient, subscriptionManager: subscriptions, context }
-  const topicDeps = { session, webClient, subscriptionManager: subscriptions, context }
+  const identityDeps = { session, botClient, registryChannelId }
+  const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
+  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }))
 

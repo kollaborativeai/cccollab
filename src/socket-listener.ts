@@ -1,17 +1,30 @@
-import type { SocketModeClient } from '@slack/socket-mode'
+import http from 'node:http'
+import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { MessageBus } from './message-bus.js'
 import type { SubscriptionManager } from './subscriptions.js'
 import { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 
+const LOG_FILE = '/tmp/slack-collab-debug.log'
+const RECONNECT_DELAY_MS = 2000
+
 interface SocketModeListenerOptions {
-  socketClient: SocketModeClient
+  brokerUrl: string
   messageBus: MessageBus
   subscriptionManager: SubscriptionManager
   sessionManager: SessionManager
   botUserId: string
   webClient: WebClient
+}
+
+export interface BrokerEvent {
+  channel: string
+  user: string | null
+  text: string | null
+  ts: string
+  thread_ts: string | null
+  subtype: string | null
 }
 
 const IGNORED_SUBTYPES = new Set([
@@ -21,58 +34,134 @@ const IGNORED_SUBTYPES = new Set([
 ])
 
 export class SocketModeListener {
-  private readonly socket: SocketModeClient
+  private readonly brokerUrl: string
   private readonly bus: MessageBus
   private readonly subs: SubscriptionManager
   private readonly session: SessionManager
   private readonly botUserId: string
   private readonly webClient: WebClient
   private readonly userNameCache = new Map<string, string>()
+  private currentRequest: http.ClientRequest | null = null
+  private stopped = false
 
   constructor(options: SocketModeListenerOptions) {
-    this.socket = options.socketClient
+    this.brokerUrl = options.brokerUrl
     this.bus = options.messageBus
     this.subs = options.subscriptionManager
     this.session = options.sessionManager
     this.botUserId = options.botUserId
     this.webClient = options.webClient
-
-    this.socket.on('message', (payload) =>
-      this.handleMessage(payload).catch((err) => {
-        console.error('Failed to handle message:', err)
-      })
-    )
   }
 
   async start(): Promise<void> {
-    await this.socket.start()
+    this.stopped = false
+    this.connect()
+    this.log('SSE listener started')
   }
 
-  private async handleMessage(payload: {
-    ack: () => Promise<void> | void
-    event: {
-      type: string; subtype?: string; channel: string
-      text?: string; ts: string; thread_ts?: string; user?: string
+  stop(): void {
+    this.stopped = true
+    if (this.currentRequest) {
+      this.currentRequest.destroy()
+      this.currentRequest = null
     }
-  }): Promise<void> {
-    await payload.ack()
-    const { event } = payload
+  }
 
-    if (event.subtype && IGNORED_SUBTYPES.has(event.subtype)) return
-    if (!this.subs.isSubscribed(event.channel)) return
-    if (event.user === this.botUserId) return
+  private connect(): void {
+    if (this.stopped) return
+
+    const url = `${this.brokerUrl}/events`
+    this.log(`Connecting to broker at ${url}`)
+
+    const req = http.get(url, { headers: { 'Accept': 'text/event-stream' } }, (res) => {
+      let buffer = ''
+
+      res.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString()
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const json = line.slice(6)
+            try {
+              const event = JSON.parse(json) as BrokerEvent
+              this.processEvent(event)
+            } catch {
+              this.log(`SSE parse error: ${json}`)
+            }
+          }
+        }
+      })
+
+      res.on('end', () => {
+        this.log('SSE connection ended')
+        this.scheduleReconnect()
+      })
+
+      res.on('error', (err) => {
+        this.log(`SSE response error: ${err.message}`)
+        this.scheduleReconnect()
+      })
+    })
+
+    req.on('error', (err) => {
+      this.log(`SSE request error: ${err.message}`)
+      this.scheduleReconnect()
+    })
+
+    this.currentRequest = req
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped) return
+    this.log(`Reconnecting in ${RECONNECT_DELAY_MS}ms...`)
+    setTimeout(() => this.connect(), RECONNECT_DELAY_MS)
+  }
+
+  processEvent(event: BrokerEvent): void {
+    this.log(`EVENT: channel=${event.channel} user=${event.user} subtype=${event.subtype} text="${(event.text ?? '').slice(0, 80)}"`)
+    this.handleEvent(event).catch((err) => {
+      this.log(`HANDLE ERROR: ${err}`)
+    })
+  }
+
+  private log(msg: string): void {
+    const line = `[${new Date().toISOString()}] ${msg}\n`
+    appendFileSync(LOG_FILE, line)
+  }
+
+  private async handleEvent(event: BrokerEvent): Promise<void> {
+    if (event.subtype && IGNORED_SUBTYPES.has(event.subtype)) {
+      this.log(`DROPPED: subtype=${event.subtype}`)
+      return
+    }
+    if (!this.subs.isSubscribed(event.channel)) {
+      this.log(`DROPPED: channel ${event.channel} not subscribed`)
+      return
+    }
 
     const text = event.text ?? ''
     const parsed = SessionManager.parse(text)
+    const isFromBot = event.user === this.botUserId
 
     let sender: string
     let messageText: string
 
     if (parsed) {
-      if (this.session.isSelf(parsed.sender)) return
+      // Session-prefixed message (from any Claude Code session)
+      if (this.session.isSelf(parsed.sender)) {
+        this.log(`DROPPED: self-message from ${parsed.sender}`)
+        return
+      }
+      this.log(`ROUTING: session message from ${parsed.sender}`)
       sender = parsed.sender
       messageText = parsed.text
+    } else if (isFromBot) {
+      // Bot system message (topic headers, join announcements) - skip
+      this.log(`DROPPED: bot system message`)
+      return
     } else {
+      // Human message
       const userId = event.user ?? 'unknown'
       const displayName = await this.resolveUserName(userId)
       sender = `human:${displayName}`
@@ -84,11 +173,12 @@ export class SocketModeListener {
     const msg: ParsedMessage = {
       sender, text: messageText, ts: event.ts, channel: event.channel,
       channelName,
-      threadTs: event.thread_ts,
+      threadTs: event.thread_ts ?? undefined,
     }
 
+    this.log(`PUSHING to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
     this.bus.push(msg).catch((err) => {
-      console.error('Failed to push message to bus:', err)
+      this.log(`PUSH ERROR: ${err}`)
     })
   }
 

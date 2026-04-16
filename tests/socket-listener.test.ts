@@ -1,18 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SocketModeListener } from '../src/socket-listener.js'
+import { SocketModeListener, type BrokerEvent } from '../src/socket-listener.js'
 import { SessionManager } from '../src/session.js'
-
-function createMockSocketModeClient() {
-  const handlers = new Map<string, Function>()
-  return {
-    on: vi.fn((event: string, handler: Function) => { handlers.set(event, handler) }),
-    start: vi.fn().mockResolvedValue(undefined),
-    _trigger: async (event: string, payload: unknown) => {
-      const handler = handlers.get(event)
-      if (handler) await handler(payload)
-    },
-  }
-}
 
 function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
@@ -40,22 +28,32 @@ function createMockWebClient(nameMap: Record<string, string> = {}) {
   }
 }
 
+function makeEvent(overrides: Partial<BrokerEvent> = {}): BrokerEvent {
+  return {
+    channel: 'C123',
+    user: null,
+    text: null,
+    ts: '111.000',
+    thread_ts: null,
+    subtype: null,
+    ...overrides,
+  }
+}
+
 describe('SocketModeListener', () => {
   let listener: SocketModeListener
-  let mockSocket: ReturnType<typeof createMockSocketModeClient>
   let mockBus: ReturnType<typeof createMockMessageBus>
   let mockSubs: ReturnType<typeof createMockSubscriptionManager>
   let mockWebClient: ReturnType<typeof createMockWebClient>
 
   beforeEach(() => {
-    mockSocket = createMockSocketModeClient()
     mockBus = createMockMessageBus()
     mockSubs = createMockSubscriptionManager()
     mockWebClient = createMockWebClient({ U_HUMAN: 'Stefan' })
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
 
     listener = new SocketModeListener({
-      socketClient: mockSocket as never,
+      brokerUrl: 'http://localhost:7850',
       messageBus: mockBus as never,
       subscriptionManager: mockSubs as never,
       sessionManager: session,
@@ -64,104 +62,109 @@ describe('SocketModeListener', () => {
     })
   })
 
-  it('registers message handler on construction', () => {
-    expect(mockSocket.on).toHaveBeenCalledWith('message', expect.any(Function))
-  })
-
-  it('starts the socket mode client', async () => {
-    await listener.start()
-    expect(mockSocket.start).toHaveBeenCalled()
-  })
-
   it('routes a subscribed channel message to the message bus', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: '*[carlos-backend]*: need help', ts: '111.222', user: 'U_CARLOS' },
-    })
-    expect(mockBus.push).toHaveBeenCalledWith({
-      sender: 'carlos-backend', text: 'need help', ts: '111.222', channel: 'C123',
-      channelName: 'team-alpha-collab', threadTs: undefined,
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[carlos-backend]*: need help', ts: '111.222', user: 'U_CARLOS',
+    }))
+    // processEvent is sync but triggers async handleEvent - wait for microtasks
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith({
+        sender: 'carlos-backend', text: 'need help', ts: '111.222', channel: 'C123',
+        channelName: 'team-alpha-collab', threadTs: undefined,
+      })
     })
   })
 
   it('includes threadTs for thread replies', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: '*[carlos-backend]*: fix', ts: '111.333', thread_ts: '111.222', user: 'U_CARLOS' },
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[carlos-backend]*: fix', ts: '111.333', thread_ts: '111.222', user: 'U_CARLOS',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ threadTs: '111.222' }))
     })
-    expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ threadTs: '111.222' }))
   })
 
   it('drops messages from unsubscribed channels', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C999', text: '*[alice]*: hello', ts: '111.444', user: 'U_ALICE' },
-    })
+    listener.processEvent(makeEvent({
+      channel: 'C999', text: '*[alice]*: hello', ts: '111.444', user: 'U_ALICE',
+    }))
+    // Give async handler time to run
+    await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
-  it('drops self-messages by bot user ID', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: '*[stefan | dispatcher]*: my msg', ts: '111.555', user: 'U_BOT' },
+  it('routes bot messages from other sessions (same bot token)', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[tester]*: hello from another session', ts: '111.555', user: 'U_BOT',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'tester', text: 'hello from another session' }),
+      )
     })
+  })
+
+  it('drops own session messages via isSelf', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[stefan]*: my own msg', ts: '111.556', user: 'U_BOT',
+    }))
+    await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
-  it('drops messages with subtypes', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', subtype: 'channel_join', channel: 'C123', text: 'joined', ts: '111.666', user: 'U_SOMEONE' },
-    })
+  it('drops bot system messages (no session prefix)', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: ':large_green_circle: Some topic', ts: '111.557', user: 'U_BOT',
+    }))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('drops messages with ignored subtypes', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'joined', ts: '111.666', user: 'U_SOMEONE', subtype: 'channel_join',
+    }))
+    await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
   it('handles human messages and resolves display name', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: 'hey team status?', ts: '111.777', user: 'U_HUMAN' },
-    })
-    expect(mockWebClient.users.info).toHaveBeenCalledWith({ user: 'U_HUMAN' })
-    expect(mockBus.push).toHaveBeenCalledWith({
-      sender: 'human:Stefan', text: 'hey team status?', ts: '111.777', channel: 'C123',
-      channelName: 'team-alpha-collab', threadTs: undefined,
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'hey team status?', ts: '111.777', user: 'U_HUMAN',
+    }))
+    await vi.waitFor(() => {
+      expect(mockWebClient.users.info).toHaveBeenCalledWith({ user: 'U_HUMAN' })
+      expect(mockBus.push).toHaveBeenCalledWith({
+        sender: 'human:Stefan', text: 'hey team status?', ts: '111.777', channel: 'C123',
+        channelName: 'team-alpha-collab', threadTs: undefined,
+      })
     })
   })
 
   it('caches user name lookups - second message does not hit API', async () => {
-    const payload = () => ({
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: 'hello', ts: '111.888', user: 'U_HUMAN' },
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'hello', ts: '111.888', user: 'U_HUMAN',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledTimes(1)
     })
-    await mockSocket._trigger('message', payload())
-    await mockSocket._trigger('message', payload())
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'hello again', ts: '111.889', user: 'U_HUMAN',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledTimes(2)
+    })
     expect(mockWebClient.users.info).toHaveBeenCalledTimes(1)
   })
 
   it('falls back to user ID when users.info fails', async () => {
-    await mockSocket._trigger('message', {
-      ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: 'hello', ts: '111.999', user: 'U_UNKNOWN' },
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'hello', ts: '111.999', user: 'U_UNKNOWN',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'human:U_UNKNOWN' }),
+      )
     })
-    expect(mockBus.push).toHaveBeenCalledWith(
-      expect.objectContaining({ sender: 'human:U_UNKNOWN' }),
-    )
-  })
-
-  it('awaits ack before processing', async () => {
-    const ackOrder: string[] = []
-    const ack = vi.fn(() => {
-      ackOrder.push('ack')
-      return Promise.resolve()
-    })
-    mockBus.push.mockImplementation(() => {
-      ackOrder.push('push')
-      return Promise.resolve()
-    })
-    await mockSocket._trigger('message', {
-      ack,
-      event: { type: 'message', channel: 'C123', text: '*[carlos-backend]*: hey', ts: '222.001', user: 'U_CARLOS' },
-    })
-    expect(ackOrder).toEqual(['ack', 'push'])
   })
 })
