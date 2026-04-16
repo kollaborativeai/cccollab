@@ -7,7 +7,7 @@ const RECENT_TS = (Date.now() / 1000 - 3600).toFixed(3)  // 1 hour ago - within 
 
 function createMockDeps(): TopicToolDeps {
   const context = new ActiveContext()
-  context.setChannel('C123', 'team-alpha-collab')
+  context.setActiveChannel('C123', 'team-alpha-collab')
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     webClient: {

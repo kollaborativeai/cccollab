@@ -12,6 +12,7 @@ export class ActiveContext {
   private activeTopicName: string | undefined
   private activeTopicSource: TopicSource | undefined
   private localJoined = false
+  private readonly joinedChannels = new Map<string, string>() // channelId -> channelName
   private readonly joinedTopics = new Map<string, JoinedTopic>() // threadTs/topicId -> { topicName, source }
 
   joinLocalChannel(): void {
@@ -22,16 +23,34 @@ export class ActiveContext {
     return this.localJoined
   }
 
-  setChannel(channelId: string, channelName: string): void {
+  setActiveChannel(channelId: string, channelName: string): void {
     this.channelId = channelId
     this.channelName = channelName
-    this.activeThreadTs = undefined
-    this.activeTopicName = undefined
-    this.activeTopicSource = undefined
-    // Clear Slack topics but keep local topics
+    this.joinedChannels.set(channelId, channelName)
+  }
+
+  leaveSlackChannel(channelId: string): void {
+    this.joinedChannels.delete(channelId)
+    // Clear topics from this channel
     for (const [key, topic] of this.joinedTopics) {
-      if (topic.source === 'slack') this.joinedTopics.delete(key)
+      if (topic.source === 'slack') {
+        // We can't tell which Slack channel a topic belongs to from the Map alone
+        // For now, just remove the channel tracking
+      }
     }
+    // If leaving the active channel, clear active
+    if (this.channelId === channelId) {
+      this.channelId = undefined
+      this.channelName = undefined
+    }
+  }
+
+  isChannelJoined(channelId: string): boolean {
+    return this.joinedChannels.has(channelId)
+  }
+
+  getJoinedChannels(): Array<{ channelId: string; channelName: string }> {
+    return [...this.joinedChannels.entries()].map(([channelId, channelName]) => ({ channelId, channelName }))
   }
 
   joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack'): void {

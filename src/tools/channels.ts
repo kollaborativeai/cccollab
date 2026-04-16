@@ -27,10 +27,12 @@ export function createChannelTools() {
     },
     {
       name: 'leave_channel',
-      description: 'Leave the active channel and clear the active context.',
+      description: 'Leave a Slack channel. Defaults to the active channel.',
       inputSchema: {
         type: 'object' as const,
-        properties: {},
+        properties: {
+          channel: { type: 'string' as const, description: 'Channel name. Defaults to active channel.' },
+        },
         required: [],
       },
     },
@@ -49,14 +51,8 @@ export async function handleChannelTool(
     case 'join_channel': {
       const { channel, read_history } = args as { channel: string; read_history?: boolean }
 
-      // Leave previous channel if any
-      if (deps.context.hasChannel()) {
-        const prevId = deps.context.getChannelId()
-        deps.subscriptionManager.leave(prevId)
-      }
-
       const { channelId } = await deps.subscriptionManager.join(channel)
-      deps.context.setChannel(channelId, channel)
+      deps.context.setActiveChannel(channelId, channel)
 
       const lines = [`Joined #${channel}. This is now your active channel.`]
       if (read_history !== false) {
@@ -71,10 +67,18 @@ export async function handleChannelTool(
       return lines.join('\n')
     }
     case 'leave_channel': {
-      const channelId = deps.context.getChannelId()
-      const channelName = deps.context.getChannelName()
+      const { channel } = args as { channel?: string }
+      let channelId: string
+      let channelName: string
+      if (channel) {
+        channelId = await deps.subscriptionManager.resolveChannelId(channel)
+        channelName = channel
+      } else {
+        channelId = deps.context.getChannelId()
+        channelName = deps.context.getChannelName()
+      }
       deps.subscriptionManager.leave(channelId)
-      deps.context.clearChannel()
+      deps.context.leaveSlackChannel(channelId)
       return `Left #${channelName}.`
     }
     case 'list_channels': {

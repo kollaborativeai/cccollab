@@ -54,7 +54,7 @@ describe('SocketModeListener', () => {
     mockWebClient = createMockWebClient({ U_HUMAN: 'Stefan' })
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
     context = new ActiveContext()
-    context.setChannel('C123', 'team-alpha-collab')
+    context.setActiveChannel('C123', 'team-alpha-collab')
     context.joinTopic('111.222', 'Test topic', 'slack')
 
     listener = new SocketModeListener({

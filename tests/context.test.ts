@@ -16,30 +16,28 @@ describe('ActiveContext', () => {
     it('getTopicSource returns undefined', () => { expect(ctx.getTopicSource()).toBeUndefined() })
   })
 
-  describe('setChannel', () => {
+  describe('setActiveChannel', () => {
     it('sets channel and reports hasChannel true', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       expect(ctx.hasChannel()).toBe(true)
       expect(ctx.getChannelId()).toBe('C123')
       expect(ctx.getChannelName()).toBe('team-alpha')
     })
 
-    it('clears active topic when channel changes', () => {
-      ctx.setChannel('C123', 'team-alpha')
+    it('adds channel without clearing active topic', () => {
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Auth refactor')
       expect(ctx.hasTopic()).toBe(true)
 
-      ctx.setChannel('C456', 'team-beta')
-      expect(ctx.hasTopic()).toBe(false)
-      expect(() => ctx.getThreadTs()).toThrow('No active topic')
-      expect(ctx.getTopicName()).toBeUndefined()
-      expect(ctx.getTopicSource()).toBeUndefined()
+      ctx.setActiveChannel('C456', 'team-beta')
+      expect(ctx.hasTopic()).toBe(true)
+      expect(ctx.getThreadTs()).toBe('300.100')
     })
   })
 
   describe('joinTopic', () => {
     it('sets topic after channel is set', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Auth refactor')
       expect(ctx.hasTopic()).toBe(true)
       expect(ctx.getThreadTs()).toBe('300.100')
@@ -47,7 +45,7 @@ describe('ActiveContext', () => {
     })
 
     it('defaults source to slack', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Auth refactor')
       expect(ctx.getTopicSource()).toBe('slack')
     })
@@ -59,7 +57,7 @@ describe('ActiveContext', () => {
     })
 
     it('accepts explicit slack source', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Slack topic', 'slack')
       expect(ctx.getTopicSource()).toBe('slack')
     })
@@ -67,7 +65,7 @@ describe('ActiveContext', () => {
 
   describe('clearChannel', () => {
     it('clears channel and topic', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Auth refactor')
       ctx.clearChannel()
       expect(ctx.hasChannel()).toBe(false)
@@ -80,7 +78,7 @@ describe('ActiveContext', () => {
 
   describe('clearTopic', () => {
     it('clears topic but keeps channel', () => {
-      ctx.setChannel('C123', 'team-alpha')
+      ctx.setActiveChannel('C123', 'team-alpha')
       ctx.joinTopic('300.100', 'Auth refactor')
       ctx.clearTopic()
       expect(ctx.hasChannel()).toBe(true)

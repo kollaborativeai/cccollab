@@ -58,11 +58,15 @@ describe('Channel Tools', () => {
       expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
     })
 
-    it('leaves previous channel when joining a new one', async () => {
-      deps.context.setChannel('C999', 'old-channel')
+    it('adds new channel without leaving the previous one', async () => {
+      deps.context.setActiveChannel('C999', 'old-channel')
       await handleChannelTool('join_channel', { channel: 'team-alpha-collab' }, deps)
-      expect(deps.subscriptionManager.leave).toHaveBeenCalledWith('C999')
+      expect(deps.subscriptionManager.leave).not.toHaveBeenCalled()
       expect(deps.context.getChannelId()).toBe('C123')
+      // Both channels are now joined
+      const joined = deps.context.getJoinedChannels()
+      expect(joined.some((c) => c.channelId === 'C999')).toBe(true)
+      expect(joined.some((c) => c.channelId === 'C123')).toBe(true)
     })
 
     it('returns history when read_history is true', async () => {
@@ -79,7 +83,7 @@ describe('Channel Tools', () => {
 
   describe('leave_channel', () => {
     it('leaves active channel and clears context', async () => {
-      deps.context.setChannel('C123', 'team-alpha-collab')
+      deps.context.setActiveChannel('C123', 'team-alpha-collab')
       const result = await handleChannelTool('leave_channel', {}, deps)
       expect(deps.subscriptionManager.leave).toHaveBeenCalledWith('C123')
       expect(deps.context.hasChannel()).toBe(false)
@@ -102,7 +106,7 @@ describe('Channel Tools', () => {
     })
 
     it('marks active channel', async () => {
-      deps.context.setChannel('C123', 'team-alpha-collab')
+      deps.context.setActiveChannel('C123', 'team-alpha-collab')
       const result = await handleChannelTool('list_channels', {}, deps)
       expect(result).toContain('<-- active')
     })
