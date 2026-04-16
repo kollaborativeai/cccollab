@@ -217,6 +217,10 @@ async function main() {
   const cleanup = () => { console.error('[slack-collab] Shutting down...'); process.exit(0) }
   process.on('SIGINT', cleanup)
   process.on('SIGTERM', cleanup)
+
+  // Exit when parent disconnects (stdin closes)
+  process.stdin.on('end', cleanup)
+  process.stdin.on('close', cleanup)
 }
 
 main().catch((err) => { console.error('[slack-collab] Fatal error:', err); process.exit(1) })
