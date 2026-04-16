@@ -93,12 +93,12 @@ export async function handleChannelTool(
           cursor,
         })
         for (const ch of result.channels ?? []) {
-          if (ch.id && ch.name) {
+          if (ch.id && ch.name && ch.is_member) {
             allChannels.push({
               id: ch.id,
               name: ch.name,
               is_private: ch.is_private ?? false,
-              is_member: ch.is_member ?? false,
+              is_member: true,
             })
           }
         }
