@@ -119,7 +119,9 @@ export async function handleTopicTool(
       const lines = [`Topics in #${channelName} (last ${hours}h):`]
       for (const t of filtered) {
         const status = t.resolved ? ':white_check_mark:' : ':large_green_circle:'
-        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies) - thread_ts: ${t.threadTs}`)
+        const joined = deps.context.isTopicJoined(t.threadTs) ? ' <-- joined' : ''
+        const active = t.threadTs === (deps.context.hasTopic() ? deps.context.getThreadTs() : null) ? ' (active)' : ''
+        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies)${joined}${active} - thread_ts: ${t.threadTs}`)
       }
       return lines.join('\n')
     }
