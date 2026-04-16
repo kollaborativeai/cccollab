@@ -167,8 +167,45 @@ describe('Topic Tools', () => {
 
       it('returns error when no match', async () => {
         const result = await handleTopicTool('join_topic', { topic: 'nonexistent xyz' }, deps)
-        expect(result).toContain('No topic matching')
+        expect(result).toContain('No active topic matching')
         expect(deps.context.hasTopic()).toBe(false)
+      })
+
+      it('exact match wins over substring match', async () => {
+        ;(deps.webClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ok: true,
+          messages: [
+            { text: ':large_green_circle: test', ts: RECENT_TS, reply_count: 0 },
+            { text: ':large_green_circle: test this', ts: (parseFloat(RECENT_TS) + 1).toFixed(3), reply_count: 0 },
+          ],
+        })
+        const result = await handleTopicTool('join_topic', { topic: 'test' }, deps)
+        expect(result).toContain('Joined topic "test"')
+        expect(result).not.toContain('Multiple topics')
+      })
+
+      it('excludes resolved topics from fuzzy matching', async () => {
+        ;(deps.webClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ok: true,
+          messages: [
+            { text: ':white_check_mark: test', ts: RECENT_TS, reply_count: 0 },
+            { text: ':large_green_circle: test this', ts: (parseFloat(RECENT_TS) + 1).toFixed(3), reply_count: 0 },
+          ],
+        })
+        const result = await handleTopicTool('join_topic', { topic: 'test' }, deps)
+        expect(result).toContain('Joined topic "test this"')
+      })
+
+      it('excludes deactivated topics from fuzzy matching', async () => {
+        ;(deps.webClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ok: true,
+          messages: [
+            { text: ':red_circle: test', ts: RECENT_TS, reply_count: 0 },
+            { text: ':large_green_circle: test this', ts: (parseFloat(RECENT_TS) + 1).toFixed(3), reply_count: 0 },
+          ],
+        })
+        const result = await handleTopicTool('join_topic', { topic: 'test' }, deps)
+        expect(result).toContain('Joined topic "test this"')
       })
 
       it('lists multiple matches when ambiguous', async () => {
@@ -304,6 +341,114 @@ describe('Topic Tools', () => {
       expect(deps.context.getTopicSource()).toBe('local')
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/topics'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('join_topic local: exact match wins over substring match', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [
+              { id: 'uuid-test', topic: 'test', creator: 'a', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+              { id: 'uuid-test-this', topic: 'test this', creator: 'b', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, messages: [] }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('join_topic', { topic: 'test' }, deps)
+      expect(result).toContain('Joined local topic "test"')
+      expect(result).not.toContain('Multiple')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-test/join'),
+        expect.anything(),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('join_topic local: accepts UUID directly', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topic: { id: '11111111-2222-3333-4444-555555555555', topic: 'Direct', creator: 'a', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, messages: [] }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps)
+      expect(result).toContain('Joined local topic "Direct"')
+
+      vi.unstubAllGlobals()
+    })
+
+    it('resolve_topic local: works without channel when given topic name', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [
+              { id: 'uuid-r', topic: 'to be resolved', creator: 'a', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ ok: true }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('resolve_topic', { summary: 'done', topic: 'to be resolved' }, deps)
+      expect(result).toContain('Topic resolved')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-r/resolve'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('deactivate_topic local: works without channel when given topic name', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [
+              { id: 'uuid-d', topic: 'stale', creator: 'a', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ ok: true }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('deactivate_topic', { topic: 'stale' }, deps)
+      expect(result).toContain('deactivated')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-d/deactivate'),
         expect.objectContaining({ method: 'POST' }),
       )
 

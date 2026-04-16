@@ -123,14 +123,20 @@ export class ActiveContext {
   }
 
   findJoinedTopic(query: string): { threadTs: string; topicName: string; source: TopicSource } | null {
+    // Exact topicId/threadTs match wins
+    const direct = this.joinedTopics.get(query)
+    if (direct) return { threadTs: query, topicName: direct.topicName, source: direct.source }
+
     const q = query.toLowerCase()
-    const matches: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
+    const exact: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
+    const fuzzy: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
     for (const [threadTs, { topicName, source }] of this.joinedTopics) {
-      if (topicName.toLowerCase().includes(q)) {
-        matches.push({ threadTs, topicName, source })
-      }
+      const lower = topicName.toLowerCase()
+      if (lower === q) exact.push({ threadTs, topicName, source })
+      else if (lower.includes(q)) fuzzy.push({ threadTs, topicName, source })
     }
-    if (matches.length === 1) return matches[0]!
+    if (exact.length === 1) return exact[0]!
+    if (exact.length === 0 && fuzzy.length === 1) return fuzzy[0]!
     return null
   }
 

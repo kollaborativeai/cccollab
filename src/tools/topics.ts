@@ -14,9 +14,22 @@ export interface TopicToolDeps {
 }
 
 const TOPIC_PATTERN = /^:(large_green_circle|white_check_mark|red_circle): (.+)$/
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function isLocal(channel: string | undefined, context: ActiveContext): boolean {
   return channel === 'local' || (!channel && !context.hasChannel())
+}
+
+/** Pick the best match from a list of candidates by name. Exact match wins; else unique substring. */
+function pickMatch<T extends { topic: string }>(candidates: T[], query: string): { match: T | null; ambiguous: T[] } {
+  const q = query.toLowerCase()
+  const exact = candidates.filter((t) => t.topic.toLowerCase() === q)
+  if (exact.length === 1) return { match: exact[0]!, ambiguous: [] }
+  if (exact.length > 1) return { match: null, ambiguous: exact }
+  const fuzzy = candidates.filter((t) => t.topic.toLowerCase().includes(q))
+  if (fuzzy.length === 1) return { match: fuzzy[0]!, ambiguous: [] }
+  if (fuzzy.length > 1) return { match: null, ambiguous: fuzzy }
+  return { match: null, ambiguous: [] }
 }
 
 function brokerBaseUrl(port: number): string {
@@ -254,30 +267,26 @@ export async function handleTopicTool(
 
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
-      const query = topic.toLowerCase()
 
       let threadTs: string
       let topicName: string
 
-      if (/^\d+\.\d+$/.test(query)) {
+      if (/^\d+\.\d+$/.test(topic)) {
         // Exact thread_ts
         threadTs = topic
         topicName = topic
       } else {
         const topics = await fetchTopics(channelId, deps.webClient)
-        const matches = topics.filter((t) => t.topic.toLowerCase().includes(query))
-        if (matches.length === 0) {
-          return `No topic matching "${topic}" found in #${channelName}.`
-        }
-        if (matches.length > 1) {
-          const lines = [`Multiple topics match "${topic}" in #${channelName}. Be more specific:`]
-          for (const m of matches) {
-            const emoji: Record<TopicState, string> = { active: ':large_green_circle:', deactivated: ':red_circle:', resolved: ':white_check_mark:' }
-            lines.push(`  ${emoji[m.state]} "${m.topic}"`)
+        const activeOnly = topics.filter((t) => t.state === 'active')
+        const { match, ambiguous } = pickMatch(activeOnly, topic)
+        if (!match) {
+          if (ambiguous.length > 1) {
+            const lines = [`Multiple topics match "${topic}" in #${channelName}. Be more specific:`]
+            for (const m of ambiguous) lines.push(`  :large_green_circle: "${m.topic}"`)
+            return lines.join('\n')
           }
-          return lines.join('\n')
+          return `No active topic matching "${topic}" found in #${channelName}.`
         }
-        const match = matches[0]!
         threadTs = match.threadTs
         topicName = match.topic
       }
@@ -365,6 +374,12 @@ export async function handleTopicTool(
         }
       }
 
+      // If no Slack channel, fall back to local lookup via broker
+      if (!deps.context.hasChannel()) {
+        if (!topic) return 'No active topic. Use join_topic or start_topic first.'
+        return handleLocalResolveTopicByName(deps, summary, topic)
+      }
+
       const channelId = deps.context.getChannelId()
 
       let threadTs: string
@@ -405,6 +420,12 @@ export async function handleTopicTool(
         }
       }
 
+      // If no Slack channel, fall back to local lookup via broker
+      if (!deps.context.hasChannel()) {
+        if (!topic) return 'No active topic. Use join_topic or start_topic first.'
+        return handleLocalDeactivateTopicByName(deps, topic)
+      }
+
       const channelId = deps.context.getChannelId()
 
       let threadTs: string
@@ -439,22 +460,21 @@ export async function handleTopicTool(
 
       const channelId = deps.context.getChannelId()
 
-      // Search all topics including deactivated
+      // Search deactivated topics only
       const topics = await fetchTopics(channelId, deps.webClient)
-      const query = topic.toLowerCase()
-      const matches = topics.filter((t) => t.state === 'deactivated' && t.topic.toLowerCase().includes(query))
+      const deactivated = topics.filter((t) => t.state === 'deactivated')
+      const { match, ambiguous } = pickMatch(deactivated, topic)
 
-      if (matches.length === 0) {
+      if (!match) {
+        if (ambiguous.length > 1) {
+          const lines = [`Multiple deactivated topics match "${topic}". Be more specific:`]
+          for (const m of ambiguous) lines.push(`  :red_circle: "${m.topic}"`)
+          return lines.join('\n')
+        }
         // Fall back to local
         return handleLocalActivateTopic(deps, topic)
       }
-      if (matches.length > 1) {
-        const lines = [`Multiple deactivated topics match "${topic}". Be more specific:`]
-        for (const m of matches) lines.push(`  :red_circle: "${m.topic}"`)
-        return lines.join('\n')
-      }
 
-      const match = matches[0]!
       const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: match.threadTs })
       const parentMsg = (replies.messages ?? [])[0]
       if (parentMsg?.text) {
@@ -507,34 +527,52 @@ async function handleLocalStartTopic(deps: TopicToolDeps, topic: string): Promis
 }
 
 async function handleLocalJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
-  const query = topic.toLowerCase()
+  // Direct UUID lookup
+  if (UUID_PATTERN.test(topic)) {
+    const byId = await fetchLocalTopicById(deps.brokerPort, topic)
+    if (!byId) return `No local topic with id "${topic}" found.`
+    return joinLocalTopic(deps, byId)
+  }
 
-  // Fetch all topics including deactivated and resolved to search across all
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?include_resolved=true&include_deactivated=true`
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics`
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
-  const matches = data.topics.filter((t) => t.topic.toLowerCase().includes(query))
+  const { match, ambiguous } = pickMatch(data.topics, topic)
 
-  if (matches.length === 0) {
-    return `No local topic matching "${topic}" found.`
-  }
-  if (matches.length > 1) {
-    const lines = [`Multiple local topics match "${topic}". Be more specific:`]
-    for (const m of matches) lines.push(`  "${m.topic}" (${m.state})`)
-    return lines.join('\n')
+  if (!match) {
+    if (ambiguous.length > 1) {
+      const lines = [`Multiple local topics match "${topic}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      return lines.join('\n')
+    }
+    return `No active local topic matching "${topic}" found.`
   }
 
-  const match = matches[0]!
-  // Join via broker
-  const joinUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/join`
+  return joinLocalTopic(deps, match)
+}
+
+async function fetchLocalTopicById(brokerPort: number, id: string): Promise<BrokerTopicData | null> {
+  try {
+    const url = `${brokerBaseUrl(brokerPort)}/topics/${id}`
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = (await res.json()) as { topic: BrokerTopicData }
+    return data.topic
+  } catch {
+    return null
+  }
+}
+
+async function joinLocalTopic(deps: TopicToolDeps, topic: BrokerTopicData): Promise<string> {
+  const joinUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${topic.id}/join`
   const joinData = await brokerFetch<BrokerJoinData>(joinUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId: deps.session.sessionName }),
   })
 
-  deps.context.joinTopic(match.id, match.topic, 'local')
+  deps.context.joinTopic(topic.id, topic.topic, 'local')
 
-  const lines = [`Joined local topic "${match.topic}". This is now your active topic.`, '', 'Topic history:']
+  const lines = [`Joined local topic "${topic.topic}". This is now your active topic.`, '', 'Topic history:']
   for (const msg of joinData.messages) {
     lines.push(`  [${msg.sender}]: ${msg.text}`)
   }
@@ -572,6 +610,47 @@ async function handleLocalResolveTopic(deps: TopicToolDeps, summary: string, top
   return `Topic resolved: ${summary}`
 }
 
+async function handleLocalResolveTopicByName(deps: TopicToolDeps, summary: string, name: string): Promise<string> {
+  const id = await resolveLocalTopicId(deps.brokerPort, name)
+  if (id.error) return id.error
+  return handleLocalResolveTopic(deps, summary, id.id!)
+}
+
+async function handleLocalDeactivateTopicByName(deps: TopicToolDeps, name: string): Promise<string> {
+  const id = await resolveLocalTopicId(deps.brokerPort, name)
+  if (id.error) return id.error
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${id.id}/deactivate`
+  await brokerFetch<{ ok: boolean }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  deps.context.leaveTopic(id.id!)
+  return `Topic "${id.topicName}" deactivated.`
+}
+
+async function resolveLocalTopicId(
+  brokerPort: number, name: string,
+): Promise<{ id?: string; topicName?: string; error?: string }> {
+  if (UUID_PATTERN.test(name)) {
+    const byId = await fetchLocalTopicById(brokerPort, name)
+    if (!byId) return { error: `No local topic with id "${name}".` }
+    return { id: byId.id, topicName: byId.topic }
+  }
+  const url = `${brokerBaseUrl(brokerPort)}/topics`
+  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
+  const { match, ambiguous } = pickMatch(data.topics, name)
+  if (!match) {
+    if (ambiguous.length > 1) {
+      const lines = [`Multiple local topics match "${name}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      return { error: lines.join('\n') }
+    }
+    return { error: `No active local topic matching "${name}".` }
+  }
+  return { id: match.id, topicName: match.topic }
+}
+
 async function handleLocalDeactivateTopic(deps: TopicToolDeps, topicId: string): Promise<string> {
   const topicName = deps.context.getTopicName() ?? 'topic'
   const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/deactivate`
@@ -585,24 +664,39 @@ async function handleLocalDeactivateTopic(deps: TopicToolDeps, topicId: string):
 }
 
 async function handleLocalActivateTopic(deps: TopicToolDeps, topic: string): Promise<string> {
-  const query = topic.toLowerCase()
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?include_deactivated=true`
-  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
-  const matches = data.topics.filter((t) => t.state === 'deactivated' && t.topic.toLowerCase().includes(query))
-
-  if (matches.length === 0) return `No deactivated local topic matching "${topic}".`
-  if (matches.length > 1) {
-    const lines = [`Multiple deactivated local topics match "${topic}". Be more specific:`]
-    for (const m of matches) lines.push(`  "${m.topic}"`)
-    return lines.join('\n')
+  // Direct UUID lookup
+  if (UUID_PATTERN.test(topic)) {
+    const byId = await fetchLocalTopicById(deps.brokerPort, topic)
+    if (!byId || byId.state !== 'deactivated') {
+      return `No deactivated local topic with id "${topic}".`
+    }
+    await activateLocalTopic(deps, byId.id)
+    return `Local topic "${byId.topic}" reactivated.`
   }
 
-  const match = matches[0]!
-  const activateUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/activate`
-  await brokerFetch<{ ok: boolean }>(activateUrl, {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?include_deactivated=true`
+  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
+  const deactivated = data.topics.filter((t) => t.state === 'deactivated')
+  const { match, ambiguous } = pickMatch(deactivated, topic)
+
+  if (!match) {
+    if (ambiguous.length > 1) {
+      const lines = [`Multiple deactivated local topics match "${topic}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      return lines.join('\n')
+    }
+    return `No deactivated local topic matching "${topic}".`
+  }
+
+  await activateLocalTopic(deps, match.id)
+  return `Local topic "${match.topic}" reactivated.`
+}
+
+async function activateLocalTopic(deps: TopicToolDeps, id: string): Promise<void> {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${id}/activate`
+  await brokerFetch<{ ok: boolean }>(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   })
-  return `Local topic "${match.topic}" reactivated.`
 }
