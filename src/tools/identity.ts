@@ -1,7 +1,7 @@
 import type { WebClient } from '@slack/web-api'
 import type { SessionManager } from '../session.js'
 
-export interface SessionToolDeps {
+export interface IdentityToolDeps {
   session: SessionManager
   webClient: WebClient
   registryChannelId: string
@@ -10,11 +10,11 @@ export interface SessionToolDeps {
 const ANNOUNCE_PATTERN = /:robot_face: \*\[(.+?)\]\* online \| Role: (.+?)(?:\s*\|\s*Status: (.+))?$/
 const STATUS_PATTERN = /:robot_face: \*\[(.+?)\]\* status \| (.+)$/
 
-export function createSessionTools() {
+export function createIdentityTools() {
   return [
     {
-      name: 'announce_session',
-      description: 'Register this session in the global registry so other sessions can discover you.',
+      name: 'introduce',
+      description: 'Set your name, role, and status. Posts to the session registry so other sessions can find you.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -26,35 +26,27 @@ export function createSessionTools() {
       },
     },
     {
-      name: 'list_sessions',
-      description: 'List all sessions currently registered in the global registry.',
+      name: 'who',
+      description: 'List online sessions from the registry.',
       inputSchema: { type: 'object' as const, properties: {} },
-    },
-    {
-      name: 'set_status',
-      description: "Update this session's status in the registry.",
-      inputSchema: {
-        type: 'object' as const,
-        properties: { status: { type: 'string' as const, description: 'New status message' } },
-        required: ['status'],
-      },
     },
   ]
 }
 
-export async function handleSessionTool(
-  name: string, args: Record<string, unknown>, deps: SessionToolDeps
+export async function handleIdentityTool(
+  name: string, args: Record<string, unknown>, deps: IdentityToolDeps
 ): Promise<string> {
   switch (name) {
-    case 'announce_session': {
+    case 'introduce': {
       const { role, status, name_override } = args as { role: string; status?: string; name_override?: string }
       if (name_override) deps.session.overrideName(name_override)
+      deps.session.setRole(role)
       let text = `:robot_face: *[${deps.session.sessionName}]* online | Role: ${role}`
       if (status) text += ` | Status: ${status}`
       await deps.webClient.chat.postMessage({ channel: deps.registryChannelId, text })
-      return `Session "${deps.session.sessionName}" announced with role "${role}"`
+      return `Session "${deps.session.sessionName}" introduced with role "${role}"`
     }
-    case 'list_sessions': {
+    case 'who': {
       const result = await deps.webClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
       const sessions = new Map<string, { role: string; status: string; ts: string }>()
       for (const msg of (result.messages ?? []).reverse()) {
@@ -79,7 +71,7 @@ export async function handleSessionTool(
         }
       }
       if (sessions.size === 0) return 'No sessions currently registered.'
-      const lines = ['Active sessions:']
+      const lines = ['Online sessions:']
       for (const [n, info] of sessions) {
         let line = `  - ${n} (${info.role})`
         if (info.status) line += ` - ${info.status}`
@@ -87,15 +79,7 @@ export async function handleSessionTool(
       }
       return lines.join('\n')
     }
-    case 'set_status': {
-      const { status } = args as { status: string }
-      await deps.webClient.chat.postMessage({
-        channel: deps.registryChannelId,
-        text: `:robot_face: *[${deps.session.sessionName}]* status | ${status}`,
-      })
-      return `Status updated: ${status}`
-    }
     default:
-      throw new Error(`Unknown session tool: ${name}`)
+      throw new Error(`Unknown identity tool: ${name}`)
   }
 }
