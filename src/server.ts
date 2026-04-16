@@ -3,7 +3,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { WebClient } from '@slack/web-api'
-import { loadConfig } from './config.js'
+import { loadConfig, type Config } from './config.js'
+import { getCredentialsPath } from './credentials.js'
+import { SLACK_APP_TOKEN, BROKER_PORT } from './constants.js'
+import { runOAuthFlow } from './auth.js'
 import { SessionManager } from './session.js'
 import { SubscriptionManager } from './subscriptions.js'
 import { MessageBus } from './message-bus.js'
@@ -13,58 +16,62 @@ import { createIdentityTools, handleIdentityTool } from './tools/identity.js'
 import { createChannelTools, handleChannelTool } from './tools/channels.js'
 import { createTopicTools, handleTopicTool } from './tools/topics.js'
 
-const BROKER_URL = 'http://localhost:7850'
+async function startUnauthenticated() {
+  const mcp = new Server(
+    { name: 'claudecode-slack-collab', version: '1.0.0' },
+    {
+      capabilities: { tools: {} },
+      instructions: `You are connected to the Slack Claude Bridge, but NOT YET AUTHENTICATED.
 
-async function ensureBroker(appToken: string): Promise<void> {
-  // Check if broker is already running via health endpoint
-  try {
-    const res = await fetch(`${BROKER_URL}/health`)
-    if (res.ok) return
-  } catch {
-    // Not running, spawn it
-  }
+Call the 'authenticate' tool to connect your Slack account. This will open a browser for authorization.
 
-  // Spawn broker as detached process
-  const brokerPath = new URL('./broker.ts', import.meta.url).pathname
-  const child = spawn('npx', ['tsx', brokerPath], {
-    env: { ...process.env, SLACK_APP_TOKEN: appToken },
-    detached: true,
-    stdio: 'ignore',
-  })
-  child.unref()
-
-  // Wait for broker to be ready (poll health endpoint)
-  for (let i = 0; i < 20; i++) {
-    await new Promise<void>((r) => setTimeout(r, 500))
-    try {
-      const res = await fetch(`${BROKER_URL}/health`)
-      if (res.ok) return
-    } catch {
-      // keep trying
+After authentication completes, restart your Claude Code session to start collaborating.`,
     }
+  )
+
+  const authTool = {
+    name: 'authenticate',
+    description: 'Connect your Slack account via OAuth. Opens a browser for authorization.',
+    inputSchema: { type: 'object' as const, properties: {} },
   }
-  throw new Error('Broker failed to start within 10 seconds')
+
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [authTool],
+  }))
+
+  mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+    if (req.params.name !== 'authenticate') {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated. Call authenticate first.' }], isError: true }
+    }
+
+    try {
+      const creds = await runOAuthFlow()
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Authenticated as ${creds.userName} in ${creds.teamName}!\n\nCredentials saved to ${getCredentialsPath()}\n\nPlease restart your Claude Code session to start collaborating.`,
+        }],
+      }
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Authentication failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      }
+    }
+  })
+
+  await mcp.connect(new StdioServerTransport())
+  console.error('[slack-collab] Not authenticated. Waiting for authenticate tool call...')
 }
 
-async function main() {
-  const config = loadConfig()
-
+async function startAuthenticated(config: Config) {
   const botClient = new WebClient(config.slackBotToken)
-  const postClient = config.slackUserToken ? new WebClient(config.slackUserToken) : botClient
-
-  await ensureBroker(config.slackAppToken)
+  const postClient = new WebClient(config.slackUserToken)
 
   const authResult = await botClient.auth.test()
   const botUserId = authResult.user_id ?? ''
   if (!botUserId) {
-    throw new Error('Failed to determine bot user ID from auth.test(). Check your SLACK_BOT_TOKEN.')
-  }
-
-  if (config.slackUserToken) {
-    const userAuth = await postClient.auth.test()
-    console.error(`[slack-collab] Posting as user: ${userAuth.user} (${userAuth.user_id})`)
-  } else {
-    console.error('[slack-collab] No SLACK_USER_TOKEN - posting as bot. Run "npx tsx src/auth.ts" to authenticate.')
+    throw new Error('Failed to determine bot user ID. Your credentials may be expired. Delete ' + getCredentialsPath() + ' and re-authenticate.')
   }
 
   // Detect worktree name
@@ -88,13 +95,16 @@ async function main() {
       }
     }
   } catch {
-    // Not in a git repo - fine
+    // Not in a git repo
   }
 
   const session = new SessionManager({ username: config.username, cwd: process.cwd(), worktreeName })
   const subscriptions = new SubscriptionManager(botClient)
   const registryChannelId = await subscriptions.resolveChannelId(config.registryChannel)
   const context = new ActiveContext()
+
+  // Ensure broker is running
+  await ensureBroker(config.slackAppToken)
 
   const mcp = new Server(
     { name: 'claudecode-slack-collab', version: '1.0.0' },
@@ -126,9 +136,12 @@ async function main() {
 
   const messageBus = new MessageBus(mcp)
   const socketListener = new SocketModeListener({
-    brokerUrl: BROKER_URL,
-    messageBus, subscriptionManager: subscriptions,
-    sessionManager: session, botUserId, webClient: botClient,
+    brokerUrl: `http://localhost:${config.brokerPort}`,
+    messageBus,
+    subscriptionManager: subscriptions,
+    sessionManager: session,
+    botUserId,
+    webClient: botClient,
   })
 
   const allTools = [...createIdentityTools(), ...createChannelTools(), ...createTopicTools()]
@@ -161,7 +174,43 @@ async function main() {
   await mcp.connect(new StdioServerTransport())
   await socketListener.start()
 
-  console.error(`[slack-collab] Session "${session.sessionName}" connected`)
+  console.error(`[slack-collab] Session "${session.sessionName}" connected as ${config.username}`)
+}
+
+async function ensureBroker(appToken: string): Promise<void> {
+  try {
+    const res = await fetch(`http://localhost:${BROKER_PORT}/health`)
+    if (res.ok) return
+  } catch {
+    // Not running, spawn it
+  }
+
+  const brokerPath = new URL('./broker.ts', import.meta.url).pathname
+  const child = spawn('npx', ['tsx', brokerPath], {
+    env: { ...process.env, SLACK_APP_TOKEN: appToken },
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+
+  for (let i = 0; i < 20; i++) {
+    await new Promise<void>(r => setTimeout(r, 500))
+    try {
+      const res = await fetch(`http://localhost:${BROKER_PORT}/health`)
+      if (res.ok) return
+    } catch { /* keep trying */ }
+  }
+  throw new Error('Broker failed to start within 10 seconds')
+}
+
+async function main() {
+  const config = loadConfig()
+
+  if (!config.authenticated) {
+    await startUnauthenticated()
+  } else {
+    await startAuthenticated(config)
+  }
 
   const cleanup = () => { console.error('[slack-collab] Shutting down...'); process.exit(0) }
   process.on('SIGINT', cleanup)

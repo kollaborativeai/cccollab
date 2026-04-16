@@ -1,72 +1,62 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+vi.mock('../src/credentials.js', () => ({
+  loadCredentials: vi.fn(),
+}))
+
 import { loadConfig } from '../src/config.js'
+import { loadCredentials } from '../src/credentials.js'
+
+const mockLoadCredentials = vi.mocked(loadCredentials)
 
 describe('loadConfig', () => {
-  const originalEnv = process.env
-
   beforeEach(() => {
-    process.env = { ...originalEnv }
+    vi.resetAllMocks()
   })
 
-  afterEach(() => {
-    process.env = originalEnv
-  })
-
-  it('returns valid config when all required env vars are set', () => {
-    process.env.SLACK_BOT_TOKEN = 'xoxb-test-token'
-    process.env.SLACK_APP_TOKEN = 'xapp-test-token'
-    process.env.USERNAME = 'stefan'
+  it('returns unauthenticated config when no credentials exist', () => {
+    mockLoadCredentials.mockReturnValue(null)
 
     const config = loadConfig()
 
-    expect(config.slackBotToken).toBe('xoxb-test-token')
-    expect(config.slackAppToken).toBe('xapp-test-token')
+    expect(config.authenticated).toBe(false)
+  })
+
+  it('returns authenticated config with full fields when credentials exist', () => {
+    mockLoadCredentials.mockReturnValue({
+      botToken: 'xoxb-test-bot-token',
+      userToken: 'xoxp-test-user-token',
+      teamId: 'T12345',
+      teamName: 'Test Workspace',
+      userId: 'U12345',
+      userName: 'stefan',
+    })
+
+    const config = loadConfig()
+
+    expect(config.authenticated).toBe(true)
+    if (!config.authenticated) throw new Error('Expected authenticated config')
+    expect(config.slackBotToken).toBe('xoxb-test-bot-token')
+    expect(config.slackUserToken).toBe('xoxp-test-user-token')
     expect(config.username).toBe('stefan')
     expect(config.registryChannel).toBe('ai-collab-registry')
+    expect(config.brokerPort).toBe(7850)
   })
 
-  it('throws when SLACK_BOT_TOKEN is missing', () => {
-    process.env.SLACK_APP_TOKEN = 'xapp-test-token'
-    process.env.USERNAME = 'stefan'
-
-    expect(() => loadConfig()).toThrow('SLACK_BOT_TOKEN')
-  })
-
-  it('throws when SLACK_APP_TOKEN is missing', () => {
-    process.env.SLACK_BOT_TOKEN = 'xoxb-test-token'
-    process.env.USERNAME = 'stefan'
-
-    expect(() => loadConfig()).toThrow('SLACK_APP_TOKEN')
-  })
-
-  it('throws when USERNAME is missing', () => {
-    process.env.SLACK_BOT_TOKEN = 'xoxb-test-token'
-    process.env.SLACK_APP_TOKEN = 'xapp-test-token'
-
-    expect(() => loadConfig()).toThrow('USERNAME')
-  })
-
-  it('uses defaults for optional env vars', () => {
-    process.env.SLACK_BOT_TOKEN = 'xoxb-test-token'
-    process.env.SLACK_APP_TOKEN = 'xapp-test-token'
-    process.env.USERNAME = 'stefan'
+  it('uses app token from constants', () => {
+    mockLoadCredentials.mockReturnValue({
+      botToken: 'xoxb-test',
+      userToken: 'xoxp-test',
+      teamId: 'T1',
+      teamName: 'Test',
+      userId: 'U1',
+      userName: 'test',
+    })
 
     const config = loadConfig()
 
-    expect(config.sessionRole).toBeUndefined()
-    expect(config.registryChannel).toBe('ai-collab-registry')
-  })
-
-  it('respects optional env var overrides', () => {
-    process.env.SLACK_BOT_TOKEN = 'xoxb-test-token'
-    process.env.SLACK_APP_TOKEN = 'xapp-test-token'
-    process.env.USERNAME = 'stefan'
-    process.env.SESSION_ROLE = 'frontend'
-    process.env.REGISTRY_CHANNEL = 'custom-registry'
-
-    const config = loadConfig()
-
-    expect(config.sessionRole).toBe('frontend')
-    expect(config.registryChannel).toBe('custom-registry')
+    expect(config.authenticated).toBe(true)
+    if (!config.authenticated) throw new Error('Expected authenticated config')
+    expect(config.slackAppToken).toMatch(/^xapp-/)
   })
 })

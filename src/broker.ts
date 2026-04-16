@@ -2,8 +2,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { writeFileSync, appendFileSync } from 'node:fs'
 import { SocketModeClient } from '@slack/socket-mode'
+import { BROKER_PORT } from './constants.js'
 
-const PORT = 7850
+const PORT = BROKER_PORT
 const PID_FILE = '/tmp/slack-collab-broker.pid'
 const LOG_FILE = '/tmp/slack-collab-broker.log'
 
