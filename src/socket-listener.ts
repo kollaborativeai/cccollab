@@ -156,7 +156,7 @@ export class SocketModeListener {
 
     const text = event.text ?? ''
     const parsed = SessionManager.parse(text)
-    const isFromSelf = event.user === this.botUserId || event.user === this.selfUserId
+    const isFromBot = event.user === this.botUserId
 
     let sender: string
     let messageText: string
@@ -170,8 +170,8 @@ export class SocketModeListener {
       this.log(`ROUTING: session message from ${parsed.sender}`)
       sender = parsed.sender
       messageText = parsed.text
-    } else if (isFromSelf) {
-      // System message from bot or own user token (topic headers, etc.) - skip
+    } else if (isFromBot) {
+      // Bot system message (topic headers, etc.) - skip
       this.log(`DROPPED: bot system message`)
       return
     } else {

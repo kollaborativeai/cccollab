@@ -126,12 +126,15 @@ describe('SocketModeListener', () => {
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
-  it('drops own user token messages (no session prefix)', async () => {
+  it('allows human messages from own user (manual Slack posts)', async () => {
     listener.processEvent(makeEvent({
-      channel: 'C123', text: ':large_green_circle: My topic', ts: '111.558', user: 'U_SELF',
+      channel: 'C123', text: 'hey everyone', ts: '111.558', user: 'U_SELF',
     }))
-    await new Promise<void>((r) => setTimeout(r, 50))
-    expect(mockBus.push).not.toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: expect.stringContaining('human:') }),
+      )
+    })
   })
 
   it('drops messages from threads not joined', async () => {
