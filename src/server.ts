@@ -218,7 +218,9 @@ async function ensureBroker(appToken: string): Promise<void> {
   }
 
   const brokerPath = new URL('./broker.ts', import.meta.url).pathname
-  const child = spawn('npx', ['tsx', brokerPath], {
+  // Resolve tsx from the package's own node_modules so this works regardless of cwd
+  const tsxBin = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
+  const child = spawn(tsxBin, [brokerPath], {
     env: { ...process.env, SLACK_APP_TOKEN: appToken },
     detached: true,
     stdio: 'ignore',
