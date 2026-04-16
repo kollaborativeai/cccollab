@@ -44,6 +44,11 @@ export class SessionManager {
     return senderName === this.sessionName || senderName === this.displayName
   }
 
+  /** Strict check - only matches the explicitly set name, not the username fallback */
+  isExactSelf(senderName: string): boolean {
+    return this.name !== undefined && senderName === this.name
+  }
+
   static parse(text: string): { sender: string; text: string } | null {
     const match = SESSION_PREFIX_PATTERN.exec(text)
     if (!match) return null

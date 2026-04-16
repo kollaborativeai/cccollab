@@ -53,6 +53,7 @@ describe('SocketModeListener', () => {
     mockSubs = createMockSubscriptionManager()
     mockWebClient = createMockWebClient({ U_HUMAN: 'Stefan' })
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
     context = new ActiveContext()
     context.setActiveChannel('C123', 'team-alpha-collab')
     context.joinTopic('111.222', 'Test topic', 'slack')
@@ -112,7 +113,7 @@ describe('SocketModeListener', () => {
 
   it('drops own session messages via isSelf', async () => {
     listener.processEvent(makeEvent({
-      channel: 'C123', text: '*[stefan]*: my own msg', ts: '111.556', user: 'U_BOT',
+      channel: 'C123', text: '*[architect]*: my own msg', ts: '111.556', user: 'U_BOT',
     }))
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
@@ -271,7 +272,7 @@ describe('SocketModeListener', () => {
         source: 'local',
         type: 'message',
         topicId: 'uuid-self',
-        sender: 'stefan',
+        sender: 'architect',
         text: 'My own message',
       }
       listener.processLocalEvent(event)
@@ -329,18 +330,18 @@ describe('SocketModeListener', () => {
       })
     })
 
-    it('pushes broadcast events to the bus', async () => {
+    it('pushes broadcast events from other sessions to the bus', async () => {
       const event: BrokerLocalEvent = {
         source: 'local',
         type: 'broadcast',
-        sender: 'architect',
+        sender: 'tester',
         text: 'Heads up everyone',
         ts: '2026-01-01T00:00:00Z',
       }
       listener.processLocalEvent(event)
       await vi.waitFor(() => {
         expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-          sender: 'architect',
+          sender: 'tester',
           text: 'Heads up everyone',
           channel: 'local',
           channelName: 'local',
@@ -353,7 +354,7 @@ describe('SocketModeListener', () => {
       const event: BrokerLocalEvent = {
         source: 'local',
         type: 'broadcast',
-        sender: 'stefan',
+        sender: 'architect',
         text: 'My own broadcast',
       }
       listener.processLocalEvent(event)

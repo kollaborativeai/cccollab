@@ -185,8 +185,8 @@ export class SocketModeListener {
           this.log(`DROPPED local message: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
-        // Skip self-messages
-        if (event.sender && this.session.isSelf(event.sender)) {
+        // Skip self-messages (strict match on chosen name, not username fallback)
+        if (event.sender && this.session.isExactSelf(event.sender)) {
           this.log(`DROPPED: self local message from ${event.sender}`)
           return
         }
@@ -254,8 +254,8 @@ export class SocketModeListener {
         return
       }
       case 'broadcast': {
-        // Skip self-messages
-        if (event.sender && this.session.isSelf(event.sender)) {
+        // Skip self-messages (strict match on chosen name, not username fallback)
+        if (event.sender && this.session.isExactSelf(event.sender)) {
           this.log(`DROPPED: self local broadcast from ${event.sender}`)
           return
         }
