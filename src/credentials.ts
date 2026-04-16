@@ -14,7 +14,7 @@ export interface StoredCredentials {
 }
 
 export function getCredentialsPath(): string {
-  const profile = process.env.SLACK_COLLAB_PROFILE?.trim()
+  const profile = process.env.SLACK_PROFILE?.trim()
   const filename = profile ? `credentials-${profile}.json` : 'credentials.json'
   return path.join(CONFIG_DIR, filename)
 }
