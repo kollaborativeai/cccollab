@@ -120,7 +120,7 @@ async function startAuthenticated(config: Config) {
         'You are always connected to the LOCAL channel by default. You can start and join local topics immediately without joining any Slack channel.',
         '',
         'Workflow:',
-        '1. introduce - set your name (required before sending messages)',
+        '1. introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").',
         '2. start_topic or join_topic - create or join a conversation (defaults to local)',
         '3. send_message - send to your active topic',
         '',

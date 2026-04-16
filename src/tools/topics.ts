@@ -172,9 +172,15 @@ async function fetchTopics(channelId: string, webClient: WebClient): Promise<Top
   return topics
 }
 
+const REQUIRES_NAME = new Set(['start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
+
 export async function handleTopicTool(
   name: string, args: Record<string, unknown>, deps: TopicToolDeps
 ): Promise<string> {
+  if (REQUIRES_NAME.has(name) && !deps.session.hasName()) {
+    return 'This session has no name set. Call `introduce` first with a name (e.g., "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.'
+  }
+
   switch (name) {
     case 'list_topics': {
       const { channel, include_resolved, include_deactivated, hours = 24 } = args as {

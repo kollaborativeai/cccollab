@@ -8,8 +8,10 @@ const RECENT_TS = (Date.now() / 1000 - 3600).toFixed(3)  // 1 hour ago - within 
 function createMockDeps(): TopicToolDeps {
   const context = new ActiveContext()
   context.setActiveChannel('C123', 'team-alpha-collab')
+  const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+  session.setName('architect')
   return {
-    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    session,
     webClient: {
       conversations: {
         history: vi.fn().mockResolvedValue({
@@ -50,6 +52,34 @@ describe('Topic Tools', () => {
     it('has correct tool names', () => {
       const names = createTopicTools().map((t) => t.name)
       expect(names).toEqual(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
+    })
+  })
+
+  describe('requires name', () => {
+    it('returns error when session has no name and tries to start_topic', async () => {
+      const deps = createMockDeps()
+      // Reset to no name
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = await handleTopicTool('start_topic', { topic: 'Test' }, depsNoName)
+      expect(result).toContain('no name set')
+      expect(result).toContain('introduce')
+    })
+
+    it('returns error when session has no name and tries to send_message', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = await handleTopicTool('send_message', { text: 'Hi' }, depsNoName)
+      expect(result).toContain('no name set')
+    })
+
+    it('allows list_topics without name', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = await handleTopicTool('list_topics', {}, depsNoName)
+      expect(result).not.toContain('no name set')
     })
   })
 
@@ -167,7 +197,7 @@ describe('Topic Tools', () => {
         deps.context.joinTopic('300.100', 'Auth refactor', 'slack')
         await handleTopicTool('send_message', { text: 'Here is my review' }, deps)
         expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
-          channel: 'C123', thread_ts: '300.100', text: '*[stefan]*: Here is my review',
+          channel: 'C123', thread_ts: '300.100', text: '*[architect]*: Here is my review',
         })
       })
 

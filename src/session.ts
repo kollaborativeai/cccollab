@@ -49,6 +49,11 @@ export class SessionManager {
     return this.name !== undefined && senderName === this.name
   }
 
+  /** True once introduce() has been called */
+  hasName(): boolean {
+    return this.name !== undefined
+  }
+
   static parse(text: string): { sender: string; text: string } | null {
     const match = SESSION_PREFIX_PATTERN.exec(text)
     if (!match) return null
