@@ -6,12 +6,15 @@ function createMockDeps(): ConversationToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     webClient: {
-      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '300.100' }) },
+      chat: {
+        postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '300.100' }),
+        update: vi.fn().mockResolvedValue({ ok: true }),
+      },
       conversations: {
         replies: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: '*[alice-frontend]*: started this thread', ts: '300.100', user: 'U1' },
+            { text: ':large_green_circle: TOPIC: Auth refactor | *[alice-frontend]*', ts: '300.100', user: 'U1' },
             { text: '*[bob-backend]*: I can help', ts: '300.200', user: 'U2' },
           ],
         }),
@@ -69,8 +72,14 @@ describe('Conversation Tools', () => {
     expect(result).toContain('Setup CI')
   })
 
-  it('resolve_conversation posts summary', async () => {
+  it('resolve_conversation updates parent message emoji and posts summary', async () => {
     await handleConversationTool('resolve_conversation', { channel: 'team-alpha-collab', thread_ts: '300.100', summary: 'Agreed on JWT approach' }, deps)
+    expect(deps.webClient.conversations.replies).toHaveBeenCalledWith({ channel: 'C123', ts: '300.100' })
+    expect(deps.webClient.chat.update).toHaveBeenCalledWith({
+      channel: 'C123',
+      ts: '300.100',
+      text: ':white_check_mark: TOPIC: Auth refactor | *[alice-frontend]*',
+    })
     expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
       channel: 'C123', thread_ts: '300.100', text: expect.stringContaining('RESOLVED'),
     })

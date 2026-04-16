@@ -8,12 +8,15 @@ function createMockDeps(): SessionToolDeps {
     webClient: {
       chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '100.200' }) },
       conversations: {
+        // Slack returns messages newest-first: status update (ts 100.200) appears BEFORE
+        // the announcement (ts 100.100). Without reversing, the status update is dropped
+        // because the session isn't in the Map yet when we encounter it.
         history: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: ':robot_face: *[carlos-backend]* online | Role: backend | Status: Working on API', ts: '100.100' },
+            { text: ':robot_face: *[carlos-backend]* status | Working on API', ts: '100.200' },
+            { text: ':robot_face: *[carlos-backend]* online | Role: backend | Status: Idle', ts: '100.100' },
             { text: ':robot_face: *[stefan-dispatcher]* online | Role: fullstack | Status: Starting up', ts: '100.050' },
-            { text: ':robot_face: *[carlos-backend]* online | Role: backend | Status: Idle', ts: '99.999' },
           ],
         }),
       },

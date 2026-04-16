@@ -57,13 +57,14 @@ export async function handleSessionTool(
     case 'list_sessions': {
       const result = await deps.webClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
       const sessions = new Map<string, { role: string; status: string; ts: string }>()
-      for (const msg of result.messages ?? []) {
+      for (const msg of (result.messages ?? []).reverse()) {
         const text = msg.text ?? ''
         const ts = msg.ts ?? ''
         const announceMatch = ANNOUNCE_PATTERN.exec(text)
         if (announceMatch) {
           const sessionName = announceMatch[1]!
-          if (!sessions.has(sessionName)) {
+          const existing = sessions.get(sessionName)
+          if (!existing || ts > existing.ts) {
             sessions.set(sessionName, { role: announceMatch[2]!, status: announceMatch[3] ?? '', ts })
           }
           continue

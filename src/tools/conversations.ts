@@ -141,6 +141,12 @@ export async function handleConversationTool(
     case 'resolve_conversation': {
       const { channel, thread_ts, summary } = args as { channel: string; thread_ts: string; summary: string }
       const channelId = await deps.subscriptionManager.resolveChannelId(channel)
+      const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: thread_ts })
+      const parentMsg = (replies.messages ?? [])[0]
+      if (parentMsg?.text) {
+        const updatedText = parentMsg.text.replace(':large_green_circle:', ':white_check_mark:')
+        await deps.webClient.chat.update({ channel: channelId, ts: thread_ts, text: updatedText })
+      }
       await deps.webClient.chat.postMessage({
         channel: channelId, thread_ts,
         text: `:white_check_mark: RESOLVED by *[${deps.session.sessionName}]*\n${summary}`,
