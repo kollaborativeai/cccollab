@@ -11,5 +11,6 @@ export interface ParsedMessage {
   text: string
   ts: string
   channel: string
+  channelName: string | undefined
   threadTs: string | undefined
 }

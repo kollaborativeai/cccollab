@@ -10,7 +10,8 @@ describe('Integration: end-to-end message flow', () => {
     const bus = new MessageBus(mockMcp as never)
 
     const msg: ParsedMessage = {
-      sender: 'carlos-backend', text: 'Need help with auth', ts: '500.100', channel: 'C123', threadTs: '500.001',
+      sender: 'carlos-backend', text: 'Need help with auth', ts: '500.100', channel: 'C123',
+      channelName: 'team-alpha-collab', threadTs: '500.001',
     }
     await bus.push(msg)
 
@@ -18,7 +19,10 @@ describe('Integration: end-to-end message flow', () => {
       method: 'notifications/claude/channel',
       params: {
         content: 'Need help with auth',
-        meta: { sender: 'carlos-backend', channel: 'C123', ts: '500.100', thread_ts: '500.001' },
+        meta: {
+          sender: 'carlos-backend', channel: 'team-alpha-collab', channel_id: 'C123',
+          ts: '500.100', thread_ts: '500.001',
+        },
       },
     })
   })
@@ -39,7 +43,7 @@ describe('Integration: end-to-end message flow', () => {
     await subs.join('team-alpha-collab')
     expect(subs.isSubscribed('C123')).toBe(true)
 
-    await bus.push({ sender: 'alice-frontend', text: 'Review my PR?', ts: '600.100', channel: 'C123', threadTs: '600.001' })
+    await bus.push({ sender: 'alice-frontend', text: 'Review my PR?', ts: '600.100', channel: 'C123', channelName: 'team-alpha-collab', threadTs: '600.001' })
 
     expect(mockMcp.notification).toHaveBeenCalledWith(expect.objectContaining({
       method: 'notifications/claude/channel',

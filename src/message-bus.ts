@@ -13,7 +13,8 @@ export class MessageBus extends EventEmitter {
   async push(msg: ParsedMessage): Promise<void> {
     const meta: Record<string, string> = {
       sender: msg.sender,
-      channel: msg.channel,
+      channel: msg.channelName ?? msg.channel,
+      channel_id: msg.channel,
       ts: msg.ts,
     }
     if (msg.threadTs) {
