@@ -12,6 +12,7 @@ function createMessage(overrides: Partial<ParsedMessage> = {}): ParsedMessage {
     text: 'hello world',
     ts: '1234567890.123456',
     channel: 'C123',
+    channelName: undefined,
     threadTs: undefined,
     ...overrides,
   }
@@ -33,7 +34,18 @@ describe('MessageBus', () => {
         method: 'notifications/claude/channel',
         params: {
           content: 'hello world',
-          meta: { sender: 'stefan-dispatcher', channel: 'C123', ts: '1234567890.123456' },
+          meta: { sender: 'stefan-dispatcher', channel: 'C123', channel_id: 'C123', ts: '1234567890.123456' },
+        },
+      })
+    })
+
+    it('uses channelName for channel in meta when available', async () => {
+      await bus.push(createMessage({ channelName: 'team-alpha-collab' }))
+      expect(mockMcp.notification).toHaveBeenCalledWith({
+        method: 'notifications/claude/channel',
+        params: {
+          content: 'hello world',
+          meta: { sender: 'stefan-dispatcher', channel: 'team-alpha-collab', channel_id: 'C123', ts: '1234567890.123456' },
         },
       })
     })
@@ -47,6 +59,7 @@ describe('MessageBus', () => {
           meta: {
             sender: 'stefan-dispatcher',
             channel: 'C123',
+            channel_id: 'C123',
             ts: '1234567890.123456',
             thread_ts: '1234567890.000001',
           },

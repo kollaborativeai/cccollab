@@ -58,16 +58,21 @@ export class SubscriptionManager {
   }
 
   private async loadChannelList(): Promise<void> {
-    const result = await this.client.conversations.list({
-      types: 'public_channel',
-      exclude_archived: true,
-      limit: 1000,
-    })
-    for (const channel of result.channels ?? []) {
-      if (channel.id && channel.name) {
-        this.channelCache.set(channel.name, channel.id)
+    let cursor: string | undefined
+    do {
+      const result = await this.client.conversations.list({
+        types: 'public_channel',
+        exclude_archived: true,
+        limit: 1000,
+        cursor,
+      })
+      for (const channel of result.channels ?? []) {
+        if (channel.id && channel.name) {
+          this.channelCache.set(channel.name, channel.id)
+        }
       }
-    }
+      cursor = result.response_metadata?.next_cursor || undefined
+    } while (cursor)
     this.channelListLoaded = true
   }
 }

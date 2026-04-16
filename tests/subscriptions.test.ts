@@ -116,4 +116,70 @@ describe('SubscriptionManager', () => {
       await expect(sm.resolveChannelId('nonexistent')).rejects.toThrow('Channel "nonexistent" not found')
     })
   })
+
+  describe('loadChannelList pagination', () => {
+    it('fetches all pages when next_cursor is returned on first call', async () => {
+      const paginatedClient = {
+        conversations: {
+          join: vi.fn().mockResolvedValue({ ok: true, channel: { id: 'C789' } }),
+          list: vi
+            .fn()
+            .mockResolvedValueOnce({
+              ok: true,
+              channels: [{ id: 'C789', name: 'page-one-channel' }],
+              response_metadata: { next_cursor: 'cursor-abc' },
+            })
+            .mockResolvedValueOnce({
+              ok: true,
+              channels: [{ id: 'C999', name: 'page-two-channel' }],
+              response_metadata: { next_cursor: '' },
+            }),
+        },
+      }
+      const paginatedSm = new SubscriptionManager(paginatedClient as never)
+
+      expect(await paginatedSm.resolveChannelId('page-one-channel')).toBe('C789')
+      expect(await paginatedSm.resolveChannelId('page-two-channel')).toBe('C999')
+
+      expect(paginatedClient.conversations.list).toHaveBeenCalledTimes(2)
+      expect(paginatedClient.conversations.list).toHaveBeenNthCalledWith(1, {
+        types: 'public_channel',
+        exclude_archived: true,
+        limit: 1000,
+        cursor: undefined,
+      })
+      expect(paginatedClient.conversations.list).toHaveBeenNthCalledWith(2, {
+        types: 'public_channel',
+        exclude_archived: true,
+        limit: 1000,
+        cursor: 'cursor-abc',
+      })
+    })
+
+    it('caches channels from all pages after a single load', async () => {
+      const paginatedClient = {
+        conversations: {
+          join: vi.fn().mockResolvedValue({ ok: true }),
+          list: vi
+            .fn()
+            .mockResolvedValueOnce({
+              ok: true,
+              channels: [{ id: 'CA01', name: 'first-page' }],
+              response_metadata: { next_cursor: 'next' },
+            })
+            .mockResolvedValueOnce({
+              ok: true,
+              channels: [{ id: 'CA02', name: 'second-page' }],
+              response_metadata: { next_cursor: undefined },
+            }),
+        },
+      }
+      const paginatedSm = new SubscriptionManager(paginatedClient as never)
+
+      await paginatedSm.resolveChannelId('first-page')
+      // second resolve should use cache - no additional list calls
+      await paginatedSm.resolveChannelId('second-page')
+      expect(paginatedClient.conversations.list).toHaveBeenCalledTimes(2)
+    })
+  })
 })
