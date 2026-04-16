@@ -165,8 +165,12 @@ export class SocketModeListener {
   private async handleLocalEvent(event: BrokerLocalEvent): Promise<void> {
     switch (event.type) {
       case 'topic_created': {
-        // Always push topic creation events so all sessions see new topics
+        // Push topic creation to other sessions (skip the creator)
         if (!event.topic) return
+        if (event.topic.creator && this.session.isExactSelf(event.topic.creator)) {
+          this.log(`DROPPED: self topic_created from ${event.topic.creator}`)
+          return
+        }
         const msg: ParsedMessage = {
           sender: event.topic.creator,
           text: `New local topic: "${event.topic.topic}"`,

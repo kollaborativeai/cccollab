@@ -215,16 +215,16 @@ describe('SocketModeListener', () => {
   })
 
   describe('local event handling', () => {
-    it('pushes topic_created events to the bus', async () => {
+    it('pushes topic_created events from other sessions to the bus', async () => {
       const event: BrokerLocalEvent = {
         source: 'local',
         type: 'topic_created',
-        topic: { id: 'uuid-1', topic: 'Auth discussion', creator: 'architect' },
+        topic: { id: 'uuid-1', topic: 'Auth discussion', creator: 'tester' },
       }
       listener.processLocalEvent(event)
       await vi.waitFor(() => {
         expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-          sender: 'architect',
+          sender: 'tester',
           text: 'New local topic: "Auth discussion"',
           channel: 'local',
           channelName: 'local',
