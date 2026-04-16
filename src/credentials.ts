@@ -3,7 +3,6 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 const CONFIG_DIR = path.join(homedir(), '.config', 'claudecode-slack-collab')
-const CREDENTIALS_FILE = path.join(CONFIG_DIR, 'credentials.json')
 
 export interface StoredCredentials {
   botToken: string
@@ -14,9 +13,15 @@ export interface StoredCredentials {
   userName: string
 }
 
+export function getCredentialsPath(): string {
+  const profile = process.env.SLACK_COLLAB_PROFILE?.trim()
+  const filename = profile ? `credentials-${profile}.json` : 'credentials.json'
+  return path.join(CONFIG_DIR, filename)
+}
+
 export function loadCredentials(): StoredCredentials | null {
   try {
-    const data = readFileSync(CREDENTIALS_FILE, 'utf-8')
+    const data = readFileSync(getCredentialsPath(), 'utf-8')
     return JSON.parse(data) as StoredCredentials
   } catch {
     return null
@@ -25,9 +30,5 @@ export function loadCredentials(): StoredCredentials | null {
 
 export function saveCredentials(creds: StoredCredentials): void {
   mkdirSync(CONFIG_DIR, { recursive: true })
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 })
-}
-
-export function getCredentialsPath(): string {
-  return CREDENTIALS_FILE
+  writeFileSync(getCredentialsPath(), JSON.stringify(creds, null, 2), { mode: 0o600 })
 }

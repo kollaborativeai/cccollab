@@ -7,6 +7,7 @@ export interface Config {
   slackUserToken: string
   username: string
   brokerPort: number
+  defaultChannel: string | undefined
   authenticated: true
 }
 
@@ -23,12 +24,16 @@ export function loadConfig(): AppConfig {
     return { authenticated: false }
   }
 
+  const defaultChannelRaw = process.env.DEFAULT_SLACK_CHANNEL?.trim()
+  const defaultChannel = defaultChannelRaw ? defaultChannelRaw.replace(/^#/, '') : undefined
+
   return {
     slackBotToken: creds.botToken,
     slackAppToken: SLACK_APP_TOKEN,
     slackUserToken: creds.userToken,
     username: creds.userName,
     brokerPort: BROKER_PORT,
+    defaultChannel,
     authenticated: true,
   }
 }
