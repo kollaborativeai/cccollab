@@ -52,14 +52,15 @@ describe('Integration: end-to-end message flow', () => {
 
     await mockWeb.chat.postMessage({ channel: 'C123', thread_ts: '600.001', text: session.fmt('Sure, on it') })
     expect(mockWeb.chat.postMessage).toHaveBeenCalledWith({
-      channel: 'C123', thread_ts: '600.001', text: '*[stefan | dispatcher]*: Sure, on it',
+      channel: 'C123', thread_ts: '600.001', text: '*[stefan]*: Sure, on it',
     })
   })
 
   it('session identity parsing round-trips correctly', () => {
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
     const parsed = SessionManager.parse(session.fmt('hello world'))
-    expect(parsed).toEqual({ sender: 'stefan | dispatcher', text: 'hello world' })
+    // fmt uses displayName (username when no role set), so sender is just 'stefan'
+    expect(parsed).toEqual({ sender: 'stefan', text: 'hello world' })
   })
 
   it('human messages return null from parse', () => {

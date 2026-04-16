@@ -177,14 +177,14 @@ describe('Topic Tools', () => {
         deps.context.setTopic('300.100', 'Auth refactor')
         await handleTopicTool('send_message', { text: 'Here is my review' }, deps)
         expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
-          channel: 'C123', thread_ts: '300.100', text: '*[stefan | dispatcher]*: Here is my review',
+          channel: 'C123', thread_ts: '300.100', text: '*[stefan]*: Here is my review',
         })
       })
 
       it('sends to channel when no topic is set', async () => {
         const result = await handleTopicTool('send_message', { text: 'Hello channel' }, deps)
         expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
-          channel: 'C123', text: '*[stefan | dispatcher]*: Hello channel',
+          channel: 'C123', text: '*[stefan]*: Hello channel',
         })
         expect(result).toContain('#team-alpha-collab')
       })

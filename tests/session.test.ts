@@ -38,16 +38,29 @@ describe('SessionManager', () => {
     })
   })
 
-  describe('fmt', () => {
-    it('prefixes text with session identity', () => {
+  describe('displayName', () => {
+    it('falls back to username when no role set', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.fmt('hello world')).toBe('*[stefan | dispatcher]*: hello world')
+      expect(sm.displayName).toBe('stefan')
     })
 
-    it('includes role in prefix when set', () => {
+    it('returns role when role is set', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setRole('architect')
+      expect(sm.displayName).toBe('architect')
+    })
+  })
+
+  describe('fmt', () => {
+    it('prefixes text with displayName (username fallback when no role)', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      expect(sm.fmt('hello world')).toBe('*[stefan]*: hello world')
+    })
+
+    it('includes only role in prefix when role is set', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
       sm.setRole('backend')
-      expect(sm.fmt('hello')).toBe('*[stefan | dispatcher | backend]*: hello')
+      expect(sm.fmt('hello')).toBe('*[backend]*: hello')
     })
   })
 
@@ -80,10 +93,21 @@ describe('SessionManager', () => {
   })
 
   describe('isSelf', () => {
-    it('returns true when sender matches session name', () => {
+    it('returns true when sender matches full session name', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
       sm.setRole('architect')
       expect(sm.isSelf('stefan | dispatcher | architect')).toBe(true)
+    })
+
+    it('returns true when sender matches displayName (role)', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setRole('architect')
+      expect(sm.isSelf('architect')).toBe(true)
+    })
+
+    it('returns true when sender matches displayName (username fallback)', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      expect(sm.isSelf('stefan')).toBe(true)
     })
 
     it('returns false for different session names', () => {
