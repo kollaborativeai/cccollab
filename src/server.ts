@@ -100,7 +100,6 @@ async function startAuthenticated(config: Config) {
 
   const session = new SessionManager({ username: config.username, cwd: process.cwd(), worktreeName })
   const subscriptions = new SubscriptionManager(botClient)
-  const registryChannelId = await subscriptions.resolveChannelId(config.registryChannel)
   const context = new ActiveContext()
   context.joinLocalChannel()
 
@@ -151,7 +150,7 @@ async function startAuthenticated(config: Config) {
   const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
   const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
 
-  const identityDeps = { session, botClient, registryChannelId }
+  const identityDeps = { session }
   const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
   const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort: config.brokerPort }
 

@@ -39,7 +39,6 @@ describe('loadConfig', () => {
     expect(config.slackBotToken).toBe('xoxb-test-bot-token')
     expect(config.slackUserToken).toBe('xoxp-test-user-token')
     expect(config.username).toBe('stefan')
-    expect(config.registryChannel).toBe('ai-collab-registry')
     expect(config.brokerPort).toBe(7850)
   })
 

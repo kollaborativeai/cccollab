@@ -6,4 +6,3 @@ export const SLACK_APP_TOKEN = 'xapp-1-A0AT2SKA69Z-10927298812130-61bbf9ab2e1698
 export const OAUTH_REDIRECT_URI = 'http://localhost:9876/oauth/callback'
 export const OAUTH_PORT = 9876
 export const BROKER_PORT = 7850
-export const REGISTRY_CHANNEL = 'ai-collab-registry'
