@@ -1,32 +1,50 @@
 export class ActiveContext {
   private channelId: string | undefined
   private channelName: string | undefined
-  private threadTs: string | undefined
-  private topicName: string | undefined
+  private activeThreadTs: string | undefined
+  private activeTopicName: string | undefined
+  private readonly joinedTopics = new Map<string, string>() // threadTs -> topicName
 
   setChannel(channelId: string, channelName: string): void {
     this.channelId = channelId
     this.channelName = channelName
-    // Changing channel clears active topic
-    this.threadTs = undefined
-    this.topicName = undefined
+    this.activeThreadTs = undefined
+    this.activeTopicName = undefined
+    this.joinedTopics.clear()
   }
 
-  setTopic(threadTs: string, topicName: string): void {
-    this.threadTs = threadTs
-    this.topicName = topicName
+  joinTopic(threadTs: string, topicName: string): void {
+    this.joinedTopics.set(threadTs, topicName)
+    this.activeThreadTs = threadTs
+    this.activeTopicName = topicName
+  }
+
+  leaveTopic(threadTs: string): void {
+    this.joinedTopics.delete(threadTs)
+    if (this.activeThreadTs === threadTs) {
+      this.activeThreadTs = undefined
+      this.activeTopicName = undefined
+    }
   }
 
   clearChannel(): void {
     this.channelId = undefined
     this.channelName = undefined
-    this.threadTs = undefined
-    this.topicName = undefined
+    this.activeThreadTs = undefined
+    this.activeTopicName = undefined
+    this.joinedTopics.clear()
   }
 
   clearTopic(): void {
-    this.threadTs = undefined
-    this.topicName = undefined
+    if (this.activeThreadTs) {
+      this.joinedTopics.delete(this.activeThreadTs)
+    }
+    this.activeThreadTs = undefined
+    this.activeTopicName = undefined
+  }
+
+  isTopicJoined(threadTs: string): boolean {
+    return this.joinedTopics.has(threadTs)
   }
 
   getChannelId(): string {
@@ -40,14 +58,14 @@ export class ActiveContext {
   }
 
   getThreadTs(): string {
-    if (!this.threadTs) throw new Error('No active topic. Use join_topic or start_topic first.')
-    return this.threadTs
+    if (!this.activeThreadTs) throw new Error('No active topic. Use join_topic or start_topic first.')
+    return this.activeThreadTs
   }
 
   getTopicName(): string | undefined {
-    return this.topicName
+    return this.activeTopicName
   }
 
   hasChannel(): boolean { return this.channelId !== undefined }
-  hasTopic(): boolean { return this.threadTs !== undefined }
+  hasTopic(): boolean { return this.activeThreadTs !== undefined }
 }

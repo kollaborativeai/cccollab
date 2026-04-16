@@ -179,7 +179,7 @@ describe('Topic Tools', () => {
 
     describe('send_message', () => {
       it('sends to active topic thread when topic is set', async () => {
-        deps.context.setTopic('300.100', 'Auth refactor')
+        deps.context.joinTopic('300.100', 'Auth refactor')
         await handleTopicTool('send_message', { text: 'Here is my review' }, deps)
         expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123', thread_ts: '300.100', text: '*[stefan]*: Here is my review',
@@ -201,7 +201,7 @@ describe('Topic Tools', () => {
     })
 
     describe('resolve_topic', () => {
-      beforeEach(() => { deps.context.setTopic('300.100', 'Auth refactor') })
+      beforeEach(() => { deps.context.joinTopic('300.100', 'Auth refactor') })
 
       it('updates parent message emoji and posts resolution', async () => {
         await handleTopicTool('resolve_topic', { summary: 'Agreed on JWT approach' }, deps)

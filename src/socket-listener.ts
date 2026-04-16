@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs'
 import type { WebClient } from '@slack/web-api'
 import type { MessageBus } from './message-bus.js'
 import type { SubscriptionManager } from './subscriptions.js'
+import type { ActiveContext } from './context.js'
 import { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 
@@ -14,7 +15,9 @@ interface SocketModeListenerOptions {
   messageBus: MessageBus
   subscriptionManager: SubscriptionManager
   sessionManager: SessionManager
+  context: ActiveContext
   botUserId: string
+  selfUserId: string
   webClient: WebClient
 }
 
@@ -38,7 +41,9 @@ export class SocketModeListener {
   private readonly bus: MessageBus
   private readonly subs: SubscriptionManager
   private readonly session: SessionManager
+  private readonly context: ActiveContext
   private readonly botUserId: string
+  private readonly selfUserId: string
   private readonly webClient: WebClient
   private readonly userNameCache = new Map<string, string>()
   private currentRequest: http.ClientRequest | null = null
@@ -49,7 +54,9 @@ export class SocketModeListener {
     this.bus = options.messageBus
     this.subs = options.subscriptionManager
     this.session = options.sessionManager
+    this.context = options.context
     this.botUserId = options.botUserId
+    this.selfUserId = options.selfUserId
     this.webClient = options.webClient
   }
 
@@ -140,9 +147,16 @@ export class SocketModeListener {
       return
     }
 
+    // Thread-level filtering: only receive messages from topics we've joined
+    // Top-level messages (no thread_ts) always come through (broadcasts, new topics)
+    if (event.thread_ts && !this.context.isTopicJoined(event.thread_ts)) {
+      this.log(`DROPPED: thread ${event.thread_ts} not joined`)
+      return
+    }
+
     const text = event.text ?? ''
     const parsed = SessionManager.parse(text)
-    const isFromBot = event.user === this.botUserId
+    const isFromSelf = event.user === this.botUserId || event.user === this.selfUserId
 
     let sender: string
     let messageText: string
@@ -156,8 +170,8 @@ export class SocketModeListener {
       this.log(`ROUTING: session message from ${parsed.sender}`)
       sender = parsed.sender
       messageText = parsed.text
-    } else if (isFromBot) {
-      // Bot system message (topic headers, join announcements) - skip
+    } else if (isFromSelf) {
+      // System message from bot or own user token (topic headers, etc.) - skip
       this.log(`DROPPED: bot system message`)
       return
     } else {

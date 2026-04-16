@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { SocketModeListener, type BrokerEvent } from '../src/socket-listener.js'
 import { SessionManager } from '../src/session.js'
+import { ActiveContext } from '../src/context.js'
 
 function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
@@ -51,13 +52,18 @@ describe('SocketModeListener', () => {
     mockSubs = createMockSubscriptionManager()
     mockWebClient = createMockWebClient({ U_HUMAN: 'Stefan' })
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    const context = new ActiveContext()
+    context.setChannel('C123', 'team-alpha-collab')
+    context.joinTopic('111.222', 'Test topic')
 
     listener = new SocketModeListener({
       brokerUrl: 'http://localhost:7850',
       messageBus: mockBus as never,
       subscriptionManager: mockSubs as never,
       sessionManager: session,
+      context,
       botUserId: 'U_BOT',
+      selfUserId: 'U_SELF',
       webClient: mockWebClient as never,
     })
   })
@@ -118,6 +124,42 @@ describe('SocketModeListener', () => {
     }))
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('drops own user token messages (no session prefix)', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: ':large_green_circle: My topic', ts: '111.558', user: 'U_SELF',
+    }))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('drops messages from threads not joined', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[other]*: hello', ts: '111.559', thread_ts: '999.999', user: 'U_OTHER',
+    }))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('allows messages from joined threads', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: '*[other]*: hello', ts: '111.560', thread_ts: '111.222', user: 'U_OTHER',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'other', text: 'hello' }),
+      )
+    })
+  })
+
+  it('allows top-level messages (no thread_ts)', async () => {
+    listener.processEvent(makeEvent({
+      channel: 'C123', text: 'hey team status?', ts: '111.561', user: 'U_HUMAN',
+    }))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalled()
+    })
   })
 
   it('drops messages with ignored subtypes', async () => {

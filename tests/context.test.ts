@@ -25,7 +25,7 @@ describe('ActiveContext', () => {
 
     it('clears active topic when channel changes', () => {
       ctx.setChannel('C123', 'team-alpha')
-      ctx.setTopic('300.100', 'Auth refactor')
+      ctx.joinTopic('300.100', 'Auth refactor')
       expect(ctx.hasTopic()).toBe(true)
 
       ctx.setChannel('C456', 'team-beta')
@@ -35,10 +35,10 @@ describe('ActiveContext', () => {
     })
   })
 
-  describe('setTopic', () => {
+  describe('joinTopic', () => {
     it('sets topic after channel is set', () => {
       ctx.setChannel('C123', 'team-alpha')
-      ctx.setTopic('300.100', 'Auth refactor')
+      ctx.joinTopic('300.100', 'Auth refactor')
       expect(ctx.hasTopic()).toBe(true)
       expect(ctx.getThreadTs()).toBe('300.100')
       expect(ctx.getTopicName()).toBe('Auth refactor')
@@ -48,7 +48,7 @@ describe('ActiveContext', () => {
   describe('clearChannel', () => {
     it('clears channel and topic', () => {
       ctx.setChannel('C123', 'team-alpha')
-      ctx.setTopic('300.100', 'Auth refactor')
+      ctx.joinTopic('300.100', 'Auth refactor')
       ctx.clearChannel()
       expect(ctx.hasChannel()).toBe(false)
       expect(ctx.hasTopic()).toBe(false)
@@ -60,7 +60,7 @@ describe('ActiveContext', () => {
   describe('clearTopic', () => {
     it('clears topic but keeps channel', () => {
       ctx.setChannel('C123', 'team-alpha')
-      ctx.setTopic('300.100', 'Auth refactor')
+      ctx.joinTopic('300.100', 'Auth refactor')
       ctx.clearTopic()
       expect(ctx.hasChannel()).toBe(true)
       expect(ctx.hasTopic()).toBe(false)
