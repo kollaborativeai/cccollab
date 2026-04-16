@@ -105,6 +105,7 @@ async function startAuthenticated(config: Config) {
   const subscriptions = new SubscriptionManager(botClient)
   const registryChannelId = await subscriptions.resolveChannelId(config.registryChannel)
   const context = new ActiveContext()
+  context.joinLocalChannel()
 
   // Ensure broker is running
   await ensureBroker(config.slackAppToken)

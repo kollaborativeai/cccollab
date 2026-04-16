@@ -11,7 +11,16 @@ export class ActiveContext {
   private activeThreadTs: string | undefined
   private activeTopicName: string | undefined
   private activeTopicSource: TopicSource | undefined
+  private localJoined = false
   private readonly joinedTopics = new Map<string, JoinedTopic>() // threadTs/topicId -> { topicName, source }
+
+  joinLocalChannel(): void {
+    this.localJoined = true
+  }
+
+  isLocalJoined(): boolean {
+    return this.localJoined
+  }
 
   setChannel(channelId: string, channelName: string): void {
     this.channelId = channelId
@@ -19,7 +28,10 @@ export class ActiveContext {
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
     this.activeTopicSource = undefined
-    this.joinedTopics.clear()
+    // Clear Slack topics but keep local topics
+    for (const [key, topic] of this.joinedTopics) {
+      if (topic.source === 'slack') this.joinedTopics.delete(key)
+    }
   }
 
   joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack'): void {
@@ -44,7 +56,10 @@ export class ActiveContext {
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
     this.activeTopicSource = undefined
-    this.joinedTopics.clear()
+    // Clear Slack topics but keep local topics
+    for (const [key, topic] of this.joinedTopics) {
+      if (topic.source === 'slack') this.joinedTopics.delete(key)
+    }
   }
 
   clearTopic(): void {
