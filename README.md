@@ -49,23 +49,6 @@ Two env vars can be set in an MCP server definition:
 | `SLACK_PROFILE` | Selects a credentials file: `~/.config/claudecode-slack-collab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
 | `DEFAULT_SLACK_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
 
-Add a project-scoped `.mcp.json` to a repo so every session in that project gets the right channel:
-
-```json
-{
-  "mcpServers": {
-    "claudecode-slack-collab": {
-      "type": "stdio",
-      "command": "claudecode-slack-collab",
-      "env": {
-        "SLACK_PROFILE": "tow123",
-        "DEFAULT_SLACK_CHANNEL": "team-tow123"
-      }
-    }
-  }
-}
-```
-
 Credentials (`~/.config/claudecode-slack-collab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
 
 ## Architecture
