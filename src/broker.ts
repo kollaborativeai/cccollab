@@ -1,6 +1,7 @@
 #!/usr/bin/env npx tsx
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { writeFileSync, appendFileSync } from 'node:fs'
+import crypto from 'node:crypto'
 import { SocketModeClient } from '@slack/socket-mode'
 import { BROKER_PORT } from './constants.js'
 
@@ -27,6 +28,47 @@ function broadcast(data: string): void {
     }
   }
 }
+
+// --- Local topic storage ---
+
+interface LocalTopicMessage {
+  sender: string
+  text: string
+  ts: string
+}
+
+interface LocalTopic {
+  id: string
+  topic: string
+  creator: string
+  state: 'active' | 'deactivated' | 'resolved'
+  createdAt: string
+  messages: LocalTopicMessage[]
+  joinedSessions: Set<string>
+}
+
+const topics = new Map<string, LocalTopic>()
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => chunks.push(chunk))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+    req.on('error', reject)
+  })
+}
+
+function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+
+function parseUrl(url: string): { pathname: string; searchParams: URLSearchParams } {
+  const parsed = new URL(url, 'http://localhost')
+  return { pathname: parsed.pathname, searchParams: parsed.searchParams }
+}
+
+// --- Slack Socket Mode ---
 
 const appToken = process.env.SLACK_APP_TOKEN
 if (!appToken) {
@@ -55,14 +97,25 @@ socketClient.on('message', ({ event, ack }) => {
   broadcast(data)
 })
 
+// --- Route matching helpers ---
+
+const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
+const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|resolve|deactivate|activate)$/
+
+// --- HTTP server ---
+
 const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-  if (req.url === '/health' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, connections: clients.size }))
+  const { pathname, searchParams } = parseUrl(req.url ?? '/')
+  const method = req.method ?? 'GET'
+
+  // Health
+  if (pathname === '/health' && method === 'GET') {
+    jsonResponse(res, 200, { ok: true, connections: clients.size })
     return
   }
 
-  if (req.url === '/events' && req.method === 'GET') {
+  // SSE events stream
+  if (pathname === '/events' && method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -77,6 +130,198 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       clients.delete(sseRes)
       log(`SSE client disconnected (total: ${clients.size})`)
     })
+    return
+  }
+
+  // POST /broadcast - broadcast a local message (not in a topic)
+  if (pathname === '/broadcast' && method === 'POST') {
+    void (async () => {
+      try {
+        const body = JSON.parse(await readBody(req)) as { text?: string; sender?: string }
+        if (!body.text || !body.sender) {
+          jsonResponse(res, 400, { error: 'text and sender are required' })
+          return
+        }
+        const event = {
+          source: 'local' as const,
+          type: 'broadcast' as const,
+          sender: body.sender,
+          text: body.text,
+          ts: new Date().toISOString(),
+        }
+        broadcast(JSON.stringify(event))
+        log(`LOCAL BROADCAST: ${body.sender}: ${body.text}`)
+        jsonResponse(res, 200, { ok: true })
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
+    return
+  }
+
+  // POST /topics - create a topic
+  if (pathname === '/topics' && method === 'POST') {
+    void (async () => {
+      try {
+        const body = JSON.parse(await readBody(req)) as { topic?: string; creator?: string }
+        if (!body.topic || !body.creator) {
+          jsonResponse(res, 400, { error: 'topic and creator are required' })
+          return
+        }
+        const id = crypto.randomUUID()
+        const createdAt = new Date().toISOString()
+        const localTopic: LocalTopic = {
+          id,
+          topic: body.topic,
+          creator: body.creator,
+          state: 'active',
+          createdAt,
+          messages: [],
+          joinedSessions: new Set(),
+        }
+        topics.set(id, localTopic)
+        const topicData = { id, topic: body.topic, creator: body.creator, state: 'active', createdAt }
+        const event = { source: 'local' as const, type: 'topic_created' as const, topic: topicData }
+        broadcast(JSON.stringify(event))
+        log(`LOCAL TOPIC CREATED: ${id} "${body.topic}" by ${body.creator}`)
+        jsonResponse(res, 200, topicData)
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
+    return
+  }
+
+  // GET /topics - list topics
+  if (pathname === '/topics' && method === 'GET') {
+    const includeResolved = searchParams.get('include_resolved') === 'true'
+    const includeDeactivated = searchParams.get('include_deactivated') === 'true'
+    const result: Array<{ id: string; topic: string; creator: string; state: string; createdAt: string; messageCount: number }> = []
+    for (const t of topics.values()) {
+      if (!includeResolved && t.state === 'resolved') continue
+      if (!includeDeactivated && t.state === 'deactivated') continue
+      result.push({ id: t.id, topic: t.topic, creator: t.creator, state: t.state, createdAt: t.createdAt, messageCount: t.messages.length })
+    }
+    jsonResponse(res, 200, { topics: result })
+    return
+  }
+
+  // GET /topics/:id - get topic with messages
+  const getMatch = TOPIC_ID_ROUTE.exec(pathname)
+  if (getMatch && method === 'GET') {
+    const id = getMatch[1]!
+    const t = topics.get(id)
+    if (!t) {
+      jsonResponse(res, 404, { error: 'topic not found' })
+      return
+    }
+    jsonResponse(res, 200, {
+      topic: { id: t.id, topic: t.topic, creator: t.creator, state: t.state, createdAt: t.createdAt },
+      messages: t.messages,
+    })
+    return
+  }
+
+  // Topic action routes: POST /topics/:id/(messages|join|resolve|deactivate|activate)
+  const actionMatch = TOPIC_ACTION_ROUTE.exec(pathname)
+  if (actionMatch && method === 'POST') {
+    const id = actionMatch[1]!
+    const action = actionMatch[2]!
+
+    void (async () => {
+      const t = topics.get(id)
+      if (!t) {
+        jsonResponse(res, 404, { error: 'topic not found' })
+        return
+      }
+
+      try {
+        const rawBody = await readBody(req)
+        const body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {}
+
+        switch (action) {
+          case 'messages': {
+            const text = body.text as string | undefined
+            const sender = body.sender as string | undefined
+            if (!text || !sender) {
+              jsonResponse(res, 400, { error: 'text and sender are required' })
+              return
+            }
+            const ts = new Date().toISOString()
+            t.messages.push({ sender, text, ts })
+            const event = {
+              source: 'local' as const,
+              type: 'message' as const,
+              topicId: id,
+              sender,
+              text,
+              ts,
+            }
+            broadcast(JSON.stringify(event))
+            log(`LOCAL MESSAGE in ${id}: ${sender}: ${text}`)
+            jsonResponse(res, 200, { ok: true })
+            return
+          }
+          case 'join': {
+            const sessionId = body.sessionId as string | undefined
+            if (!sessionId) {
+              jsonResponse(res, 400, { error: 'sessionId is required' })
+              return
+            }
+            t.joinedSessions.add(sessionId)
+            log(`LOCAL JOIN: session ${sessionId} joined topic ${id}`)
+            jsonResponse(res, 200, { ok: true, messages: t.messages })
+            return
+          }
+          case 'resolve': {
+            const summary = body.summary as string | undefined
+            const resolver = body.resolver as string | undefined
+            if (!summary) {
+              jsonResponse(res, 400, { error: 'summary is required' })
+              return
+            }
+            t.state = 'resolved'
+            const event = {
+              source: 'local' as const,
+              type: 'topic_resolved' as const,
+              topicId: id,
+              summary,
+              resolver: resolver ?? 'unknown',
+            }
+            broadcast(JSON.stringify(event))
+            log(`LOCAL TOPIC RESOLVED: ${id} by ${resolver ?? 'unknown'}`)
+            jsonResponse(res, 200, { ok: true })
+            return
+          }
+          case 'deactivate': {
+            t.state = 'deactivated'
+            const event = {
+              source: 'local' as const,
+              type: 'topic_deactivated' as const,
+              topicId: id,
+            }
+            broadcast(JSON.stringify(event))
+            log(`LOCAL TOPIC DEACTIVATED: ${id}`)
+            jsonResponse(res, 200, { ok: true })
+            return
+          }
+          case 'activate': {
+            t.state = 'active'
+            const event = {
+              source: 'local' as const,
+              type: 'topic_activated' as const,
+              topicId: id,
+            }
+            broadcast(JSON.stringify(event))
+            log(`LOCAL TOPIC ACTIVATED: ${id}`)
+            jsonResponse(res, 200, { ok: true })
+            return
+          }
+        }
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
     return
   }
 

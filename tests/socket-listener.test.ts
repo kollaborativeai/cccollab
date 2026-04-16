@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SocketModeListener, type BrokerEvent } from '../src/socket-listener.js'
+import { SocketModeListener, type BrokerEvent, type BrokerLocalEvent } from '../src/socket-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
 
@@ -46,15 +46,16 @@ describe('SocketModeListener', () => {
   let mockBus: ReturnType<typeof createMockMessageBus>
   let mockSubs: ReturnType<typeof createMockSubscriptionManager>
   let mockWebClient: ReturnType<typeof createMockWebClient>
+  let context: ActiveContext
 
   beforeEach(() => {
     mockBus = createMockMessageBus()
     mockSubs = createMockSubscriptionManager()
     mockWebClient = createMockWebClient({ U_HUMAN: 'Stefan' })
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-    const context = new ActiveContext()
+    context = new ActiveContext()
     context.setChannel('C123', 'team-alpha-collab')
-    context.joinTopic('111.222', 'Test topic')
+    context.joinTopic('111.222', 'Test topic', 'slack')
 
     listener = new SocketModeListener({
       brokerUrl: 'http://localhost:7850',
@@ -210,6 +211,155 @@ describe('SocketModeListener', () => {
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({ sender: 'human:U_UNKNOWN' }),
       )
+    })
+  })
+
+  describe('local event handling', () => {
+    it('pushes topic_created events to the bus', async () => {
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'topic_created',
+        topic: { id: 'uuid-1', topic: 'Auth discussion', creator: 'architect' },
+      }
+      listener.processLocalEvent(event)
+      await vi.waitFor(() => {
+        expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
+          sender: 'architect',
+          text: 'New local topic: "Auth discussion"',
+          channel: 'local',
+          channelName: 'local',
+        }))
+      })
+    })
+
+    it('pushes local message events for joined topics', async () => {
+      context.joinTopic('uuid-topic', 'Test local', 'local')
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'message',
+        topicId: 'uuid-topic',
+        sender: 'bob',
+        text: 'Working on it',
+        ts: '2026-01-01T00:00:01Z',
+      }
+      listener.processLocalEvent(event)
+      await vi.waitFor(() => {
+        expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
+          sender: 'bob',
+          text: 'Working on it',
+          channel: 'local',
+          threadTs: 'uuid-topic',
+        }))
+      })
+    })
+
+    it('drops local message events for topics not joined', async () => {
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'message',
+        topicId: 'uuid-not-joined',
+        sender: 'bob',
+        text: 'Should not see this',
+      }
+      listener.processLocalEvent(event)
+      await new Promise<void>((r) => setTimeout(r, 50))
+      expect(mockBus.push).not.toHaveBeenCalled()
+    })
+
+    it('drops self local messages', async () => {
+      context.joinTopic('uuid-self', 'Self topic', 'local')
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'message',
+        topicId: 'uuid-self',
+        sender: 'stefan',
+        text: 'My own message',
+      }
+      listener.processLocalEvent(event)
+      await new Promise<void>((r) => setTimeout(r, 50))
+      expect(mockBus.push).not.toHaveBeenCalled()
+    })
+
+    it('pushes topic_resolved events for joined topics', async () => {
+      context.joinTopic('uuid-resolved', 'Resolved topic', 'local')
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'topic_resolved',
+        topicId: 'uuid-resolved',
+        summary: 'Decided on approach A',
+        resolver: 'architect',
+      }
+      listener.processLocalEvent(event)
+      await vi.waitFor(() => {
+        expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
+          sender: 'architect',
+          text: 'Topic resolved: Decided on approach A',
+          channel: 'local',
+          threadTs: 'uuid-resolved',
+        }))
+      })
+    })
+
+    it('drops topic_resolved events for topics not joined', async () => {
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'topic_resolved',
+        topicId: 'uuid-not-joined',
+        summary: 'Done',
+      }
+      listener.processLocalEvent(event)
+      await new Promise<void>((r) => setTimeout(r, 50))
+      expect(mockBus.push).not.toHaveBeenCalled()
+    })
+
+    it('pushes topic_deactivated events for joined topics', async () => {
+      context.joinTopic('uuid-deact', 'Deactivated topic', 'local')
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'topic_deactivated',
+        topicId: 'uuid-deact',
+      }
+      listener.processLocalEvent(event)
+      await vi.waitFor(() => {
+        expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
+          sender: 'system',
+          text: 'Topic deactivated',
+          channel: 'local',
+          threadTs: 'uuid-deact',
+        }))
+      })
+    })
+
+    it('pushes broadcast events to the bus', async () => {
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'broadcast',
+        sender: 'architect',
+        text: 'Heads up everyone',
+        ts: '2026-01-01T00:00:00Z',
+      }
+      listener.processLocalEvent(event)
+      await vi.waitFor(() => {
+        expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
+          sender: 'architect',
+          text: 'Heads up everyone',
+          channel: 'local',
+          channelName: 'local',
+          threadTs: undefined,
+        }))
+      })
+    })
+
+    it('drops self broadcast events', async () => {
+      const event: BrokerLocalEvent = {
+        source: 'local',
+        type: 'broadcast',
+        sender: 'stefan',
+        text: 'My own broadcast',
+      }
+      listener.processLocalEvent(event)
+      await new Promise<void>((r) => setTimeout(r, 50))
+      expect(mockBus.push).not.toHaveBeenCalled()
     })
   })
 })

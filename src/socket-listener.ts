@@ -30,11 +30,27 @@ export interface BrokerEvent {
   subtype: string | null
 }
 
+export interface BrokerLocalEvent {
+  source: 'local'
+  type: 'message' | 'topic_created' | 'topic_resolved' | 'topic_deactivated' | 'topic_activated' | 'broadcast'
+  topicId?: string
+  topic?: { id: string; topic: string; creator: string; state?: string; createdAt?: string }
+  sender?: string
+  text?: string
+  summary?: string
+  resolver?: string
+  ts?: string
+}
+
 const IGNORED_SUBTYPES = new Set([
   'channel_join', 'channel_leave', 'channel_topic', 'channel_purpose',
   'channel_name', 'channel_archive', 'channel_unarchive',
   'bot_message', 'me_message', 'message_changed', 'message_deleted', 'thread_broadcast',
 ])
+
+function isLocalEvent(data: unknown): data is BrokerLocalEvent {
+  return typeof data === 'object' && data !== null && (data as Record<string, unknown>).source === 'local'
+}
 
 export class SocketModeListener {
   private readonly brokerUrl: string
@@ -91,8 +107,13 @@ export class SocketModeListener {
           if (line.startsWith('data: ')) {
             const json = line.slice(6)
             try {
-              const event = JSON.parse(json) as BrokerEvent
-              this.processEvent(event)
+              const parsed = JSON.parse(json) as Record<string, unknown>
+              if (isLocalEvent(parsed)) {
+                this.processLocalEvent(parsed)
+              } else {
+                const event = parsed as unknown as BrokerEvent
+                this.processEvent(event)
+              }
             } catch {
               this.log(`SSE parse error: ${json}`)
             }
@@ -132,9 +153,128 @@ export class SocketModeListener {
     })
   }
 
+  processLocalEvent(event: BrokerLocalEvent): void {
+    this.log(`LOCAL EVENT: type=${event.type} topicId=${event.topicId ?? 'none'} sender=${event.sender ?? 'none'}`)
+    this.handleLocalEvent(event).catch((err) => {
+      this.log(`LOCAL HANDLE ERROR: ${err}`)
+    })
+  }
+
   private log(msg: string): void {
     const line = `[${new Date().toISOString()}] ${msg}\n`
     appendFileSync(LOG_FILE, line)
+  }
+
+  private async handleLocalEvent(event: BrokerLocalEvent): Promise<void> {
+    switch (event.type) {
+      case 'topic_created': {
+        // Always push topic creation events so all sessions see new topics
+        if (!event.topic) return
+        const msg: ParsedMessage = {
+          sender: event.topic.creator,
+          text: `New local topic: "${event.topic.topic}"`,
+          ts: event.topic.createdAt ?? new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: undefined,
+        }
+        this.log(`PUSHING local topic_created to Claude: "${event.topic.topic}"`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'message': {
+        // Only push if this session has joined the topic
+        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
+          this.log(`DROPPED local message: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
+        // Skip self-messages
+        if (event.sender && this.session.isSelf(event.sender)) {
+          this.log(`DROPPED: self local message from ${event.sender}`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: event.sender ?? 'unknown',
+          text: event.text ?? '',
+          ts: event.ts ?? new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: event.topicId,
+        }
+        this.log(`PUSHING local message to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'topic_resolved': {
+        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
+          this.log(`DROPPED local topic_resolved: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: event.resolver ?? 'unknown',
+          text: `Topic resolved: ${event.summary ?? '(no summary)'}`,
+          ts: new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: event.topicId,
+        }
+        this.log(`PUSHING local topic_resolved to Claude`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'topic_deactivated': {
+        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
+          this.log(`DROPPED local topic_deactivated: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: 'system',
+          text: 'Topic deactivated',
+          ts: new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: event.topicId,
+        }
+        this.log(`PUSHING local topic_deactivated to Claude`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'topic_activated': {
+        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
+          this.log(`DROPPED local topic_activated: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: 'system',
+          text: 'Topic reactivated',
+          ts: new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: event.topicId,
+        }
+        this.log(`PUSHING local topic_activated to Claude`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'broadcast': {
+        // Skip self-messages
+        if (event.sender && this.session.isSelf(event.sender)) {
+          this.log(`DROPPED: self local broadcast from ${event.sender}`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: event.sender ?? 'unknown',
+          text: event.text ?? '',
+          ts: event.ts ?? new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: undefined,
+        }
+        this.log(`PUSHING local broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
+        await this.bus.push(msg)
+        return
+      }
+    }
   }
 
   private async handleEvent(event: BrokerEvent): Promise<void> {

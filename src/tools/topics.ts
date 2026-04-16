@@ -10,18 +10,51 @@ export interface TopicToolDeps {
   postClient: WebClient
   subscriptionManager: SubscriptionManager
   context: ActiveContext
+  brokerPort: number
 }
 
 const TOPIC_PATTERN = /^:(large_green_circle|white_check_mark|red_circle): (.+)$/
+
+function isLocal(channel: string | undefined, context: ActiveContext): boolean {
+  return channel === 'local' || (!channel && !context.hasChannel())
+}
+
+function brokerBaseUrl(port: number): string {
+  return `http://localhost:${port}`
+}
+
+interface BrokerTopicData {
+  id: string
+  topic: string
+  creator: string
+  state: string
+  createdAt: string
+  messageCount?: number
+}
+
+interface BrokerJoinData {
+  ok: boolean
+  messages: Array<{ sender: string; text: string; ts: string }>
+}
+
+async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, options)
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Broker request failed (${res.status}): ${body}`)
+  }
+  return res.json() as Promise<T>
+}
 
 export function createTopicTools() {
   return [
     {
       name: 'list_topics',
-      description: 'List topics in the active channel. Defaults to last 24 hours only.',
+      description: 'List topics in the active channel or in local. Defaults to last 24 hours only.',
       inputSchema: {
         type: 'object' as const,
         properties: {
+          channel: { type: 'string' as const, description: 'Channel name. Use "local" for local topics, or omit to use the active channel (falls back to local if no channel is active).' },
           include_resolved: { type: 'boolean' as const, description: 'Include resolved topics (default: false)' },
           include_deactivated: { type: 'boolean' as const, description: 'Include deactivated topics (default: false)' },
           hours: { type: 'number' as const, description: 'How many hours back to look (default: 24)' },
@@ -31,11 +64,12 @@ export function createTopicTools() {
     },
     {
       name: 'start_topic',
-      description: 'Create a new topic in the active channel and set it as the active topic.',
+      description: 'Create a new topic in the active channel or in local and set it as the active topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           topic: { type: 'string' as const, description: 'Topic name / title' },
+          channel: { type: 'string' as const, description: 'Channel name. Use "local" for local topics, or omit to use the active channel (falls back to local if no channel is active).' },
           detail: { type: 'string' as const, description: 'Additional detail' },
           participants_needed: { type: 'string' as const, description: 'Roles or people needed' },
         },
@@ -49,6 +83,7 @@ export function createTopicTools() {
         type: 'object' as const,
         properties: {
           topic: { type: 'string' as const, description: 'Topic name (fuzzy match)' },
+          channel: { type: 'string' as const, description: 'Channel name. Use "local" for local topics, or omit to use the active channel (falls back to local if no channel is active).' },
         },
         required: ['topic'],
       },
@@ -67,12 +102,12 @@ export function createTopicTools() {
     },
     {
       name: 'send_broadcast',
-      description: 'Send a top-level message to all subscribers of a channel. Not in a topic thread.',
+      description: 'Send a top-level message to all subscribers. Not in a topic thread.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           text: { type: 'string' as const, description: 'Message text' },
-          channel: { type: 'string' as const, description: 'Channel name. Defaults to most recently joined channel.' },
+          channel: { type: 'string' as const, description: 'Channel name. Use "local" for local broadcast, or omit to use the active channel (falls back to local if no channel is active).' },
         },
         required: ['text'],
       },
@@ -142,9 +177,14 @@ export async function handleTopicTool(
 ): Promise<string> {
   switch (name) {
     case 'list_topics': {
-      const { include_resolved, include_deactivated, hours = 24 } = args as {
-        include_resolved?: boolean; include_deactivated?: boolean; hours?: number
+      const { channel, include_resolved, include_deactivated, hours = 24 } = args as {
+        channel?: string; include_resolved?: boolean; include_deactivated?: boolean; hours?: number
       }
+
+      if (isLocal(channel, deps.context)) {
+        return handleLocalListTopics(deps, include_resolved, include_deactivated)
+      }
+
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
       const cutoffTs = (Date.now() / 1000 - hours * 3600).toString()
@@ -172,9 +212,14 @@ export async function handleTopicTool(
       return lines.join('\n')
     }
     case 'start_topic': {
-      const { topic, detail, participants_needed } = args as {
-        topic: string; detail?: string; participants_needed?: string
+      const { topic, channel, detail, participants_needed } = args as {
+        topic: string; channel?: string; detail?: string; participants_needed?: string
       }
+
+      if (isLocal(channel, deps.context)) {
+        return handleLocalStartTopic(deps, topic)
+      }
+
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
       const headerText = `:large_green_circle: ${topic}`
@@ -191,11 +236,16 @@ export async function handleTopicTool(
         })
       }
       const threadTs = result.ts ?? 'unknown'
-      deps.context.joinTopic(threadTs, topic)
+      deps.context.joinTopic(threadTs, topic, 'slack')
       return `Topic started: "${topic}" in #${channelName}. This is now your active topic.`
     }
     case 'join_topic': {
-      const { topic } = args as { topic: string }
+      const { topic, channel } = args as { topic: string; channel?: string }
+
+      if (isLocal(channel, deps.context)) {
+        return handleLocalJoinTopic(deps, topic)
+      }
+
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
       const query = topic.toLowerCase()
@@ -227,7 +277,7 @@ export async function handleTopicTool(
       }
 
       const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: threadTs })
-      deps.context.joinTopic(threadTs, topicName)
+      deps.context.joinTopic(threadTs, topicName, 'slack')
 
       const lines = [`Joined topic "${topicName}" in #${channelName}. This is now your active topic.`, '', 'Topic history:']
       for (const msg of replies.messages ?? []) {
@@ -240,6 +290,20 @@ export async function handleTopicTool(
     }
     case 'send_message': {
       const { text, topic } = args as { text: string; topic?: string }
+
+      // Check if active topic is local
+      if (deps.context.hasTopic() && deps.context.getTopicSource() === 'local' && !topic) {
+        return handleLocalSendMessage(deps, text, deps.context.getThreadTs())
+      }
+
+      // If a topic name is given, check if it resolves to a local topic
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (found && found.source === 'local') {
+          return handleLocalSendMessage(deps, text, found.threadTs)
+        }
+      }
+
       const channelId = deps.context.getChannelId()
 
       let threadTs: string
@@ -258,10 +322,15 @@ export async function handleTopicTool(
       }
 
       await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
-      return `Message sent.`
+      return 'Message sent.'
     }
     case 'send_broadcast': {
       const { text, channel } = args as { text: string; channel?: string }
+
+      if (isLocal(channel, deps.context)) {
+        return handleLocalBroadcast(deps, text)
+      }
+
       let channelId: string
       let channelName: string
       if (channel) {
@@ -276,6 +345,20 @@ export async function handleTopicTool(
     }
     case 'resolve_topic': {
       const { summary, topic } = args as { summary: string; topic?: string }
+
+      // Check if active topic is local
+      if (deps.context.hasTopic() && deps.context.getTopicSource() === 'local' && !topic) {
+        return handleLocalResolveTopic(deps, summary, deps.context.getThreadTs())
+      }
+
+      // If a topic name is given, check if it resolves to a local topic
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (found && found.source === 'local') {
+          return handleLocalResolveTopic(deps, summary, found.threadTs)
+        }
+      }
+
       const channelId = deps.context.getChannelId()
 
       let threadTs: string
@@ -302,6 +385,20 @@ export async function handleTopicTool(
     }
     case 'deactivate_topic': {
       const { topic } = args as { topic?: string }
+
+      // Check if active topic is local
+      if (deps.context.hasTopic() && deps.context.getTopicSource() === 'local' && !topic) {
+        return handleLocalDeactivateTopic(deps, deps.context.getThreadTs())
+      }
+
+      // If a topic name is given, check if it resolves to a local topic
+      if (topic) {
+        const found = deps.context.findJoinedTopic(topic)
+        if (found && found.source === 'local') {
+          return handleLocalDeactivateTopic(deps, found.threadTs)
+        }
+      }
+
       const channelId = deps.context.getChannelId()
 
       let threadTs: string
@@ -327,6 +424,13 @@ export async function handleTopicTool(
     }
     case 'activate_topic': {
       const { topic } = args as { topic: string }
+
+      // For local topics, check if we need to activate via broker
+      // Try Slack first if we have a channel, otherwise go local
+      if (!deps.context.hasChannel()) {
+        return handleLocalActivateTopic(deps, topic)
+      }
+
       const channelId = deps.context.getChannelId()
 
       // Search all topics including deactivated
@@ -334,7 +438,10 @@ export async function handleTopicTool(
       const query = topic.toLowerCase()
       const matches = topics.filter((t) => t.state === 'deactivated' && t.topic.toLowerCase().includes(query))
 
-      if (matches.length === 0) return `No deactivated topic matching "${topic}".`
+      if (matches.length === 0) {
+        // Fall back to local
+        return handleLocalActivateTopic(deps, topic)
+      }
       if (matches.length > 1) {
         const lines = [`Multiple deactivated topics match "${topic}". Be more specific:`]
         for (const m of matches) lines.push(`  :red_circle: "${m.topic}"`)
@@ -353,4 +460,143 @@ export async function handleTopicTool(
     default:
       throw new Error(`Unknown topic tool: ${name}`)
   }
+}
+
+// --- Local topic handlers ---
+
+async function handleLocalListTopics(
+  deps: TopicToolDeps, includeResolved?: boolean, includeDeactivated?: boolean
+): Promise<string> {
+  const params = new URLSearchParams()
+  if (includeResolved) params.set('include_resolved', 'true')
+  if (includeDeactivated) params.set('include_deactivated', 'true')
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
+  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
+  if (data.topics.length === 0) {
+    return 'No active local topics.'
+  }
+  const statusEmoji: Record<string, string> = {
+    active: ':large_green_circle:',
+    deactivated: ':red_circle:',
+    resolved: ':white_check_mark:',
+  }
+  const lines = ['Local topics:']
+  for (const t of data.topics) {
+    const joined = deps.context.isTopicJoined(t.id) ? ' <-- joined' : ''
+    const active = t.id === (deps.context.hasTopic() ? deps.context.getThreadTs() : null) ? ' (active)' : ''
+    lines.push(`  ${statusEmoji[t.state] ?? ''} "${t.topic}" (${t.messageCount ?? 0} messages)${joined}${active}`)
+  }
+  return lines.join('\n')
+}
+
+async function handleLocalStartTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics`
+  const data = await brokerFetch<BrokerTopicData>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, creator: deps.session.displayName }),
+  })
+  deps.context.joinTopic(data.id, topic, 'local')
+  return `Local topic started: "${topic}". This is now your active topic.`
+}
+
+async function handleLocalJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+  const query = topic.toLowerCase()
+
+  // Fetch all topics including deactivated and resolved to search across all
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?include_resolved=true&include_deactivated=true`
+  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
+  const matches = data.topics.filter((t) => t.topic.toLowerCase().includes(query))
+
+  if (matches.length === 0) {
+    return `No local topic matching "${topic}" found.`
+  }
+  if (matches.length > 1) {
+    const lines = [`Multiple local topics match "${topic}". Be more specific:`]
+    for (const m of matches) lines.push(`  "${m.topic}" (${m.state})`)
+    return lines.join('\n')
+  }
+
+  const match = matches[0]!
+  // Join via broker
+  const joinUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/join`
+  const joinData = await brokerFetch<BrokerJoinData>(joinUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: deps.session.sessionName }),
+  })
+
+  deps.context.joinTopic(match.id, match.topic, 'local')
+
+  const lines = [`Joined local topic "${match.topic}". This is now your active topic.`, '', 'Topic history:']
+  for (const msg of joinData.messages) {
+    lines.push(`  [${msg.sender}]: ${msg.text}`)
+  }
+  return lines.join('\n')
+}
+
+async function handleLocalSendMessage(deps: TopicToolDeps, text: string, topicId: string): Promise<string> {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/messages`
+  await brokerFetch<{ ok: boolean }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, sender: deps.session.displayName }),
+  })
+  return 'Message sent.'
+}
+
+async function handleLocalBroadcast(deps: TopicToolDeps, text: string): Promise<string> {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/broadcast`
+  await brokerFetch<{ ok: boolean }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, sender: deps.session.displayName }),
+  })
+  return 'Broadcast sent in local.'
+}
+
+async function handleLocalResolveTopic(deps: TopicToolDeps, summary: string, topicId: string): Promise<string> {
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/resolve`
+  await brokerFetch<{ ok: boolean }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ summary, resolver: deps.session.displayName }),
+  })
+  deps.context.clearTopic()
+  return `Topic resolved: ${summary}`
+}
+
+async function handleLocalDeactivateTopic(deps: TopicToolDeps, topicId: string): Promise<string> {
+  const topicName = deps.context.getTopicName() ?? 'topic'
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/deactivate`
+  await brokerFetch<{ ok: boolean }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  deps.context.leaveTopic(topicId)
+  return `Topic "${topicName}" deactivated.`
+}
+
+async function handleLocalActivateTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+  const query = topic.toLowerCase()
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?include_deactivated=true`
+  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
+  const matches = data.topics.filter((t) => t.state === 'deactivated' && t.topic.toLowerCase().includes(query))
+
+  if (matches.length === 0) return `No deactivated local topic matching "${topic}".`
+  if (matches.length > 1) {
+    const lines = [`Multiple deactivated local topics match "${topic}". Be more specific:`]
+    for (const m of matches) lines.push(`  "${m.topic}"`)
+    return lines.join('\n')
+  }
+
+  const match = matches[0]!
+  const activateUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/activate`
+  await brokerFetch<{ ok: boolean }>(activateUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  return `Local topic "${match.topic}" reactivated.`
 }

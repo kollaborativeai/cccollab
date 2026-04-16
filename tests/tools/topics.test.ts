@@ -37,6 +37,7 @@ function createMockDeps(): TopicToolDeps {
     } as never,
     subscriptionManager: { resolveChannelId: vi.fn().mockResolvedValue('C123') } as never,
     context,
+    brokerPort: 7850,
   }
 }
 
@@ -52,7 +53,7 @@ describe('Topic Tools', () => {
     })
   })
 
-  describe('handleTopicTool', () => {
+  describe('handleTopicTool - Slack channel', () => {
     let deps: TopicToolDeps
     beforeEach(() => { deps = createMockDeps() })
 
@@ -80,11 +81,6 @@ describe('Topic Tools', () => {
         })
         const result = await handleTopicTool('list_topics', {}, deps)
         expect(result).toContain('No active topics')
-      })
-
-      it('throws when no active channel', async () => {
-        deps.context.clearChannel()
-        await expect(handleTopicTool('list_topics', {}, deps)).rejects.toThrow('No active channel')
       })
     })
 
@@ -114,11 +110,6 @@ describe('Topic Tools', () => {
           thread_ts: '300.100',
           text: expect.stringContaining('JWT vs session'),
         })
-      })
-
-      it('throws when no active channel', async () => {
-        deps.context.clearChannel()
-        await expect(handleTopicTool('start_topic', { topic: 'test' }, deps)).rejects.toThrow('No active channel')
       })
     })
 
@@ -151,7 +142,6 @@ describe('Topic Tools', () => {
       })
 
       it('lists multiple matches when ambiguous', async () => {
-        // Both 'Auth refactor' and 'Setup CI' would match 'e' - use a match that hits both
         ;(deps.webClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
           ok: true,
           messages: [
@@ -170,16 +160,11 @@ describe('Topic Tools', () => {
         await handleTopicTool('join_topic', { topic: 'auth' }, deps)
         expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
       })
-
-      it('throws when no active channel', async () => {
-        deps.context.clearChannel()
-        await expect(handleTopicTool('join_topic', { topic: 'auth' }, deps)).rejects.toThrow('No active channel')
-      })
     })
 
     describe('send_message', () => {
       it('sends to active topic thread when topic is set', async () => {
-        deps.context.joinTopic('300.100', 'Auth refactor')
+        deps.context.joinTopic('300.100', 'Auth refactor', 'slack')
         await handleTopicTool('send_message', { text: 'Here is my review' }, deps)
         expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123', thread_ts: '300.100', text: '*[stefan]*: Here is my review',
@@ -189,15 +174,10 @@ describe('Topic Tools', () => {
       it('throws when no topic is joined', async () => {
         await expect(handleTopicTool('send_message', { text: 'Hello' }, deps)).rejects.toThrow('No active topic')
       })
-
-      it('throws when no active channel', async () => {
-        deps.context.clearChannel()
-        await expect(handleTopicTool('send_message', { text: 'hello' }, deps)).rejects.toThrow('No active channel')
-      })
     })
 
     describe('resolve_topic', () => {
-      beforeEach(() => { deps.context.joinTopic('300.100', 'Auth refactor') })
+      beforeEach(() => { deps.context.joinTopic('300.100', 'Auth refactor', 'slack') })
 
       it('updates parent message emoji and posts resolution', async () => {
         await handleTopicTool('resolve_topic', { summary: 'Agreed on JWT approach' }, deps)
@@ -230,6 +210,231 @@ describe('Topic Tools', () => {
 
     it('throws on unknown tool', async () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
+    })
+  })
+
+  describe('handleTopicTool - local routing', () => {
+    let deps: TopicToolDeps
+
+    beforeEach(() => {
+      deps = createMockDeps()
+    })
+
+    it('routes to local when channel is "local" even with active Slack channel', async () => {
+      // Mock fetch for broker
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ topics: [] }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('list_topics', { channel: 'local' }, deps)
+      expect(result).toContain('No active local topics')
+      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/topics?'), undefined)
+
+      vi.unstubAllGlobals()
+    })
+
+    it('routes to local when no channel is active', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          topics: [
+            { id: 'uuid-1', topic: 'Auth design', creator: 'architect', state: 'active', createdAt: '2026-01-01T00:00:00Z', messageCount: 3 },
+          ],
+        }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('list_topics', {}, deps)
+      expect(result).toContain('Local topics')
+      expect(result).toContain('Auth design')
+
+      vi.unstubAllGlobals()
+    })
+
+    it('start_topic creates local topic via broker', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'uuid-new', topic: 'DB migration', creator: 'stefan', state: 'active', createdAt: '2026-01-01T00:00:00Z',
+        }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('start_topic', { topic: 'DB migration' }, deps)
+      expect(result).toContain('Local topic started')
+      expect(result).toContain('DB migration')
+      expect(deps.context.hasTopic()).toBe(true)
+      expect(deps.context.getThreadTs()).toBe('uuid-new')
+      expect(deps.context.getTopicSource()).toBe('local')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('join_topic joins local topic via broker', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [
+              { id: 'uuid-join', topic: 'API design', creator: 'architect', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            ok: true,
+            messages: [
+              { sender: 'architect', text: 'Let us discuss REST patterns', ts: '2026-01-01T00:00:01Z' },
+            ],
+          }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('join_topic', { topic: 'API' }, deps)
+      expect(result).toContain('Joined local topic')
+      expect(result).toContain('API design')
+      expect(result).toContain('REST patterns')
+      expect(deps.context.hasTopic()).toBe(true)
+      expect(deps.context.getTopicSource()).toBe('local')
+
+      vi.unstubAllGlobals()
+    })
+
+    it('send_message routes to local when active topic is local', async () => {
+      deps.context.joinTopic('uuid-topic', 'Test topic', 'local')
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('send_message', { text: 'Hello local' }, deps)
+      expect(result).toBe('Message sent.')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-topic/messages'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+      // Should NOT call Slack postClient
+      expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
+
+      vi.unstubAllGlobals()
+    })
+
+    it('send_broadcast routes to local when no channel active', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('send_broadcast', { text: 'Heads up everyone' }, deps)
+      expect(result).toContain('Broadcast sent in local')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/broadcast'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('resolve_topic routes to local when active topic is local', async () => {
+      deps.context.joinTopic('uuid-resolve', 'Resolve me', 'local')
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('resolve_topic', { summary: 'Decided on approach A' }, deps)
+      expect(result).toContain('Topic resolved')
+      expect(deps.context.hasTopic()).toBe(false)
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-resolve/resolve'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('deactivate_topic routes to local when active topic is local', async () => {
+      deps.context.joinTopic('uuid-deact', 'Deactivate me', 'local')
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('deactivate_topic', {}, deps)
+      expect(result).toContain('deactivated')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-deact/deactivate'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('activate_topic routes to local when no channel active', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [
+              { id: 'uuid-act', topic: 'Reactivate me', creator: 'architect', state: 'deactivated', createdAt: '2026-01-01T00:00:00Z' },
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ ok: true }),
+        })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('activate_topic', { topic: 'Reactivate' }, deps)
+      expect(result).toContain('reactivated')
+
+      vi.unstubAllGlobals()
+    })
+
+    it('send_message routes to local when topic name resolves to a local topic', async () => {
+      deps.context.joinTopic('uuid-named', 'Named topic', 'local')
+      deps.context.joinTopic('300.100', 'Slack topic', 'slack')
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('send_message', { text: 'To local', topic: 'Named' }, deps)
+      expect(result).toBe('Message sent.')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-named/messages'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
+
+      vi.unstubAllGlobals()
     })
   })
 })

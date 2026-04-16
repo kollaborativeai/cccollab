@@ -92,8 +92,9 @@ describe('Channel Tools', () => {
   })
 
   describe('list_channels', () => {
-    it('lists all available channels', async () => {
+    it('lists all available channels including local', async () => {
       const result = await handleChannelTool('list_channels', {}, deps)
+      expect(result).toContain('#local (always joined)')
       expect(result).toContain('secret-channel')
       expect(result).toContain('(private)')
       expect(result).toContain('team-alpha-collab')

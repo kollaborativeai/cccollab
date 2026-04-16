@@ -157,7 +157,7 @@ async function startAuthenticated(config: Config) {
 
   const identityDeps = { session, botClient, registryChannelId }
   const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
-  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
+  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort: config.brokerPort }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }))
 

@@ -1,22 +1,32 @@
+export type TopicSource = 'local' | 'slack'
+
+interface JoinedTopic {
+  topicName: string
+  source: TopicSource
+}
+
 export class ActiveContext {
   private channelId: string | undefined
   private channelName: string | undefined
   private activeThreadTs: string | undefined
   private activeTopicName: string | undefined
-  private readonly joinedTopics = new Map<string, string>() // threadTs -> topicName
+  private activeTopicSource: TopicSource | undefined
+  private readonly joinedTopics = new Map<string, JoinedTopic>() // threadTs/topicId -> { topicName, source }
 
   setChannel(channelId: string, channelName: string): void {
     this.channelId = channelId
     this.channelName = channelName
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
+    this.activeTopicSource = undefined
     this.joinedTopics.clear()
   }
 
-  joinTopic(threadTs: string, topicName: string): void {
-    this.joinedTopics.set(threadTs, topicName)
+  joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack'): void {
+    this.joinedTopics.set(threadTs, { topicName, source })
     this.activeThreadTs = threadTs
     this.activeTopicName = topicName
+    this.activeTopicSource = source
   }
 
   leaveTopic(threadTs: string): void {
@@ -24,6 +34,7 @@ export class ActiveContext {
     if (this.activeThreadTs === threadTs) {
       this.activeThreadTs = undefined
       this.activeTopicName = undefined
+      this.activeTopicSource = undefined
     }
   }
 
@@ -32,6 +43,7 @@ export class ActiveContext {
     this.channelName = undefined
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
+    this.activeTopicSource = undefined
     this.joinedTopics.clear()
   }
 
@@ -41,6 +53,7 @@ export class ActiveContext {
     }
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
+    this.activeTopicSource = undefined
   }
 
   isTopicJoined(threadTs: string): boolean {
@@ -66,20 +79,24 @@ export class ActiveContext {
     return this.activeTopicName
   }
 
-  findJoinedTopic(query: string): { threadTs: string; topicName: string } | null {
+  getTopicSource(): TopicSource | undefined {
+    return this.activeTopicSource
+  }
+
+  findJoinedTopic(query: string): { threadTs: string; topicName: string; source: TopicSource } | null {
     const q = query.toLowerCase()
-    const matches: Array<{ threadTs: string; topicName: string }> = []
-    for (const [threadTs, topicName] of this.joinedTopics) {
+    const matches: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
+    for (const [threadTs, { topicName, source }] of this.joinedTopics) {
       if (topicName.toLowerCase().includes(q)) {
-        matches.push({ threadTs, topicName })
+        matches.push({ threadTs, topicName, source })
       }
     }
     if (matches.length === 1) return matches[0]!
     return null
   }
 
-  getJoinedTopics(): Array<{ threadTs: string; topicName: string }> {
-    return [...this.joinedTopics.entries()].map(([threadTs, topicName]) => ({ threadTs, topicName }))
+  getJoinedTopics(): Array<{ threadTs: string; topicName: string; source: TopicSource }> {
+    return [...this.joinedTopics.entries()].map(([threadTs, { topicName, source }]) => ({ threadTs, topicName, source }))
   }
 
   hasChannel(): boolean { return this.channelId !== undefined }

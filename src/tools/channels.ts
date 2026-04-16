@@ -106,6 +106,7 @@ export async function handleChannelTool(
       const activeChannelId = deps.context.hasChannel() ? deps.context.getChannelId() : undefined
 
       const lines = ['Available channels:']
+      lines.push('  #local (always joined)')
       for (const ch of allChannels.sort((a, b) => a.name.localeCompare(b.name))) {
         const isActive = ch.id === activeChannelId
         const lock = ch.is_private ? ' (private)' : ''
