@@ -12,6 +12,7 @@ export class SessionManager {
   private readonly username: string
   private projectName: string
   private name: string | undefined
+  private objective: string | undefined
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -32,6 +33,14 @@ export class SessionManager {
 
   setName(name: string): void {
     this.name = name
+  }
+
+  setObjective(objective: string | undefined): void {
+    this.objective = objective
+  }
+
+  getObjective(): string | undefined {
+    return this.objective
   }
 
   /** Format a thread message with short display name */

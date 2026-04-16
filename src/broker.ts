@@ -144,6 +144,26 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // POST /local-event - broadcast a pre-formed local event (ping, pong, direct_message, etc.)
+  if (pathname === '/local-event' && method === 'POST') {
+    void (async () => {
+      try {
+        const event = JSON.parse(await readBody(req)) as Record<string, unknown>
+        if (!event.type) {
+          jsonResponse(res, 400, { error: 'type is required' })
+          return
+        }
+        const payload = { source: 'local', ...event }
+        broadcast(JSON.stringify(payload))
+        log(`LOCAL EVENT: ${JSON.stringify(payload).slice(0, 200)}`)
+        jsonResponse(res, 200, { ok: true })
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
+    return
+  }
+
   // POST /broadcast - broadcast a local message (not in a topic)
   if (pathname === '/broadcast' && method === 'POST') {
     void (async () => {

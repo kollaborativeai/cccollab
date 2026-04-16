@@ -28,6 +28,7 @@ export async function handleIdentityTool(
     case 'introduce': {
       const { name: displayName, objective } = args as { name: string; objective?: string }
       deps.session.setName(displayName)
+      deps.session.setObjective(objective)
       return `Introduced as "${displayName}".${objective ? ` Objective: ${objective}` : ''}`
     }
     default:

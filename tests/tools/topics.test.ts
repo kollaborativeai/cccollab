@@ -45,13 +45,13 @@ function createMockDeps(): TopicToolDeps {
 
 describe('Topic Tools', () => {
   describe('createTopicTools', () => {
-    it('returns 8 tool definitions', () => {
-      expect(createTopicTools()).toHaveLength(8)
+    it('returns 10 tool definitions', () => {
+      expect(createTopicTools()).toHaveLength(10)
     })
 
     it('has correct tool names', () => {
       const names = createTopicTools().map((t) => t.name)
-      expect(names).toEqual(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
+      expect(names).toEqual(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic', 'ping_availability', 'send_direct'])
     })
   })
 
@@ -608,6 +608,67 @@ describe('Topic Tools', () => {
         expect.objectContaining({ method: 'POST' }),
       )
       expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
+
+      vi.unstubAllGlobals()
+    })
+
+    it('send_message posts to unjoined local topic without joining', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn()
+        // resolveLocalTopicId list call
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            topics: [{ id: 'uuid-unjoined', topic: 'Unjoined topic', creator: 'a', state: 'active', createdAt: '2026-01-01T00:00:00Z' }],
+          }),
+        })
+        // messages POST
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('send_message', { text: 'Hello from outside', topic: 'Unjoined' }, deps)
+      expect(result).toBe('Message sent.')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/topics/uuid-unjoined/messages'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+      // Should NOT have joined the topic
+      expect(deps.context.isTopicJoined('uuid-unjoined')).toBe(false)
+
+      vi.unstubAllGlobals()
+    })
+
+    it('ping_availability posts to /local-event', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('ping_availability', {}, deps)
+      expect(result).toContain('ping sent')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/local-event'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+      const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
+      expect(body.type).toBe('ping_availability')
+
+      vi.unstubAllGlobals()
+    })
+
+    it('send_direct posts direct_message to /local-event', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('send_direct', { to: 'bob', text: 'Hey Bob' }, deps)
+      expect(result).toContain('bob')
+      const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
+      expect(body.type).toBe('direct_message')
+      expect(body.to).toBe('bob')
+      expect(body.text).toBe('Hey Bob')
 
       vi.unstubAllGlobals()
     })

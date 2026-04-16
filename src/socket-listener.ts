@@ -31,11 +31,14 @@ export interface BrokerEvent {
 
 export interface BrokerLocalEvent {
   source: 'local'
-  type: 'message' | 'topic_created' | 'topic_resolved' | 'topic_deactivated' | 'topic_activated' | 'broadcast'
+  type: 'message' | 'topic_created' | 'topic_resolved' | 'topic_deactivated' | 'topic_activated' | 'broadcast' | 'ping_availability' | 'pong_availability' | 'direct_message'
   topicId?: string
   topic?: { id: string; topic: string; creator: string; state?: string; createdAt?: string }
   sender?: string
+  from?: string
+  to?: string
   text?: string
+  objective?: string
   summary?: string
   resolver?: string
   ts?: string
@@ -272,6 +275,58 @@ export class SocketModeListener {
           threadTs: undefined,
         }
         this.log(`PUSHING local broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'ping_availability': {
+        // Auto-respond with name + objective - never surfaces to Claude
+        if (!this.session.hasName()) return
+        const from = event.from
+        if (from && this.session.isExactSelf(from)) return
+        this.log(`AUTO-PONG availability to ${from ?? 'unknown'}`)
+        fetch(`${this.brokerUrl}/local-event`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'pong_availability',
+            from: this.session.displayName,
+            objective: this.session.getObjective(),
+          }),
+        }).catch((err) => this.log(`PONG ERROR: ${err}`))
+        return
+      }
+      case 'pong_availability': {
+        // Drop our own pong
+        if (event.from && this.session.isExactSelf(event.from)) return
+        const objective = event.objective ? ` - ${event.objective}` : ''
+        const msg: ParsedMessage = {
+          sender: event.from ?? 'unknown',
+          text: `Available: ${event.from ?? 'unknown'}${objective}`,
+          ts: new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: undefined,
+        }
+        this.log(`PUSHING pong_availability to Claude: from=${event.from ?? 'unknown'}`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'direct_message': {
+        // Only deliver if this session is the intended recipient
+        if (!event.to || !this.session.isExactSelf(event.to)) {
+          this.log(`DROPPED direct_message: not for us (to=${event.to ?? 'none'})`)
+          return
+        }
+        if (event.from && this.session.isExactSelf(event.from)) return
+        const msg: ParsedMessage = {
+          sender: event.from ?? 'unknown',
+          text: `Direct message from ${event.from ?? 'unknown'}: ${event.text ?? ''}`,
+          ts: new Date().toISOString(),
+          channel: 'local',
+          channelName: 'local',
+          threadTs: undefined,
+        }
+        this.log(`PUSHING direct_message to Claude: from=${event.from ?? 'unknown'}`)
         await this.bus.push(msg)
         return
       }

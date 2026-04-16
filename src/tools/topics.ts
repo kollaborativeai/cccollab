@@ -158,6 +158,23 @@ export function createTopicTools() {
         required: ['topic'],
       },
     },
+    {
+      name: 'ping_availability',
+      description: 'Broadcast a local ping asking which sessions are currently available. Responses arrive as channel events automatically - no action required from the sender.',
+      inputSchema: { type: 'object' as const, properties: {} },
+    },
+    {
+      name: 'send_direct',
+      description: 'Send a private direct message to another session by name. Local only - no Slack.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          to: { type: 'string' as const, description: 'Recipient session name (must match their introduced name exactly)' },
+          text: { type: 'string' as const, description: 'Message text' },
+        },
+        required: ['to', 'text'],
+      },
+    },
   ]
 }
 
@@ -185,7 +202,7 @@ async function fetchTopics(channelId: string, webClient: WebClient): Promise<Top
   return topics
 }
 
-const REQUIRES_NAME = new Set(['start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic'])
+const REQUIRES_NAME = new Set(['start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic', 'ping_availability', 'send_direct'])
 
 export async function handleTopicTool(
   name: string, args: Record<string, unknown>, deps: TopicToolDeps
@@ -306,35 +323,54 @@ export async function handleTopicTool(
     case 'send_message': {
       const { text, topic } = args as { text: string; topic?: string }
 
-      // Check if active topic is local
+      // Active local topic with no topic arg
       if (deps.context.hasTopic() && deps.context.getTopicSource() === 'local' && !topic) {
         return handleLocalSendMessage(deps, text, deps.context.getThreadTs())
       }
 
-      // If a topic name is given, check if it resolves to a local topic
       if (topic) {
+        // Check joined topics first (local or slack)
         const found = deps.context.findJoinedTopic(topic)
         if (found && found.source === 'local') {
           return handleLocalSendMessage(deps, text, found.threadTs)
         }
+        if (!found) {
+          // Not joined - try resolving as a local topic and post without joining
+          if (!deps.context.hasChannel()) {
+            const resolved = await resolveLocalTopicId(deps.brokerPort, topic)
+            if (!resolved.error) {
+              return handleLocalSendMessage(deps, text, resolved.id!)
+            }
+          } else {
+            // Try local first, then Slack
+            const localResolved = await resolveLocalTopicId(deps.brokerPort, topic)
+            if (!localResolved.error) {
+              return handleLocalSendMessage(deps, text, localResolved.id!)
+            }
+            // Fall through to Slack unjoined send below
+            const channelId = deps.context.getChannelId()
+            const channelName = deps.context.getChannelName()
+            const topics = await fetchTopics(channelId, deps.webClient)
+            const activeOnly = topics.filter((t) => t.state === 'active')
+            const { match, ambiguous } = pickMatch(activeOnly, topic)
+            if (!match) {
+              if (ambiguous.length > 1) {
+                const lines = [`Multiple topics match "${topic}". Be more specific:`]
+                for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+                return lines.join('\n')
+              }
+              return `No topic matching "${topic}" found in #${channelName} or local.`
+            }
+            await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: match.threadTs, text: deps.session.fmt(text) })
+            return 'Message sent.'
+          }
+        }
       }
 
       const channelId = deps.context.getChannelId()
-
-      let threadTs: string
-      if (topic) {
-        const found = deps.context.findJoinedTopic(topic)
-        if (!found) {
-          const joined = deps.context.getJoinedTopics()
-          if (joined.length === 0) return 'No joined topics. Use join_topic first.'
-          const lines = [`No joined topic matching "${topic}". Your joined topics:`]
-          for (const t of joined) lines.push(`  - "${t.topicName}"`)
-          return lines.join('\n')
-        }
-        threadTs = found.threadTs
-      } else {
-        threadTs = deps.context.getThreadTs()
-      }
+      const threadTs = topic
+        ? (deps.context.findJoinedTopic(topic)?.threadTs ?? deps.context.getThreadTs())
+        : deps.context.getThreadTs()
 
       await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
       return 'Message sent.'
@@ -482,6 +518,23 @@ export async function handleTopicTool(
         await deps.postClient.chat.update({ channel: channelId, ts: match.threadTs, text: updatedText })
       }
       return `Topic "${match.topic}" reactivated.`
+    }
+    case 'ping_availability': {
+      await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/local-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'ping_availability', from: deps.session.displayName }),
+      })
+      return 'Availability ping sent. Responses will arrive as channel events.'
+    }
+    case 'send_direct': {
+      const { to, text } = args as { to: string; text: string }
+      await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/local-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'direct_message', from: deps.session.displayName, to, text }),
+      })
+      return `Direct message sent to ${to}.`
     }
     default:
       throw new Error(`Unknown topic tool: ${name}`)
