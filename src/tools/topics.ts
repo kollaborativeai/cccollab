@@ -43,11 +43,11 @@ export function createTopicTools() {
     },
     {
       name: 'join_topic',
-      description: 'Join a topic by fuzzy name match or exact thread_ts. Fetches history, announces, and sets it as the active topic.',
+      description: 'Join a topic by name (fuzzy match). Fetches history and sets it as the active topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match) or exact thread_ts' },
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match)' },
         },
         required: ['topic'],
       },
@@ -121,7 +121,7 @@ export async function handleTopicTool(
         const status = t.resolved ? ':white_check_mark:' : ':large_green_circle:'
         const joined = deps.context.isTopicJoined(t.threadTs) ? ' <-- joined' : ''
         const active = t.threadTs === (deps.context.hasTopic() ? deps.context.getThreadTs() : null) ? ' (active)' : ''
-        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies)${joined}${active} - thread_ts: ${t.threadTs}`)
+        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies)${joined}${active}`)
       }
       return lines.join('\n')
     }
@@ -146,7 +146,7 @@ export async function handleTopicTool(
       }
       const threadTs = result.ts ?? 'unknown'
       deps.context.joinTopic(threadTs, topic)
-      return `Topic started: "${topic}" in #${channelName}\nthread_ts: ${threadTs}\nThis is now your active topic.`
+      return `Topic started: "${topic}" in #${channelName}. This is now your active topic.`
     }
     case 'join_topic': {
       const { topic } = args as { topic: string }
@@ -171,7 +171,7 @@ export async function handleTopicTool(
           const lines = [`Multiple topics match "${topic}" in #${channelName}. Be more specific:`]
           for (const m of matches) {
             const status = m.resolved ? ':white_check_mark:' : ':large_green_circle:'
-            lines.push(`  ${status} "${m.topic}" - thread_ts: ${m.threadTs}`)
+            lines.push(`  ${status} "${m.topic}"`)
           }
           return lines.join('\n')
         }
