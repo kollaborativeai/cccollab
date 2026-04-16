@@ -8,7 +8,7 @@ function createMockMcp() {
 
 function createMessage(overrides: Partial<ParsedMessage> = {}): ParsedMessage {
   return {
-    sender: 'stefan-dispatcher',
+    sender: 'stefan | dispatcher',
     text: 'hello world',
     ts: '1234567890.123456',
     channel: 'C123',
@@ -34,7 +34,7 @@ describe('MessageBus', () => {
         method: 'notifications/claude/channel',
         params: {
           content: 'hello world',
-          meta: { sender: 'stefan-dispatcher', channel: 'C123', channel_id: 'C123', ts: '1234567890.123456' },
+          meta: { sender: 'stefan | dispatcher', channel: 'C123', channel_id: 'C123', ts: '1234567890.123456' },
         },
       })
     })
@@ -45,7 +45,7 @@ describe('MessageBus', () => {
         method: 'notifications/claude/channel',
         params: {
           content: 'hello world',
-          meta: { sender: 'stefan-dispatcher', channel: 'team-alpha-collab', channel_id: 'C123', ts: '1234567890.123456' },
+          meta: { sender: 'stefan | dispatcher', channel: 'team-alpha-collab', channel_id: 'C123', ts: '1234567890.123456' },
         },
       })
     })
@@ -57,7 +57,7 @@ describe('MessageBus', () => {
         params: {
           content: 'hello world',
           meta: {
-            sender: 'stefan-dispatcher',
+            sender: 'stefan | dispatcher',
             channel: 'C123',
             channel_id: 'C123',
             ts: '1234567890.123456',

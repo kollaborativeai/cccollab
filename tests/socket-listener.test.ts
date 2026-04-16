@@ -103,7 +103,7 @@ describe('SocketModeListener', () => {
   it('drops self-messages by bot user ID', async () => {
     await mockSocket._trigger('message', {
       ack: vi.fn().mockResolvedValue(undefined),
-      event: { type: 'message', channel: 'C123', text: '*[stefan-dispatcher]*: my msg', ts: '111.555', user: 'U_BOT' },
+      event: { type: 'message', channel: 'C123', text: '*[stefan | dispatcher]*: my msg', ts: '111.555', user: 'U_BOT' },
     })
     expect(mockBus.push).not.toHaveBeenCalled()
   })

@@ -16,7 +16,7 @@ function createMockDeps(): SessionToolDeps {
           messages: [
             { text: ':robot_face: *[carlos-backend]* status | Working on API', ts: '100.200' },
             { text: ':robot_face: *[carlos-backend]* online | Role: backend | Status: Idle', ts: '100.100' },
-            { text: ':robot_face: *[stefan-dispatcher]* online | Role: fullstack | Status: Starting up', ts: '100.050' },
+            { text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Status: Starting up', ts: '100.050' },
           ],
         }),
       },
@@ -43,22 +43,22 @@ describe('Session Tools', () => {
       const result = await handleSessionTool('announce_session', { role: 'fullstack' }, deps)
       expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
-        text: ':robot_face: *[stefan-dispatcher]* online | Role: fullstack',
+        text: ':robot_face: *[stefan | dispatcher | fullstack]* online',
       })
-      expect(result).toContain('stefan-dispatcher')
+      expect(result).toContain('stefan | dispatcher | fullstack')
     })
 
     it('announce_session includes status when provided', async () => {
       await handleSessionTool('announce_session', { role: 'fullstack', status: 'Working on auth' }, deps)
       expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
-        text: ':robot_face: *[stefan-dispatcher]* online | Role: fullstack | Status: Working on auth',
+        text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Status: Working on auth',
       })
     })
 
     it('announce_session allows name override', async () => {
       await handleSessionTool('announce_session', { role: 'frontend', name_override: 'stefan-frontend' }, deps)
-      expect(deps.session.sessionName).toBe('stefan-frontend')
+      expect(deps.session.sessionName).toBe('stefan | stefan-frontend | frontend')
     })
 
     it('list_sessions returns de-duplicated sessions', async () => {
@@ -72,7 +72,7 @@ describe('Session Tools', () => {
       await handleSessionTool('set_status', { status: 'Reviewing PR #42' }, deps)
       expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
-        text: ':robot_face: *[stefan-dispatcher]* status | Reviewing PR #42',
+        text: ':robot_face: *[stefan | dispatcher]* status | Reviewing PR #42',
       })
     })
   })

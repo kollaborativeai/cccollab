@@ -56,7 +56,7 @@ describe('Conversation Tools', () => {
   it('reply_in_conversation posts formatted reply', async () => {
     await handleConversationTool('reply_in_conversation', { channel: 'team-alpha-collab', thread_ts: '300.100', text: 'Here is my review' }, deps)
     expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
-      channel: 'C123', thread_ts: '300.100', text: '*[stefan-dispatcher]*: Here is my review',
+      channel: 'C123', thread_ts: '300.100', text: '*[stefan | dispatcher]*: Here is my review',
     })
   })
 

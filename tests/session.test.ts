@@ -3,42 +3,71 @@ import { SessionManager } from '../src/session.js'
 
 describe('SessionManager', () => {
   describe('session name derivation', () => {
-    it('derives name from username and cwd repo name', () => {
+    it('derives name as username | project', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.sessionName).toBe('stefan-dispatcher')
+      expect(sm.sessionName).toBe('stefan | dispatcher')
     })
 
-    it('includes worktree suffix when present', () => {
+    it('includes worktree suffix in project name', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher-TWO', worktreeName: 'TWO' })
-      expect(sm.sessionName).toBe('stefan-dispatcher-TWO')
+      expect(sm.sessionName).toBe('stefan | dispatcher-TWO')
     })
 
-    it('falls back to username-unknown when cwd has no parseable name', () => {
+    it('falls back to unknown when cwd has no parseable name', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/' })
-      expect(sm.sessionName).toBe('stefan-unknown')
+      expect(sm.sessionName).toBe('stefan | unknown')
     })
 
-    it('allows name override', () => {
+    it('includes role when set', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      sm.overrideName('stefan-frontend')
-      expect(sm.sessionName).toBe('stefan-frontend')
+      sm.setRole('architect')
+      expect(sm.sessionName).toBe('stefan | dispatcher | architect')
+    })
+
+    it('allows project name override', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.overrideName('frontend-app')
+      expect(sm.sessionName).toBe('stefan | frontend-app')
+    })
+
+    it('override + role works together', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.overrideName('frontend-app')
+      sm.setRole('frontend')
+      expect(sm.sessionName).toBe('stefan | frontend-app | frontend')
     })
   })
 
   describe('fmt', () => {
     it('prefixes text with session identity', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.fmt('hello world')).toBe('*[stefan-dispatcher]*: hello world')
+      expect(sm.fmt('hello world')).toBe('*[stefan | dispatcher]*: hello world')
+    })
+
+    it('includes role in prefix when set', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setRole('backend')
+      expect(sm.fmt('hello')).toBe('*[stefan | dispatcher | backend]*: hello')
     })
   })
 
   describe('parse', () => {
-    it('extracts session name and text from formatted message', () => {
-      expect(SessionManager.parse('*[stefan-dispatcher]*: hello world')).toEqual({ sender: 'stefan-dispatcher', text: 'hello world' })
+    it('extracts sender and text from pipe-separated format', () => {
+      expect(SessionManager.parse('*[stefan | dispatcher | architect]*: hello world')).toEqual({
+        sender: 'stefan | dispatcher | architect', text: 'hello world',
+      })
+    })
+
+    it('handles format without role', () => {
+      expect(SessionManager.parse('*[stefan | dispatcher]*: hello')).toEqual({
+        sender: 'stefan | dispatcher', text: 'hello',
+      })
     })
 
     it('handles multiline messages', () => {
-      expect(SessionManager.parse('*[bob-backend]*: line one\nline two\nline three')).toEqual({ sender: 'bob-backend', text: 'line one\nline two\nline three' })
+      expect(SessionManager.parse('*[bob | api | backend]*: line one\nline two')).toEqual({
+        sender: 'bob | api | backend', text: 'line one\nline two',
+      })
     })
 
     it('returns null for unformatted messages (human messages)', () => {
@@ -53,12 +82,13 @@ describe('SessionManager', () => {
   describe('isSelf', () => {
     it('returns true when sender matches session name', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.isSelf('stefan-dispatcher')).toBe(true)
+      sm.setRole('architect')
+      expect(sm.isSelf('stefan | dispatcher | architect')).toBe(true)
     })
 
     it('returns false for different session names', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.isSelf('carlos-backend')).toBe(false)
+      expect(sm.isSelf('carlos | api | backend')).toBe(false)
     })
   })
 })
