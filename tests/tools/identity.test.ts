@@ -11,9 +11,9 @@ function createMockDeps(): IdentityToolDeps {
         history: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: ':robot_face: *[carlos-backend]* status | Working on API', ts: '100.200' },
-            { text: ':robot_face: *[carlos-backend]* online | Role: backend | Status: Idle', ts: '100.100' },
-            { text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Role: fullstack', ts: '100.050' },
+            { text: ':robot_face: *[carlos | api | reviewer]* objective | Working on API', ts: '100.200' },
+            { text: ':robot_face: *[carlos | api | reviewer]* online | Objective: Idle', ts: '100.100' },
+            { text: ':robot_face: *[stefan | dispatcher | architect]* online', ts: '100.050' },
           ],
         }),
       },
@@ -36,38 +36,32 @@ describe('Identity Tools', () => {
 
     beforeEach(() => { deps = createMockDeps() })
 
-    it('introduce posts to registry channel with role', async () => {
-      const result = await handleIdentityTool('introduce', { role: 'fullstack' }, deps)
+    it('introduce posts to registry with name', async () => {
+      const result = await handleIdentityTool('introduce', { name: 'architect' }, deps)
       expect(deps.botClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
-        text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Role: fullstack',
+        text: ':robot_face: *[stefan | dispatcher | architect]* online',
       })
-      expect(result).toContain('stefan | dispatcher | fullstack')
+      expect(result).toContain('architect')
     })
 
-    it('introduce includes status when provided', async () => {
-      await handleIdentityTool('introduce', { role: 'fullstack', status: 'Working on auth' }, deps)
+    it('introduce includes objective when provided', async () => {
+      await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps)
       expect(deps.botClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
-        text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Role: fullstack | Status: Working on auth',
+        text: ':robot_face: *[stefan | dispatcher | architect]* online | Objective: reviewing auth module',
       })
     })
 
-    it('introduce allows name override', async () => {
-      await handleIdentityTool('introduce', { role: 'frontend', name_override: 'stefan-frontend' }, deps)
-      expect(deps.session.sessionName).toBe('stefan | stefan-frontend | frontend')
+    it('introduce sets display name on session', async () => {
+      await handleIdentityTool('introduce', { name: 'frontend' }, deps)
+      expect(deps.session.displayName).toBe('frontend')
     })
 
-    it('introduce calls setRole on session', async () => {
-      await handleIdentityTool('introduce', { role: 'backend' }, deps)
-      expect(deps.session.sessionName).toContain('backend')
-    })
-
-    it('who returns de-duplicated sessions with latest status', async () => {
+    it('who returns sessions with latest objective', async () => {
       const result = await handleIdentityTool('who', {}, deps)
-      expect(result).toContain('carlos-backend')
+      expect(result).toContain('carlos | api | reviewer')
       expect(result).toContain('Working on API')
-      expect(result).not.toContain('Idle')
     })
 
     it('who returns message when no sessions', async () => {

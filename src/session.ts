@@ -11,7 +11,7 @@ interface SessionManagerOptions {
 export class SessionManager {
   private readonly username: string
   private projectName: string
-  private role: string | undefined
+  private name: string | undefined
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -21,21 +21,17 @@ export class SessionManager {
   /** Full identity for registry: "stefan | dispatcher | architect" */
   get sessionName(): string {
     const parts = [this.username, this.projectName]
-    if (this.role) parts.push(this.role)
+    if (this.name) parts.push(this.name)
     return parts.join(' | ')
   }
 
-  /** Short name for thread messages: just the role, or username if no role set */
+  /** Short name for thread messages: the chosen name, or username if not set */
   get displayName(): string {
-    return this.role ?? this.username
+    return this.name ?? this.username
   }
 
-  setRole(role: string): void {
-    this.role = role
-  }
-
-  overrideName(newName: string): void {
-    this.projectName = newName
+  setName(name: string): void {
+    this.name = name
   }
 
   /** Format a thread message with short display name */

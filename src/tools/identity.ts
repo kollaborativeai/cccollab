@@ -7,22 +7,21 @@ export interface IdentityToolDeps {
   registryChannelId: string
 }
 
-const ANNOUNCE_PATTERN = /:robot_face: \*\[(.+?)\]\* online \| Role: (.+?)(?:\s*\|\s*Status: (.+))?$/
-const STATUS_PATTERN = /:robot_face: \*\[(.+?)\]\* status \| (.+)$/
+const ANNOUNCE_PATTERN = /:robot_face: \*\[(.+?)\]\* online(?:\s*\|\s*Objective: (.+))?$/
+const OBJECTIVE_PATTERN = /:robot_face: \*\[(.+?)\]\* objective \| (.+)$/
 
 export function createIdentityTools() {
   return [
     {
       name: 'introduce',
-      description: 'Set your name, role, and status. Posts to the session registry so other sessions can find you.',
+      description: 'Set your name and optionally your current objective. Posts to the session registry so other sessions can find you. If the user specifies a name, use it. If not, pick a short descriptive name based on what you are doing. Set the objective only if the user specifies one or you have a clear task.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          role: { type: 'string' as const, description: 'Your role (e.g., frontend, backend, fullstack)' },
-          status: { type: 'string' as const, description: 'Optional status message' },
-          name_override: { type: 'string' as const, description: 'Override the auto-derived session name' },
+          name: { type: 'string' as const, description: 'Your display name (e.g., "architect", "frontend", "reviewer")' },
+          objective: { type: 'string' as const, description: 'What you are currently working on (e.g., "reviewing auth module")' },
         },
-        required: ['role'],
+        required: ['name'],
       },
     },
     {
@@ -38,17 +37,16 @@ export async function handleIdentityTool(
 ): Promise<string> {
   switch (name) {
     case 'introduce': {
-      const { role, status, name_override } = args as { role: string; status?: string; name_override?: string }
-      if (name_override) deps.session.overrideName(name_override)
-      deps.session.setRole(role)
-      let text = `:robot_face: *[${deps.session.sessionName}]* online | Role: ${role}`
-      if (status) text += ` | Status: ${status}`
+      const { name: displayName, objective } = args as { name: string; objective?: string }
+      deps.session.setName(displayName)
+      let text = `:robot_face: *[${deps.session.sessionName}]* online`
+      if (objective) text += ` | Objective: ${objective}`
       await deps.botClient.chat.postMessage({ channel: deps.registryChannelId, text })
-      return `Session "${deps.session.sessionName}" introduced with role "${role}"`
+      return `Introduced as "${displayName}".${objective ? ` Objective: ${objective}` : ''}`
     }
     case 'who': {
       const result = await deps.botClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
-      const sessions = new Map<string, { role: string; status: string; ts: string }>()
+      const sessions = new Map<string, { objective: string; ts: string }>()
       for (const msg of (result.messages ?? []).reverse()) {
         const text = msg.text ?? ''
         const ts = msg.ts ?? ''
@@ -57,15 +55,15 @@ export async function handleIdentityTool(
           const sessionName = announceMatch[1]!
           const existing = sessions.get(sessionName)
           if (!existing || ts > existing.ts) {
-            sessions.set(sessionName, { role: announceMatch[2]!, status: announceMatch[3] ?? '', ts })
+            sessions.set(sessionName, { objective: announceMatch[2] ?? '', ts })
           }
           continue
         }
-        const statusMatch = STATUS_PATTERN.exec(text)
-        if (statusMatch) {
-          const existing = sessions.get(statusMatch[1]!)
+        const objectiveMatch = OBJECTIVE_PATTERN.exec(text)
+        if (objectiveMatch) {
+          const existing = sessions.get(objectiveMatch[1]!)
           if (existing && ts > existing.ts) {
-            existing.status = statusMatch[2]!
+            existing.objective = objectiveMatch[2]!
             existing.ts = ts
           }
         }
@@ -73,8 +71,8 @@ export async function handleIdentityTool(
       if (sessions.size === 0) return 'No sessions currently registered.'
       const lines = ['Online sessions:']
       for (const [n, info] of sessions) {
-        let line = `  - ${n} (${info.role})`
-        if (info.status) line += ` - ${info.status}`
+        let line = `  - ${n}`
+        if (info.objective) line += ` - ${info.objective}`
         lines.push(line)
       }
       return lines.join('\n')
