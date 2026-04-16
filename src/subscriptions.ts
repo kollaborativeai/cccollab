@@ -18,7 +18,27 @@ export class SubscriptionManager {
   async join(channelName: string): Promise<JoinResult> {
     const channelId = await this.resolveChannelId(channelName)
     const alreadySubscribed = this.subscriptions.has(channelId)
-    await this.client.conversations.join({ channel: channelId })
+
+    // conversations.join only works for public channels.
+    // For private channels the bot must be invited first - just verify membership.
+    try {
+      await this.client.conversations.join({ channel: channelId })
+    } catch (err: unknown) {
+      const slackError = err as { data?: { error?: string } }
+      const errorCode = slackError.data?.error
+      if (errorCode === 'method_not_supported_for_channel_type' || errorCode === 'channel_not_found') {
+        // Private channel - verify bot is a member by fetching info
+        const info = await this.client.conversations.info({ channel: channelId })
+        if (!info.channel?.is_member) {
+          throw new Error(
+            `Cannot join private channel "#${channelName}". Invite the bot first: /invite @Claude Code Collab`
+          )
+        }
+      } else {
+        throw err
+      }
+    }
+
     this.subscriptions.add(channelId)
     return { channelId, alreadySubscribed }
   }
@@ -61,7 +81,7 @@ export class SubscriptionManager {
     let cursor: string | undefined
     do {
       const result = await this.client.conversations.list({
-        types: 'public_channel',
+        types: 'public_channel,private_channel',
         exclude_archived: true,
         limit: 1000,
         cursor,

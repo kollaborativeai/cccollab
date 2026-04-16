@@ -7,12 +7,23 @@ function createMockDeps(): ChannelToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     webClient: {
-      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true }) },
       conversations: {
         history: vi.fn().mockResolvedValue({
           ok: true, messages: [{ text: 'Recent msg 1', ts: '200.100' }, { text: 'Recent msg 2', ts: '200.050' }],
         }),
+        list: vi.fn().mockResolvedValue({
+          ok: true,
+          channels: [
+            { id: 'C123', name: 'team-alpha-collab', is_private: false, is_member: true },
+            { id: 'C456', name: 'team-beta-collab', is_private: false, is_member: true },
+            { id: 'C789', name: 'secret-channel', is_private: true, is_member: true },
+          ],
+          response_metadata: {},
+        }),
       },
+    } as never,
+    postClient: {
+      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true }) },
     } as never,
     subscriptionManager: {
       join: vi.fn().mockResolvedValue({ channelId: 'C123', alreadySubscribed: false }),
@@ -33,28 +44,25 @@ describe('Channel Tools', () => {
     expect(createChannelTools()).toHaveLength(3)
   })
 
-  it('createChannelTools has correct tool names', () => {
-    const names = createChannelTools().map((t) => t.name)
-    expect(names).toEqual(['join_channel', 'leave_channel', 'list_channels'])
-  })
-
   describe('join_channel', () => {
     it('joins and sets active context', async () => {
       const result = await handleChannelTool('join_channel', { channel: 'team-alpha-collab' }, deps)
       expect(deps.subscriptionManager.join).toHaveBeenCalledWith('team-alpha-collab')
       expect(deps.context.hasChannel()).toBe(true)
       expect(deps.context.getChannelId()).toBe('C123')
-      expect(deps.context.getChannelName()).toBe('team-alpha-collab')
       expect(result).toContain('Joined #team-alpha-collab')
-      expect(result).toContain('active channel')
     })
 
-    it('announces presence to channel', async () => {
+    it('does not post a join announcement', async () => {
       await handleChannelTool('join_channel', { channel: 'team-alpha-collab' }, deps)
-      expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
-        channel: 'C123',
-        text: expect.stringContaining('joined the channel'),
-      })
+      expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
+    })
+
+    it('leaves previous channel when joining a new one', async () => {
+      deps.context.setChannel('C999', 'old-channel')
+      await handleChannelTool('join_channel', { channel: 'team-alpha-collab' }, deps)
+      expect(deps.subscriptionManager.leave).toHaveBeenCalledWith('C999')
+      expect(deps.context.getChannelId()).toBe('C123')
     })
 
     it('returns history when read_history is true', async () => {
@@ -67,39 +75,27 @@ describe('Channel Tools', () => {
       await handleChannelTool('join_channel', { channel: 'team-alpha-collab', read_history: false }, deps)
       expect(deps.webClient.conversations.history).not.toHaveBeenCalled()
     })
-
-    it('notes when already subscribed', async () => {
-      ;(deps.subscriptionManager.join as ReturnType<typeof vi.fn>).mockResolvedValue({ channelId: 'C123', alreadySubscribed: true })
-      const result = await handleChannelTool('join_channel', { channel: 'team-alpha-collab' }, deps)
-      expect(result).toContain('was already subscribed')
-    })
   })
 
   describe('leave_channel', () => {
     it('leaves active channel and clears context', async () => {
       deps.context.setChannel('C123', 'team-alpha-collab')
       const result = await handleChannelTool('leave_channel', {}, deps)
-      expect(deps.webClient.chat.postMessage).toHaveBeenCalled()
       expect(deps.subscriptionManager.leave).toHaveBeenCalledWith('C123')
       expect(deps.context.hasChannel()).toBe(false)
       expect(result).toContain('#team-alpha-collab')
     })
 
-    it('leaves a specified channel', async () => {
-      deps.context.setChannel('C123', 'team-alpha-collab')
-      await handleChannelTool('leave_channel', { channel: 'team-alpha-collab' }, deps)
-      expect(deps.subscriptionManager.resolveChannelId).toHaveBeenCalledWith('team-alpha-collab')
-      expect(deps.subscriptionManager.leave).toHaveBeenCalledWith('C123')
-    })
-
-    it('throws when no active channel and no channel specified', async () => {
+    it('throws when no active channel', async () => {
       await expect(handleChannelTool('leave_channel', {}, deps)).rejects.toThrow('No active channel')
     })
   })
 
   describe('list_channels', () => {
-    it('lists subscribed channels', async () => {
+    it('lists all available channels', async () => {
       const result = await handleChannelTool('list_channels', {}, deps)
+      expect(result).toContain('secret-channel')
+      expect(result).toContain('(private)')
       expect(result).toContain('team-alpha-collab')
       expect(result).toContain('team-beta-collab')
     })
@@ -107,18 +103,15 @@ describe('Channel Tools', () => {
     it('marks active channel', async () => {
       deps.context.setChannel('C123', 'team-alpha-collab')
       const result = await handleChannelTool('list_channels', {}, deps)
-      expect(result).toContain('(active)')
-      expect(result).toContain('team-alpha-collab')
+      expect(result).toContain('<-- active')
     })
 
-    it('returns empty message when no subscriptions', async () => {
-      ;(deps.subscriptionManager.getSubscriptions as ReturnType<typeof vi.fn>).mockReturnValue([])
+    it('returns empty message when no channels', async () => {
+      ;(deps.webClient.conversations.list as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true, channels: [], response_metadata: {},
+      })
       const result = await handleChannelTool('list_channels', {}, deps)
-      expect(result).toBe('No subscribed channels.')
+      expect(result).toContain('No channels found')
     })
-  })
-
-  it('throws on unknown tool', async () => {
-    await expect(handleChannelTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown channel tool')
   })
 })

@@ -11,26 +11,28 @@ function createMockDeps(): TopicToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     webClient: {
-      chat: {
-        postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '300.100' }),
-        update: vi.fn().mockResolvedValue({ ok: true }),
-      },
       conversations: {
         history: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: ':large_green_circle: TOPIC: Auth refactor | *[alice-frontend]*', ts: RECENT_TS, reply_count: 5 },
-            { text: ':white_check_mark: TOPIC: Setup CI | *[bob-backend]*', ts: RECENT_TS, reply_count: 3 },
+            { text: ':large_green_circle: Auth refactor', ts: RECENT_TS, reply_count: 5 },
+            { text: ':white_check_mark: Setup CI', ts: RECENT_TS, reply_count: 3 },
             { text: 'Random non-topic message', ts: RECENT_TS },
           ],
         }),
         replies: vi.fn().mockResolvedValue({
           ok: true,
           messages: [
-            { text: ':large_green_circle: TOPIC: Auth refactor | *[alice-frontend]*', ts: '300.100', user: 'U1' },
-            { text: '*[bob-backend]*: I can help', ts: '300.200', user: 'U2' },
+            { text: ':large_green_circle: Auth refactor', ts: '300.100', user: 'U1' },
+            { text: '*[bob]*: I can help', ts: '300.200', user: 'U2' },
           ],
         }),
+      },
+    } as never,
+    postClient: {
+      chat: {
+        postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '300.100' }),
+        update: vi.fn().mockResolvedValue({ ok: true }),
       },
     } as never,
     subscriptionManager: { resolveChannelId: vi.fn().mockResolvedValue('C123') } as never,
@@ -89,9 +91,9 @@ describe('Topic Tools', () => {
     describe('start_topic', () => {
       it('posts topic message and sets active topic', async () => {
         const result = await handleTopicTool('start_topic', { topic: 'Auth refactor' }, deps)
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123',
-          text: expect.stringContaining(':large_green_circle: TOPIC: Auth refactor'),
+          text: ':large_green_circle: Auth refactor',
         })
         expect(deps.context.hasTopic()).toBe(true)
         expect(deps.context.getThreadTs()).toBe('300.100')
@@ -99,10 +101,17 @@ describe('Topic Tools', () => {
         expect(result).toContain('active topic')
       })
 
-      it('includes detail and participants when provided', async () => {
+      it('includes detail and participants as first thread reply', async () => {
         await handleTopicTool('start_topic', { topic: 'Auth refactor', detail: 'JWT vs session', participants_needed: 'backend' }, deps)
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+        // First call: header message
+        expect(deps.postClient.chat.postMessage).toHaveBeenNthCalledWith(1, {
           channel: 'C123',
+          text: ':large_green_circle: Auth refactor',
+        })
+        // Second call: detail in thread
+        expect(deps.postClient.chat.postMessage).toHaveBeenNthCalledWith(2, {
+          channel: 'C123',
+          thread_ts: '300.100',
           text: expect.stringContaining('JWT vs session'),
         })
       })
@@ -124,8 +133,8 @@ describe('Topic Tools', () => {
 
       it('shows history after joining', async () => {
         const result = await handleTopicTool('join_topic', { topic: 'auth' }, deps)
-        expect(result).toContain('alice-frontend')
-        expect(result).toContain('bob-backend')
+        expect(result).toContain('Auth refactor')
+        expect(result).toContain('bob')
       })
 
       it('joins by exact thread_ts', async () => {
@@ -157,13 +166,9 @@ describe('Topic Tools', () => {
         expect(deps.context.hasTopic()).toBe(false)
       })
 
-      it('announces presence after joining', async () => {
+      it('does not post a join announcement', async () => {
         await handleTopicTool('join_topic', { topic: 'auth' }, deps)
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-          channel: 'C123',
-          thread_ts: RECENT_TS,
-          text: expect.stringContaining('joined the topic'),
-        }))
+        expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
       })
 
       it('throws when no active channel', async () => {
@@ -176,14 +181,14 @@ describe('Topic Tools', () => {
       it('sends to active topic thread when topic is set', async () => {
         deps.context.setTopic('300.100', 'Auth refactor')
         await handleTopicTool('send_message', { text: 'Here is my review' }, deps)
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123', thread_ts: '300.100', text: '*[stefan]*: Here is my review',
         })
       })
 
       it('sends to channel when no topic is set', async () => {
         const result = await handleTopicTool('send_message', { text: 'Hello channel' }, deps)
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123', text: '*[stefan]*: Hello channel',
         })
         expect(result).toContain('#team-alpha-collab')
@@ -201,12 +206,12 @@ describe('Topic Tools', () => {
       it('updates parent message emoji and posts resolution', async () => {
         await handleTopicTool('resolve_topic', { summary: 'Agreed on JWT approach' }, deps)
         expect(deps.webClient.conversations.replies).toHaveBeenCalledWith({ channel: 'C123', ts: '300.100' })
-        expect(deps.webClient.chat.update).toHaveBeenCalledWith({
+        expect(deps.postClient.chat.update).toHaveBeenCalledWith({
           channel: 'C123',
           ts: '300.100',
-          text: ':white_check_mark: TOPIC: Auth refactor | *[alice-frontend]*',
+          text: ':white_check_mark: Auth refactor',
         })
-        expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123', thread_ts: '300.100', text: expect.stringContaining('RESOLVED'),
         })
       })

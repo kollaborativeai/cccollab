@@ -6,6 +6,7 @@ import type { ActiveContext } from '../context.js'
 export interface ChannelToolDeps {
   session: SessionManager
   webClient: WebClient
+  postClient: WebClient
   subscriptionManager: SubscriptionManager
   context: ActiveContext
 }
@@ -14,7 +15,7 @@ export function createChannelTools() {
   return [
     {
       name: 'join_channel',
-      description: 'Join a Slack channel, subscribe, set it as the active channel, show recent history, and announce presence.',
+      description: 'Join a Slack channel and set it as the active channel. Leaves the previous channel if any. Shows recent history.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -26,18 +27,16 @@ export function createChannelTools() {
     },
     {
       name: 'leave_channel',
-      description: 'Leave the active channel (or a specified channel) and clear the active context.',
+      description: 'Leave the active channel and clear the active context.',
       inputSchema: {
         type: 'object' as const,
-        properties: {
-          channel: { type: 'string' as const, description: 'Channel name (optional - if omitted, leaves the active channel)' },
-        },
+        properties: {},
         required: [],
       },
     },
     {
       name: 'list_channels',
-      description: 'Show all subscribed channels and mark which one is active.',
+      description: 'List all available channels the bot has access to. The active channel is marked.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
   ]
@@ -49,13 +48,17 @@ export async function handleChannelTool(
   switch (name) {
     case 'join_channel': {
       const { channel, read_history } = args as { channel: string; read_history?: boolean }
-      const { channelId, alreadySubscribed } = await deps.subscriptionManager.join(channel)
+
+      // Leave previous channel if any
+      if (deps.context.hasChannel()) {
+        const prevId = deps.context.getChannelId()
+        deps.subscriptionManager.leave(prevId)
+      }
+
+      const { channelId } = await deps.subscriptionManager.join(channel)
       deps.context.setChannel(channelId, channel)
-      await deps.webClient.chat.postMessage({
-        channel: channelId,
-        text: `:robot_face: *[${deps.session.sessionName}]* joined the channel`,
-      })
-      const lines = [`Joined #${channel}${alreadySubscribed ? ' (was already subscribed)' : ''}. This is now your active channel.`]
+
+      const lines = [`Joined #${channel}. This is now your active channel.`]
       if (read_history !== false) {
         const history = await deps.webClient.conversations.history({ channel: channelId, limit: 20 })
         if (history.messages && history.messages.length > 0) {
@@ -68,33 +71,46 @@ export async function handleChannelTool(
       return lines.join('\n')
     }
     case 'leave_channel': {
-      const { channel } = args as { channel?: string }
-      let channelId: string
-      let channelName: string
-      if (channel) {
-        channelId = await deps.subscriptionManager.resolveChannelId(channel)
-        channelName = channel
-      } else {
-        channelId = deps.context.getChannelId()
-        channelName = deps.context.getChannelName()
-      }
-      await deps.webClient.chat.postMessage({
-        channel: channelId,
-        text: `:wave: *[${deps.session.sessionName}]* left the channel`,
-      })
+      const channelId = deps.context.getChannelId()
+      const channelName = deps.context.getChannelName()
       deps.subscriptionManager.leave(channelId)
       deps.context.clearChannel()
       return `Left #${channelName}.`
     }
     case 'list_channels': {
-      const ids = deps.subscriptionManager.getSubscriptions()
-      if (ids.length === 0) return 'No subscribed channels.'
+      // Load all channels the bot can see
+      const allChannels: Array<{ id: string; name: string; is_private: boolean; is_member: boolean }> = []
+      let cursor: string | undefined
+      do {
+        const result = await deps.webClient.conversations.list({
+          types: 'public_channel,private_channel',
+          exclude_archived: true,
+          limit: 200,
+          cursor,
+        })
+        for (const ch of result.channels ?? []) {
+          if (ch.id && ch.name) {
+            allChannels.push({
+              id: ch.id,
+              name: ch.name,
+              is_private: ch.is_private ?? false,
+              is_member: ch.is_member ?? false,
+            })
+          }
+        }
+        cursor = result.response_metadata?.next_cursor || undefined
+      } while (cursor)
+
+      if (allChannels.length === 0) return 'No channels found.'
+
       const activeChannelId = deps.context.hasChannel() ? deps.context.getChannelId() : undefined
-      const lines = ['Subscribed channels:']
-      for (const id of ids) {
-        const name = deps.subscriptionManager.getChannelName(id) ?? id
-        const isActive = id === activeChannelId
-        lines.push(`  ${isActive ? '* ' : '  '}#${name}${isActive ? ' (active)' : ''}`)
+
+      const lines = ['Available channels:']
+      for (const ch of allChannels.sort((a, b) => a.name.localeCompare(b.name))) {
+        const isActive = ch.id === activeChannelId
+        const lock = ch.is_private ? ' (private)' : ''
+        const active = isActive ? ' <-- active' : ''
+        lines.push(`  #${ch.name}${lock}${active}`)
       }
       return lines.join('\n')
     }

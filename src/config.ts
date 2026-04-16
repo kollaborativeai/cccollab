@@ -11,6 +11,7 @@ const envSchema = z.object({
   USERNAME: z
     .string({ error: 'USERNAME is required' })
     .min(1, 'USERNAME is required'),
+  SLACK_USER_TOKEN: z.string().optional(),
   SESSION_ROLE: z.string().optional(),
   REGISTRY_CHANNEL: z.string().optional(),
 })
@@ -26,6 +27,7 @@ export function loadConfig(): Config {
   return {
     slackBotToken: result.data.SLACK_BOT_TOKEN,
     slackAppToken: result.data.SLACK_APP_TOKEN,
+    slackUserToken: result.data.SLACK_USER_TOKEN,
     username: result.data.USERNAME,
     sessionRole: result.data.SESSION_ROLE,
     registryChannel: result.data.REGISTRY_CHANNEL ?? 'ai-collab-registry',

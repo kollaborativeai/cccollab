@@ -143,13 +143,13 @@ describe('SubscriptionManager', () => {
 
       expect(paginatedClient.conversations.list).toHaveBeenCalledTimes(2)
       expect(paginatedClient.conversations.list).toHaveBeenNthCalledWith(1, {
-        types: 'public_channel',
+        types: 'public_channel,private_channel',
         exclude_archived: true,
         limit: 1000,
         cursor: undefined,
       })
       expect(paginatedClient.conversations.list).toHaveBeenNthCalledWith(2, {
-        types: 'public_channel',
+        types: 'public_channel,private_channel',
         exclude_archived: true,
         limit: 1000,
         cursor: 'cursor-abc',

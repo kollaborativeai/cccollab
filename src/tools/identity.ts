@@ -3,7 +3,7 @@ import type { SessionManager } from '../session.js'
 
 export interface IdentityToolDeps {
   session: SessionManager
-  webClient: WebClient
+  botClient: WebClient
   registryChannelId: string
 }
 
@@ -43,11 +43,11 @@ export async function handleIdentityTool(
       deps.session.setRole(role)
       let text = `:robot_face: *[${deps.session.sessionName}]* online | Role: ${role}`
       if (status) text += ` | Status: ${status}`
-      await deps.webClient.chat.postMessage({ channel: deps.registryChannelId, text })
+      await deps.botClient.chat.postMessage({ channel: deps.registryChannelId, text })
       return `Session "${deps.session.sessionName}" introduced with role "${role}"`
     }
     case 'who': {
-      const result = await deps.webClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
+      const result = await deps.botClient.conversations.history({ channel: deps.registryChannelId, limit: 100 })
       const sessions = new Map<string, { role: string; status: string; ts: string }>()
       for (const msg of (result.messages ?? []).reverse()) {
         const text = msg.text ?? ''

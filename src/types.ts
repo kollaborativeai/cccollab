@@ -1,6 +1,7 @@
 export interface Config {
   slackBotToken: string
   slackAppToken: string
+  slackUserToken: string | undefined
   username: string
   sessionRole: string | undefined
   registryChannel: string

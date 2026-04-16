@@ -9,32 +9,55 @@ interface SessionManagerOptions {
 }
 
 export class SessionManager {
-  private name: string
   private readonly username: string
+  private projectName: string
+  private role: string | undefined
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
-    this.name = this.deriveName(options)
+    this.projectName = this.deriveProjectName(options)
   }
 
-  get sessionName(): string { return this.name }
+  /** Full identity for registry: "stefan | dispatcher | architect" */
+  get sessionName(): string {
+    const parts = [this.username, this.projectName]
+    if (this.role) parts.push(this.role)
+    return parts.join(' | ')
+  }
 
-  overrideName(newName: string): void { this.name = newName }
+  /** Short name for thread messages: just the role, or username if no role set */
+  get displayName(): string {
+    return this.role ?? this.username
+  }
 
-  fmt(text: string): string { return `*[${this.name}]*: ${text}` }
+  setRole(role: string): void {
+    this.role = role
+  }
 
-  isSelf(senderName: string): boolean { return senderName === this.name }
+  overrideName(newName: string): void {
+    this.projectName = newName
+  }
+
+  /** Format a thread message with short display name */
+  fmt(text: string): string {
+    return `*[${this.displayName}]*: ${text}`
+  }
+
+  /** Check if a sender matches this session (checks both full and short name) */
+  isSelf(senderName: string): boolean {
+    return senderName === this.sessionName || senderName === this.displayName
+  }
 
   static parse(text: string): { sender: string; text: string } | null {
     const match = SESSION_PREFIX_PATTERN.exec(text)
     if (!match) return null
-    return { sender: match[1], text: match[2] }
+    return { sender: match[1]!, text: match[2]! }
   }
 
-  private deriveName(options: SessionManagerOptions): string {
+  private deriveProjectName(options: SessionManagerOptions): string {
     const dirName = path.basename(options.cwd)
     if (!dirName || dirName === '/') {
-      return `${options.username}-unknown`
+      return 'unknown'
     }
 
     let repoName = dirName
@@ -43,9 +66,9 @@ export class SessionManager {
       if (repoName.endsWith(suffix)) {
         repoName = repoName.slice(0, -suffix.length)
       }
-      return `${options.username}-${repoName}-${options.worktreeName}`
+      return `${repoName}-${options.worktreeName}`
     }
 
-    return `${options.username}-${repoName}`
+    return repoName
   }
 }

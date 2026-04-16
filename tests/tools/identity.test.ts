@@ -5,7 +5,7 @@ import { SessionManager } from '../../src/session.js'
 function createMockDeps(): IdentityToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
-    webClient: {
+    botClient: {
       chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '100.200' }) },
       conversations: {
         history: vi.fn().mockResolvedValue({
@@ -38,7 +38,7 @@ describe('Identity Tools', () => {
 
     it('introduce posts to registry channel with role', async () => {
       const result = await handleIdentityTool('introduce', { role: 'fullstack' }, deps)
-      expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+      expect(deps.botClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
         text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Role: fullstack',
       })
@@ -47,7 +47,7 @@ describe('Identity Tools', () => {
 
     it('introduce includes status when provided', async () => {
       await handleIdentityTool('introduce', { role: 'fullstack', status: 'Working on auth' }, deps)
-      expect(deps.webClient.chat.postMessage).toHaveBeenCalledWith({
+      expect(deps.botClient.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C_REGISTRY',
         text: ':robot_face: *[stefan | dispatcher | fullstack]* online | Role: fullstack | Status: Working on auth',
       })
@@ -71,7 +71,7 @@ describe('Identity Tools', () => {
     })
 
     it('who returns message when no sessions', async () => {
-      ;(deps.webClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ;(deps.botClient.conversations.history as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true, messages: [],
       })
       const result = await handleIdentityTool('who', {}, deps)

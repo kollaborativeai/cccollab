@@ -7,11 +7,12 @@ import { SessionManager as SessionManagerClass } from '../session.js'
 export interface TopicToolDeps {
   session: SessionManager
   webClient: WebClient
+  postClient: WebClient
   subscriptionManager: SubscriptionManager
   context: ActiveContext
 }
 
-const TOPIC_PATTERN = /:large_green_circle: TOPIC: (.+?) \| \*\[(.+?)\]\*|:white_check_mark: TOPIC: (.+?) \| \*\[(.+?)\]\*/
+const TOPIC_PATTERN = /^:(large_green_circle|white_check_mark): (.+)$/
 
 export function createTopicTools() {
   return [
@@ -78,7 +79,6 @@ export function createTopicTools() {
 
 interface TopicInfo {
   topic: string
-  author: string
   threadTs: string
   replyCount: number
   resolved: boolean
@@ -91,11 +91,9 @@ async function fetchTopics(channelId: string, webClient: WebClient): Promise<Top
     const text = msg.text ?? ''
     const match = TOPIC_PATTERN.exec(text)
     if (!match) continue
-    // Group 1/2 = active, group 3/4 = resolved
-    const resolved = !match[1]
-    const topic = (match[1] ?? match[3])!
-    const author = (match[2] ?? match[4])!
-    topics.push({ topic, author, threadTs: msg.ts ?? '', replyCount: msg.reply_count ?? 0, resolved })
+    const resolved = match[1] === 'white_check_mark'
+    const topic = match[2]!
+    topics.push({ topic, threadTs: msg.ts ?? '', replyCount: msg.reply_count ?? 0, resolved })
   }
   return topics
 }
@@ -121,7 +119,7 @@ export async function handleTopicTool(
       const lines = [`Topics in #${channelName} (last ${hours}h):`]
       for (const t of filtered) {
         const status = t.resolved ? ':white_check_mark:' : ':large_green_circle:'
-        lines.push(`  ${status} "${t.topic}" by ${t.author} (${t.replyCount} replies) - thread_ts: ${t.threadTs}`)
+        lines.push(`  ${status} "${t.topic}" (${t.replyCount} replies) - thread_ts: ${t.threadTs}`)
       }
       return lines.join('\n')
     }
@@ -131,10 +129,19 @@ export async function handleTopicTool(
       }
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
-      let text = `:large_green_circle: TOPIC: ${topic} | *[${deps.session.sessionName}]*`
-      if (detail) text += `\n${detail}`
-      if (participants_needed) text += `\nNeeded: ${participants_needed}`
-      const result = await deps.webClient.chat.postMessage({ channel: channelId, text })
+      const headerText = `:large_green_circle: ${topic}`
+      const result = await deps.postClient.chat.postMessage({ channel: channelId, text: headerText })
+      // Post detail as first thread reply if provided
+      if (detail || participants_needed) {
+        let detailText = ''
+        if (detail) detailText += detail
+        if (participants_needed) detailText += `${detailText ? '\n' : ''}Needed: ${participants_needed}`
+        await deps.postClient.chat.postMessage({
+          channel: channelId,
+          thread_ts: result.ts!,
+          text: deps.session.fmt(detailText),
+        })
+      }
       const threadTs = result.ts ?? 'unknown'
       deps.context.setTopic(threadTs, topic)
       return `Topic started: "${topic}" in #${channelName}\nthread_ts: ${threadTs}\nThis is now your active topic.`
@@ -172,10 +179,6 @@ export async function handleTopicTool(
       }
 
       const replies = await deps.webClient.conversations.replies({ channel: channelId, ts: threadTs })
-      await deps.webClient.chat.postMessage({
-        channel: channelId, thread_ts: threadTs,
-        text: `:robot_face: *[${deps.session.sessionName}]* joined the topic`,
-      })
       deps.context.setTopic(threadTs, topicName)
 
       const lines = [`Joined topic "${topicName}" in #${channelName}. This is now your active topic.`, '', 'Topic history:']
@@ -193,10 +196,10 @@ export async function handleTopicTool(
       const channelName = deps.context.getChannelName()
       if (deps.context.hasTopic()) {
         const threadTs = deps.context.getThreadTs()
-        await deps.webClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
+        await deps.postClient.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: deps.session.fmt(text) })
         return `Message sent in topic thread.`
       } else {
-        await deps.webClient.chat.postMessage({ channel: channelId, text: deps.session.fmt(text) })
+        await deps.postClient.chat.postMessage({ channel: channelId, text: deps.session.fmt(text) })
         return `Message sent in #${channelName}.`
       }
     }
@@ -208,11 +211,11 @@ export async function handleTopicTool(
       const parentMsg = (replies.messages ?? [])[0]
       if (parentMsg?.text) {
         const updatedText = parentMsg.text.replace(':large_green_circle:', ':white_check_mark:')
-        await deps.webClient.chat.update({ channel: channelId, ts: threadTs, text: updatedText })
+        await deps.postClient.chat.update({ channel: channelId, ts: threadTs, text: updatedText })
       }
-      await deps.webClient.chat.postMessage({
+      await deps.postClient.chat.postMessage({
         channel: channelId, thread_ts: threadTs,
-        text: `:white_check_mark: RESOLVED by *[${deps.session.sessionName}]*\n${summary}`,
+        text: `:white_check_mark: RESOLVED by *[${deps.session.displayName}]*\n${summary}`,
       })
       deps.context.clearTopic()
       return `Topic resolved: ${summary}`
