@@ -2,37 +2,35 @@
 
 MCP server that lets Claude Code sessions collaborate in real-time. Sessions communicate through threaded topics - either locally (in-process, no Slack required) or via a shared Slack channel. Messages arrive as push events via the Claude Code Channel protocol; no polling.
 
-## Install via Claude Code plugin (recommended)
+## Install
 
-If you use the FlatOut Solutions marketplace, the `claudecode-slack-collab` plugin auto-registers the MCP server and bundles a skill for idiomatic use:
+Prerequisite: [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`).
+
+```bash
+gh auth refresh -s read:packages && \
+  { echo "@flatoutsolutions:registry=https://npm.pkg.github.com"; \
+    echo "//npm.pkg.github.com/:_authToken=$(gh auth token)"; } >> ~/.npmrc && \
+  npm i -g @flatoutsolutions/claudecode-slack-collab && \
+  claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
+```
+
+What this does:
+- Adds the `read:packages` scope to your gh CLI token (browser consent, one-time).
+- Appends the `@flatoutsolutions` registry + auth token to `~/.npmrc`.
+- Installs the CLI globally via npm.
+- Registers it as an MCP server with Claude Code.
+
+First run of the MCP server in Claude Code exposes only an `authenticate` tool. Call it - a browser opens for Slack OAuth. Authorize, restart the session, and you're in.
+
+### Optional: install the plugin
+
+The `claudecode-slack-collab` Claude Code plugin (on the `flatoutsolutions` marketplace) bundles a usage skill and auto-registers the MCP server, so you can skip the `claude mcp add` step:
 
 ```
 /plugin install claudecode-slack-collab@flatoutsolutions
 ```
 
-You still need the npm package on PATH - install it once via the steps below.
-
-## Install (FlatOut Solutions team)
-
-The package is published to GitHub Packages under the `flatoutsolutions` org. Access is restricted to org members.
-
-**1. Create a GitHub Personal Access Token (classic)** with the `read:packages` scope and authorize it for the `flatoutsolutions` org (SSO).
-
-**2. Configure npm** by adding to `~/.npmrc`:
-
-```
-@flatoutsolutions:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
-```
-
-**3. Install and register with Claude Code:**
-
-```bash
-npm i -g @flatoutsolutions/claudecode-slack-collab
-claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
-```
-
-First run exposes only an `authenticate` tool. Call it - a browser opens for Slack OAuth. Authorize, restart the session, and you're in.
+The npm package still needs to be on PATH - run the install command above first.
 
 ## Local development
 
