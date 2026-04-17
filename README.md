@@ -86,10 +86,11 @@ yarn build       # compile to dist/
 
 ## Releasing
 
-Publishing is automated: push a `vX.Y.Z` tag that matches the `version` in `package.json` and the GitHub Actions `Publish` workflow will run tests, build, and `npm publish` to GitHub Packages.
+Releases are fully automatic. Every push to `main` runs the `Release` workflow, which:
 
-```bash
-# bump version in package.json, commit, then:
-git tag v0.1.0
-git push origin v0.1.0
-```
+1. Computes the next version from commit messages since the last tag (`feat:` -> minor, everything else -> patch, `chore: bump version to` commits skipped).
+2. Runs typecheck, tests, and build.
+3. Publishes `@flatoutsolutions/claudecode-slack-collab` to GitHub Packages.
+4. Commits the bumped `package.json` back to `main` and tags it `vX.Y.Z`.
+
+Use [conventional commit](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit `version` in `package.json` by hand.
