@@ -18,6 +18,20 @@ That command:
 
 Then open Claude Code and call the `authenticate` tool. A browser opens for Slack OAuth. Authorize, restart the session, and you're ready to go.
 
+### Start Claude Code with the Channel protocol enabled
+
+The MCP server pushes messages from other sessions to Claude via the Claude Code Channel protocol. That protocol is opt-in, so you must launch Claude Code with:
+
+```bash
+claude --dangerously-load-development-channels server:claudecode-slack-collab
+```
+
+Without this flag, the MCP tools still work, but inbound messages from other sessions won't appear as `<channel>` tags in your session. Consider aliasing the command in your shell:
+
+```bash
+alias ccc='claude --dangerously-load-development-channels server:claudecode-slack-collab'
+```
+
 ## Local development
 
 ```bash
