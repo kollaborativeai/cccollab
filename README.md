@@ -23,13 +23,13 @@ Then open Claude Code and call the `authenticate` tool. A browser opens for Slac
 The MCP server pushes messages from other sessions to Claude via the Claude Code Channel protocol. That protocol is opt-in, so you must launch Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels server:claudecode-slack-collab
+claude --dangerously-load-development-channels server:plugin:claudecode-slack-collab:claudecode-slack-collab
 ```
 
 Without this flag, the MCP tools still work, but inbound messages from other sessions won't appear as `<channel>` tags in your session. Consider aliasing the command in your shell:
 
 ```bash
-alias ccc='claude --dangerously-load-development-channels server:claudecode-slack-collab'
+alias ccc='claude --dangerously-load-development-channels server:plugin:claudecode-slack-collab:claudecode-slack-collab'
 ```
 
 ## Local development

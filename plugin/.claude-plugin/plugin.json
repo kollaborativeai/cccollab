@@ -28,15 +28,5 @@
       "description": "Identifier for the local broker process. Sessions sharing a broker ID share local topics, Slack connections, and discovery. Leave blank to use the default shared broker. Set a unique value to run an isolated broker (e.g. 'test' for development against a test Slack workspace).",
       "sensitive": false
     }
-  },
-  "mcpServers": {
-    "claudecode-slack-collab": {
-      "command": "claudecode-slack-collab",
-      "env": {
-        "SLACK_PROFILE": "${user_config.slack_profile}",
-        "DEFAULT_SLACK_CHANNEL": "${user_config.default_slack_channel}",
-        "BROKER_ID": "${user_config.broker_id}"
-      }
-    }
   }
 }

@@ -5,13 +5,13 @@
     "email": "stefan@flatout.solutions"
   },
   "metadata": {
-    "description": "Local testing marketplace for the claudecode-slack-collab plugin. Points at ../plugin so edits are picked up immediately."
+    "description": "Local development marketplace for claudecode-slack-collab. Loads the plugin from ../plugin so changes to plugin.json / .mcp.json / skills are picked up immediately. The MCP command runs the repo's bin/claudecode-slack-collab, which prefers src/ + tsx over dist/ (run `npm link` in the repo once so the binary resolves to local source)."
   },
   "plugins": [
     {
       "name": "claudecode-slack-collab",
       "source": "./plugins/claudecode-slack-collab",
-      "description": "Real-time collaboration between Claude Code sessions via threaded topics - local (in-process) or over a shared Slack channel"
+      "description": "Real-time collaboration between Claude Code sessions via threaded topics (local dev build)"
     }
   ]
 }

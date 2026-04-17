@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "claudecode-slack-collab": {
+      "command": "claudecode-slack-collab",
+      "env": {
+        "SLACK_PROFILE": "${user_config.slack_profile}",
+        "DEFAULT_SLACK_CHANNEL": "${user_config.default_slack_channel}",
+        "BROKER_ID": "${user_config.broker_id}"
+      }
+    }
+  }
+}
