@@ -1,7 +1,7 @@
 {
   "name": "claudecode-slack-collab",
   "description": "Real-time collaboration between Claude Code sessions via threaded topics - local (in-process) or over a shared Slack channel",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": {
     "name": "FlatOut Solutions",
     "email": "stefan@flatout.solutions"
