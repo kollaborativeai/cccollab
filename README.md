@@ -23,13 +23,13 @@ Then open Claude Code and call the `authenticate` tool. A browser opens for Slac
 The MCP server pushes messages from other sessions to Claude via the Claude Code Channel protocol. That protocol is opt-in, so you must launch Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels server:plugin:claudecode-slack-collab:claudecode-slack-collab
+claude --dangerously-load-development-channels plugin:claudecode-slack-collab@flatoutsolutions
 ```
 
 Without this flag, the MCP tools still work, but inbound messages from other sessions won't appear as `<channel>` tags in your session. Consider aliasing the command in your shell:
 
 ```bash
-alias ccc='claude --dangerously-load-development-channels server:plugin:claudecode-slack-collab:claudecode-slack-collab'
+alias ccc='claude --dangerously-load-development-channels plugin:claudecode-slack-collab@flatoutsolutions'
 ```
 
 ## Local development
@@ -39,7 +39,14 @@ git clone git@github.com:flatoutsolutions/claudecode-slack-collab.git
 cd claudecode-slack-collab
 yarn install
 npm link
-claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
+claude plugin marketplace add ./test-marketplace
+claude plugin install claudecode-slack-collab@claudecode-slack-collab-test
+```
+
+The repo ships a `test-marketplace/` that references `plugin/` via symlink, plus a `test/` project with `.claude/settings.json` that disables `@flatoutsolutions` and enables the local build. Run `cd test` and launch with the local channel target:
+
+```bash
+claude --dangerously-load-development-channels plugin:claudecode-slack-collab@claudecode-slack-collab-test
 ```
 
 The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls back to `dist/server.js`.
