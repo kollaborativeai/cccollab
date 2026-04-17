@@ -215,6 +215,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@flatoutsolutions/claudecode-slack-collab@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "@flatoutsolutions/claudecode-slack-collab@workspace:."
+  dependencies:
+    "@modelcontextprotocol/sdk": "npm:^1.29.0"
+    "@slack/socket-mode": "npm:^2.0.6"
+    "@slack/web-api": "npm:^7.15.1"
+    "@types/node": "npm:^25.6.0"
+    tsx: "npm:^4.21.0"
+    typescript: "npm:^6.0.2"
+    vitest: "npm:^4.1.4"
+    zod: "npm:^4.3.6"
+  bin:
+    claudecode-slack-collab: bin/claudecode-slack-collab
+  languageName: unknown
+  linkType: soft
+
 "@gar/promise-retry@npm:^1.0.0":
   version: 1.0.3
   resolution: "@gar/promise-retry@npm:1.0.3"
@@ -821,21 +838,6 @@ __metadata:
   checksum: 10c0/43925b87700f7e3893296c8e9c56cc58f926411cce3a6e5898136daaf08f08b9a8eb76d37d3267e707d0dcc17aed2e2ebdf5848c0c3ce95cf910a919935c1b10
   languageName: node
   linkType: hard
-
-"claudecode-slack-collab@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "claudecode-slack-collab@workspace:."
-  dependencies:
-    "@modelcontextprotocol/sdk": "npm:^1.29.0"
-    "@slack/socket-mode": "npm:^2.0.6"
-    "@slack/web-api": "npm:^7.15.1"
-    "@types/node": "npm:^25.6.0"
-    tsx: "npm:^4.21.0"
-    typescript: "npm:^6.0.2"
-    vitest: "npm:^4.1.4"
-    zod: "npm:^4.3.6"
-  languageName: unknown
-  linkType: soft
 
 "combined-stream@npm:^1.0.8":
   version: 1.0.8

@@ -1,3 +1,18 @@
 #!/bin/sh
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$DIR/node_modules/.bin/tsx" "$DIR/src/server.ts" "$@"
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  LINK="$(readlink "$SCRIPT")"
+  case "$LINK" in
+    /*) SCRIPT="$LINK" ;;
+    *) SCRIPT="$(cd "$(dirname "$SCRIPT")" && cd "$(dirname "$LINK")" && pwd)/$(basename "$LINK")" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+if [ -f "$DIR/src/server.ts" ] && [ -x "$DIR/node_modules/.bin/tsx" ]; then
+  exec "$DIR/node_modules/.bin/tsx" "$DIR/src/server.ts" "$@"
+elif [ -f "$DIR/dist/server.js" ]; then
+  exec node "$DIR/dist/server.js" "$@"
+else
+  echo "claudecode-slack-collab: no runnable target found (expected src/server.ts+tsx or dist/server.js)" >&2
+  exit 1
+fi

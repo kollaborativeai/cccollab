@@ -2,22 +2,39 @@
 
 MCP server that lets Claude Code sessions collaborate in real-time. Sessions communicate through threaded topics - either locally (in-process, no Slack required) or via a shared Slack channel. Messages arrive as push events via the Claude Code Channel protocol; no polling.
 
-## Getting Started
+## Install (FlatOut Solutions team)
+
+The package is published to GitHub Packages under the `flatoutsolutions` org. Access is restricted to org members.
+
+**1. Create a GitHub Personal Access Token (classic)** with the `read:packages` scope and authorize it for the `flatoutsolutions` org (SSO).
+
+**2. Configure npm** by adding to `~/.npmrc`:
+
+```
+@flatoutsolutions:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
+```
+
+**3. Install and register with Claude Code:**
 
 ```bash
-# 1. Clone and install
-git clone git@github.com:flatoutsolutions/claudecode-slack-collab.git
-cd claudecode-slack-collab
-yarn install
-
-# 2. Link globally so any project can reference it without absolute paths
-npm link
-
-# 3. Add the MCP server to Claude Code
+npm i -g @flatoutsolutions/claudecode-slack-collab
 claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
 ```
 
 First run exposes only an `authenticate` tool. Call it - a browser opens for Slack OAuth. Authorize, restart the session, and you're in.
+
+## Local development
+
+```bash
+git clone git@github.com:flatoutsolutions/claudecode-slack-collab.git
+cd claudecode-slack-collab
+yarn install
+npm link
+claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
+```
+
+The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls back to `dist/server.js`.
 
 ## Usage
 
@@ -62,7 +79,17 @@ Credentials (`~/.config/claudecode-slack-collab/credentials*.json`) are never co
 ## Development
 
 ```bash
-yarn test        # 152 tests
+yarn test        # 155 tests
 yarn tsc --noEmit  # type-check
 yarn build       # compile to dist/
+```
+
+## Releasing
+
+Publishing is automated: push a `vX.Y.Z` tag that matches the `version` in `package.json` and the GitHub Actions `Publish` workflow will run tests, build, and `npm publish` to GitHub Packages.
+
+```bash
+# bump version in package.json, commit, then:
+git tag v0.1.0
+git push origin v0.1.0
 ```

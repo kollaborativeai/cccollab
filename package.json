@@ -1,25 +1,39 @@
 {
-  "name": "claudecode-slack-collab",
+  "name": "@flatoutsolutions/claudecode-slack-collab",
+  "version": "0.1.0",
   "packageManager": "yarn@4.12.0",
   "type": "module",
-  "bin": {
-    "claudecode-slack-collab": "bin/claudecode-slack-collab"
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "bin": "bin/claudecode-slack-collab",
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flatoutsolutions/claudecode-slack-collab.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
   },
   "scripts": {
     "start": "npx tsx src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "yarn build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@slack/socket-mode": "^2.0.6",
     "@slack/web-api": "^7.15.1",
-    "tsx": "^4.21.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.4"
   }
