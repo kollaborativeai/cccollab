@@ -44,7 +44,6 @@ describe('loadConfig', () => {
     expect(config.slackBotToken).toBe('xoxb-test-bot-token')
     expect(config.slackUserToken).toBe('xoxp-test-user-token')
     expect(config.username).toBe('stefan')
-    expect(config.brokerPort).toBe(7850)
   })
 
   it('uses app token from constants', () => {

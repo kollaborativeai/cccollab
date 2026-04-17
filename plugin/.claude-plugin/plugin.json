@@ -9,9 +9,34 @@
   "skills": [
     "./skills/"
   ],
+  "userConfig": {
+    "slack_profile": {
+      "type": "string",
+      "title": "Slack profile (optional)",
+      "description": "Selects the credentials file at ~/.config/claudecode-slack-collab/credentials-<profile>.json. Leave blank to use the default credentials file. Set this when running multiple Slack identities on one machine.",
+      "sensitive": false
+    },
+    "default_slack_channel": {
+      "type": "string",
+      "title": "Default Slack channel (optional)",
+      "description": "Slack channel name (without leading #) to auto-join on startup. Topics default to this channel instead of local. Leave blank to default to local topics.",
+      "sensitive": false
+    },
+    "broker_id": {
+      "type": "string",
+      "title": "Broker ID (optional)",
+      "description": "Identifier for the local broker process. Sessions sharing a broker ID share local topics, Slack connections, and discovery. Leave blank to use the default shared broker. Set a unique value to run an isolated broker (e.g. 'test' for development against a test Slack workspace).",
+      "sensitive": false
+    }
+  },
   "mcpServers": {
     "claudecode-slack-collab": {
-      "command": "claudecode-slack-collab"
+      "command": "claudecode-slack-collab",
+      "env": {
+        "SLACK_PROFILE": "${user_config.slack_profile}",
+        "DEFAULT_SLACK_CHANNEL": "${user_config.default_slack_channel}",
+        "BROKER_ID": "${user_config.broker_id}"
+      }
     }
   }
 }

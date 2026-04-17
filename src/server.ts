@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { WebClient } from '@slack/web-api'
 import { loadConfig, type Config } from './config.js'
 import { getCredentialsPath } from './credentials.js'
-import { SLACK_APP_TOKEN, BROKER_PORT } from './constants.js'
+import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { runOAuthFlow } from './auth.js'
 import { SessionManager } from './session.js'
 import { SubscriptionManager } from './subscriptions.js'
@@ -64,7 +64,7 @@ After authentication completes, restart your Claude Code session to start collab
   console.error('[slack-collab] Not authenticated. Waiting for authenticate tool call...')
 }
 
-async function startAuthenticated(config: Config) {
+async function startAuthenticated(config: Config, brokerPort: number) {
   const botClient = new WebClient(config.slackBotToken)
   const postClient = new WebClient(config.slackUserToken)
 
@@ -103,8 +103,7 @@ async function startAuthenticated(config: Config) {
   const context = new ActiveContext()
   context.joinLocalChannel()
 
-  // Ensure broker is running
-  await ensureBroker(config.slackAppToken)
+  // Broker already ensured; brokerPort passed in
 
   // Auto-join default channel if configured
   let defaultChannelJoined: string | undefined
@@ -167,7 +166,7 @@ async function startAuthenticated(config: Config) {
 
   const messageBus = new MessageBus(mcp)
   const socketListener = new SocketModeListener({
-    brokerUrl: `http://localhost:${config.brokerPort}`,
+    brokerUrl: `http://127.0.0.1:${brokerPort}`,
     messageBus,
     subscriptionManager: subscriptions,
     sessionManager: session,
@@ -184,7 +183,7 @@ async function startAuthenticated(config: Config) {
 
   const identityDeps = { session }
   const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
-  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort: config.brokerPort }
+  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }))
 
@@ -209,32 +208,38 @@ async function startAuthenticated(config: Config) {
   console.error(`[slack-collab] Session "${session.sessionName}" connected as ${config.username}`)
 }
 
-async function ensureBroker(appToken: string): Promise<void> {
-  try {
-    const res = await fetch(`http://localhost:${BROKER_PORT}/health`)
-    if (res.ok) return
-  } catch {
-    // Not running, spawn it
+async function ensureBroker(appToken: string): Promise<number> {
+  const existing = readRendezvous()
+  if (existing && await probeBroker(existing.port)) {
+    return existing.port
   }
 
-  const brokerPath = new URL('./broker.ts', import.meta.url).pathname
-  // Resolve tsx from the package's own node_modules so this works regardless of cwd
-  const tsxBin = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
-  const child = spawn(tsxBin, [brokerPath], {
+  // Rendezvous is stale (dead broker) or missing. Remove and spawn fresh.
+  if (existing) removeRendezvous()
+
+  const isCompiled = import.meta.url.endsWith('.js')
+  const brokerFile = isCompiled ? 'broker.js' : 'broker.ts'
+  const brokerPath = new URL(`./${brokerFile}`, import.meta.url).pathname
+
+  let command: string
+  let args: string[]
+  if (isCompiled) {
+    command = process.execPath
+    args = [brokerPath]
+  } else {
+    command = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
+    args = [brokerPath]
+  }
+
+  const child = spawn(command, args, {
     env: { ...process.env, SLACK_APP_TOKEN: appToken },
     detached: true,
     stdio: 'ignore',
   })
   child.unref()
 
-  for (let i = 0; i < 20; i++) {
-    await new Promise<void>(r => setTimeout(r, 500))
-    try {
-      const res = await fetch(`http://localhost:${BROKER_PORT}/health`)
-      if (res.ok) return
-    } catch { /* keep trying */ }
-  }
-  throw new Error('Broker failed to start within 10 seconds')
+  const rendezvous = await waitForHealthyRendezvous(10_000)
+  return rendezvous.port
 }
 
 async function main() {
@@ -243,7 +248,8 @@ async function main() {
   if (!config.authenticated) {
     await startUnauthenticated()
   } else {
-    await startAuthenticated(config)
+    const brokerPort = await ensureBroker(config.slackAppToken)
+    await startAuthenticated(config, brokerPort)
   }
 
   const cleanup = () => { console.error('[slack-collab] Shutting down...'); process.exit(0) }

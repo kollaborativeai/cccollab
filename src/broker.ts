@@ -1,13 +1,14 @@
 #!/usr/bin/env npx tsx
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { writeFileSync, appendFileSync } from 'node:fs'
 import crypto from 'node:crypto'
 import { SocketModeClient } from '@slack/socket-mode'
-import { BROKER_PORT } from './constants.js'
+import { BROKER_ID, BROKER_RENDEZVOUS_FILE } from './constants.js'
+import { removeRendezvous } from './broker-discovery.js'
 
-const PORT = BROKER_PORT
-const PID_FILE = '/tmp/slack-collab-broker.pid'
-const LOG_FILE = '/tmp/slack-collab-broker.log'
+const PID_FILE = `/tmp/slack-collab-broker-${BROKER_ID}.pid`
+const LOG_FILE = `/tmp/slack-collab-broker-${BROKER_ID}.log`
 
 type SSEResponse = ServerResponse & { req: IncomingMessage }
 
@@ -367,6 +368,7 @@ function shutdown(): void {
   }
   clients.clear()
   server.close()
+  removeRendezvous()
   process.exit(0)
 }
 
@@ -375,13 +377,16 @@ process.on('SIGINT', shutdown)
 
 async function main(): Promise<void> {
   writeFileSync(PID_FILE, String(process.pid))
-  log(`PID ${process.pid} written to ${PID_FILE}`)
+  log(`PID ${process.pid} (id=${BROKER_ID}) written to ${PID_FILE}`)
 
   await socketClient.start()
   log('Socket Mode connected')
 
-  server.listen(PORT, '127.0.0.1', () => {
-    log(`Broker listening on http://127.0.0.1:${PORT}`)
+  server.listen(0, '127.0.0.1', () => {
+    const addr = server.address() as AddressInfo
+    const port = addr.port
+    writeFileSync(BROKER_RENDEZVOUS_FILE, JSON.stringify({ port, pid: process.pid, id: BROKER_ID }))
+    log(`Broker listening on http://127.0.0.1:${port} (id=${BROKER_ID}, rendezvous=${BROKER_RENDEZVOUS_FILE})`)
   })
 }
 

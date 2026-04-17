@@ -1,0 +1,17 @@
+{
+  "name": "claudecode-slack-collab-test",
+  "owner": {
+    "name": "FlatOut Solutions",
+    "email": "stefan@flatout.solutions"
+  },
+  "metadata": {
+    "description": "Local testing marketplace for the claudecode-slack-collab plugin. Points at ../plugin so edits are picked up immediately."
+  },
+  "plugins": [
+    {
+      "name": "claudecode-slack-collab",
+      "source": "./plugins/claudecode-slack-collab",
+      "description": "Real-time collaboration between Claude Code sessions via threaded topics - local (in-process) or over a shared Slack channel"
+    }
+  ]
+}

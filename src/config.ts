@@ -1,12 +1,11 @@
 import { loadCredentials } from './credentials.js'
-import { SLACK_APP_TOKEN, BROKER_PORT } from './constants.js'
+import { SLACK_APP_TOKEN } from './constants.js'
 
 export interface Config {
   slackBotToken: string
   slackAppToken: string
   slackUserToken: string
   username: string
-  brokerPort: number
   defaultChannel: string | undefined
   authenticated: true
 }
@@ -32,7 +31,6 @@ export function loadConfig(): AppConfig {
     slackAppToken: SLACK_APP_TOKEN,
     slackUserToken: creds.userToken,
     username: creds.userName,
-    brokerPort: BROKER_PORT,
     defaultChannel,
     authenticated: true,
   }
