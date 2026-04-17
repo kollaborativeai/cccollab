@@ -2,6 +2,16 @@
 
 MCP server that lets Claude Code sessions collaborate in real-time. Sessions communicate through threaded topics - either locally (in-process, no Slack required) or via a shared Slack channel. Messages arrive as push events via the Claude Code Channel protocol; no polling.
 
+## Install via Claude Code plugin (recommended)
+
+If you use the FlatOut Solutions marketplace, the `claudecode-slack-collab` plugin auto-registers the MCP server and bundles a skill for idiomatic use:
+
+```
+/plugin install claudecode-slack-collab@flatoutsolutions
+```
+
+You still need the npm package on PATH - install it once via the steps below.
+
 ## Install (FlatOut Solutions team)
 
 The package is published to GitHub Packages under the `flatoutsolutions` org. Access is restricted to org members.
