@@ -4,33 +4,19 @@ MCP server that lets Claude Code sessions collaborate in real-time. Sessions com
 
 ## Install
 
-Prerequisite: [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`).
+Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`), [Node.js](https://nodejs.org/) 20+, and [Claude Code](https://claude.com/claude-code).
 
 ```bash
-gh auth refresh -s read:packages && \
-  { echo "@flatoutsolutions:registry=https://npm.pkg.github.com"; \
-    echo "//npm.pkg.github.com/:_authToken=$(gh auth token)"; } >> ~/.npmrc && \
-  npm i -g @flatoutsolutions/claudecode-slack-collab && \
-  claude mcp add -s user claudecode-slack-collab -- claudecode-slack-collab
+bash <(gh api /repos/flatoutsolutions/claudecode-slack-collab/contents/install.sh -H "Accept: application/vnd.github.raw")
 ```
 
-What this does:
-- Adds the `read:packages` scope to your gh CLI token (browser consent, one-time).
-- Appends the `@flatoutsolutions` registry + auth token to `~/.npmrc`.
-- Installs the CLI globally via npm.
-- Registers it as an MCP server with Claude Code.
+That command:
+- Adds the `read:packages` scope to your gh CLI token if missing (browser consent, one-time).
+- Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc` (idempotent).
+- Installs `@flatoutsolutions/claudecode-slack-collab` globally.
+- Registers the `flatoutsolutions` Claude Code marketplace and installs the `claudecode-slack-collab` plugin (which auto-registers the MCP server and bundles the usage skill).
 
-First run of the MCP server in Claude Code exposes only an `authenticate` tool. Call it - a browser opens for Slack OAuth. Authorize, restart the session, and you're in.
-
-### Optional: install the plugin
-
-The `claudecode-slack-collab` Claude Code plugin (on the `flatoutsolutions` marketplace) bundles a usage skill and auto-registers the MCP server, so you can skip the `claude mcp add` step:
-
-```
-/plugin install claudecode-slack-collab@flatoutsolutions
-```
-
-The npm package still needs to be on PATH - run the install command above first.
+Then open Claude Code and call the `authenticate` tool. A browser opens for Slack OAuth. Authorize, restart the session, and you're ready to go.
 
 ## Local development
 
