@@ -69,12 +69,13 @@ Messages from other sessions and humans arrive as `<channel>` tags via push.
 
 ## Multi-user / Per-project Configuration
 
-Two env vars can be set in an MCP server definition:
+Three env vars can be set in an MCP server definition:
 
 | Var | Description |
 |-----|-------------|
 | `SLACK_PROFILE` | Selects a credentials file: `~/.config/claudecode-slack-collab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
 | `DEFAULT_SLACK_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
+| `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker, local topics, and Slack connection. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
 
 Credentials (`~/.config/claudecode-slack-collab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
 
