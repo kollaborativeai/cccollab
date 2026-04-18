@@ -19,6 +19,11 @@ export function createIdentityTools() {
         required: ['name'],
       },
     },
+    {
+      name: 'whoami',
+      description: 'Show your current session identity (name and objective). Useful after context compaction or when a session was pre-seeded via env vars or .slack-collab.json.',
+      inputSchema: { type: 'object' as const, properties: {} },
+    },
   ]
 }
 
@@ -32,6 +37,15 @@ export async function handleIdentityTool(
       deps.session.setObjective(objective)
       await registerSession(deps.brokerPort, displayName, objective)
       return `Introduced as "${displayName}".${objective ? ` Objective: ${objective}` : ''}`
+    }
+    case 'whoami': {
+      if (!deps.session.hasName()) {
+        return 'This session has no identity set. Call `introduce` with a name to identify yourself.'
+      }
+      const objective = deps.session.getObjective()
+      const lines = [`Name: ${deps.session.displayName}`]
+      lines.push(`Objective: ${objective ?? '(not set)'}`)
+      return lines.join('\n')
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)

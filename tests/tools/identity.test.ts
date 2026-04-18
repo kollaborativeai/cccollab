@@ -11,10 +11,10 @@ function createMockDeps(): IdentityToolDeps {
 
 describe('Identity Tools', () => {
   describe('createIdentityTools', () => {
-    it('returns 1 tool definition', () => {
+    it('returns 2 tool definitions', () => {
       const tools = createIdentityTools()
-      expect(tools).toHaveLength(1)
-      expect(tools.map((t) => t.name)).toEqual(['introduce'])
+      expect(tools).toHaveLength(2)
+      expect(tools.map((t) => t.name)).toEqual(['introduce', 'whoami'])
     })
   })
 
@@ -40,6 +40,28 @@ describe('Identity Tools', () => {
 
     it('throws on unknown tool', async () => {
       await expect(handleIdentityTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown identity tool')
+    })
+
+    describe('whoami', () => {
+      it('reports name and objective when both are set', async () => {
+        await handleIdentityTool('introduce', { name: 'architect', objective: 'design the API' }, deps)
+        const result = await handleIdentityTool('whoami', {}, deps)
+        expect(result).toContain('Name: architect')
+        expect(result).toContain('Objective: design the API')
+      })
+
+      it('reports "(not set)" for objective when only name is set', async () => {
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+        const result = await handleIdentityTool('whoami', {}, deps)
+        expect(result).toContain('Name: architect')
+        expect(result).toContain('Objective: (not set)')
+      })
+
+      it('returns guidance when no name has been set', async () => {
+        const result = await handleIdentityTool('whoami', {}, deps)
+        expect(result).toContain('no identity set')
+        expect(result).toContain('introduce')
+      })
     })
   })
 })

@@ -55,6 +55,7 @@ The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls bac
 
 ```
 introduce                 - set your role name (required before sending messages)
+whoami                    - show your current name and objective
 list_channels             - show channels the bot is a member of
 join_channel              - join a Slack channel and make it active
 leave_channel             - leave current channel

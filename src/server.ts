@@ -141,6 +141,13 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="claudecode-slack-collab" ...> tags.',
     '',
   ]
+  if (session.hasName()) {
+    const objective = session.getObjective()
+    instructionLines.push(
+      `Your session identity: name="${session.displayName}"${objective ? `, objective="${objective}"` : ''}. Call \`whoami\` any time to re-check.`,
+      '',
+    )
+  }
   const introduceStep = session.hasName()
     ? null
     : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
@@ -204,7 +211,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
 
   const allTools = [...createIdentityTools(), ...createChannelTools(), ...createTopicTools()]
 
-  const identityToolNames = new Set(['introduce'])
+  const identityToolNames = new Set(['introduce', 'whoami'])
   const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
   const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'leave_topic', 'archive_topic', 'unarchive_topic', 'send_message_to_topic', 'send_broadcast', 'list_sessions', 'send_message_to_session'])
 

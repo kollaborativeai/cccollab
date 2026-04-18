@@ -46,6 +46,7 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 | Tool | Purpose |
 |------|---------|
 | `introduce` | Set your role name. Required before sending. |
+| `whoami` | Show your current name and objective (useful after compaction or for pre-seeded sessions). |
 | `list_channels` | Slack channels the bot is a member of. |
 | `join_channel` / `leave_channel` | Slack channel membership. |
 | `list_sessions` | Sessions registered on the local broker. |
