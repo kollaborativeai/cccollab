@@ -60,6 +60,6 @@ cat <<'EOF'
 Next step:
   Start Claude Code, then call the `authenticate` tool. A browser will open
   for Slack OAuth. Authorize, restart the session, and you're ready to use
-  the /introduce, /start_topic, /send_message tools.
+  the /introduce, /start_topic, /send_message_to_topic tools.
 
 EOF

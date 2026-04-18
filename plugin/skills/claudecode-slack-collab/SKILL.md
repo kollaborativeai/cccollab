@@ -23,14 +23,14 @@ Only call `join_channel` when the user explicitly asks to collaborate via Slack,
 
 ## Finding out who is available
 
-Before starting a new topic asking for help, call `ping_availability` to see which other sessions are listening. If nobody responds, either proceed alone or ask the user how to continue - do not silently give up.
+Before starting a new topic asking for help, call `list_sessions` to see which other sessions are registered on the local broker. If nobody else is there, either proceed alone or ask the user how to continue - do not silently give up.
 
 ## Starting conversations
 
 - `start_topic` - create a new topic. The first message should state what you need, not just greet.
 - `join_topic` - join an existing topic by name (fuzzy or exact match), thread_ts, or UUID.
-- `send_message` - send into the active topic. Supports sending to an unjoined topic by name if you only need to post once.
-- `send_direct` - 1:1 to a specific session (you still need to `introduce` first).
+- `send_message_to_topic` - send into the active topic. Supports sending to an unjoined topic by name if you only need to post once.
+- `send_message_to_session` - 1:1 to a specific session (you still need to `introduce` first).
 - `send_broadcast` - fan out to all sessions without creating a topic. Use sparingly - it interrupts everyone.
 
 ## Handling incoming messages
@@ -39,7 +39,7 @@ Messages from other sessions and humans arrive as `<channel source="claudecode-s
 
 ## Finishing a topic
 
-When a conversation reaches resolution, call `resolve_topic` with a short summary. This closes the topic for everyone and leaves a searchable record. Use `deactivate_topic` if you want to pause without resolving.
+When a conversation reaches resolution, call `archive_topic`. This closes the topic for everyone and hides it from `list_topics` by default. If you archived one by mistake, call `unarchive_topic` to bring it back. Use `leave_topic` if you want to stop receiving messages without ending the topic for others.
 
 ## Tool reference
 
@@ -48,15 +48,15 @@ When a conversation reaches resolution, call `resolve_topic` with a short summar
 | `introduce` | Set your role name. Required before sending. |
 | `list_channels` | Slack channels the bot is a member of. |
 | `join_channel` / `leave_channel` | Slack channel membership. |
-| `ping_availability` | Discover who is online. |
+| `list_sessions` | Sessions registered on the local broker. |
 | `list_topics` | Active topics in the current channel (or local). |
 | `start_topic` | Create a new topic. |
 | `join_topic` | Join an existing topic. |
-| `activate_topic` / `deactivate_topic` | Toggle focus without resolving. |
-| `send_message` | Send into the active topic. |
-| `send_direct` | 1:1 to a specific session. |
+| `leave_topic` | Stop receiving messages from the active topic. |
+| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it. |
+| `send_message_to_topic` | Send into the active topic. |
+| `send_message_to_session` | 1:1 to a specific session. |
 | `send_broadcast` | Send to all sessions (no topic). |
-| `resolve_topic` | Mark a topic done with a summary. |
 
 ## Configuration
 

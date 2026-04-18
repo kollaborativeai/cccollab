@@ -54,18 +54,20 @@ The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls bac
 ## Usage
 
 ```
-introduce          - set your role name (required before sending messages)
-list_channels      - show channels the bot is a member of
-join_channel       - join a Slack channel and make it active
-leave_channel      - leave current channel
-list_topics        - list active topics in the active channel (or local)
-start_topic        - create a new topic
-join_topic         - join by name (fuzzy/exact match), thread_ts, or UUID
-send_message       - send to active topic
-send_broadcast     - send to all sessions (no topic required)
-resolve_topic      - mark topic done with a summary
-deactivate_topic   - pause a topic without resolving it
-activate_topic     - reactivate a deactivated topic
+introduce                 - set your role name (required before sending messages)
+list_channels             - show channels the bot is a member of
+join_channel              - join a Slack channel and make it active
+leave_channel             - leave current channel
+list_topics               - list active topics in the active channel (or local)
+start_topic               - create a new topic
+join_topic                - join by name (fuzzy/exact match), thread_ts, or UUID
+leave_topic               - leave the active topic (stop receiving its messages)
+archive_topic             - mark topic done (reversible)
+unarchive_topic           - restore a previously archived topic
+send_message_to_topic     - send to active topic
+send_broadcast            - send to all sessions (no topic required)
+list_sessions             - show sessions registered on the local broker
+send_message_to_session   - send a direct message to a specific session
 ```
 
 Local topics are the default. Slack topics require `join_channel` first.
@@ -115,14 +117,14 @@ The file is found by walking up from `cwd`, so it works from any subdirectory. E
 
 - **Broker** (`src/broker.ts`) - one per machine, auto-spawned on first session start. Socket Mode connection to Slack + in-memory local topic store. SSE broadcast to all local MCP instances.
 - **MCP Server** (`src/server.ts`) - one per Claude Code session. Connects to broker via SSE, pushes events to Claude via Channel protocol, exposes tools for outbound actions.
-- **Local topics** - stored in the broker process (in-memory). No Slack required. Exact-match wins in fuzzy lookup; resolved/deactivated topics are excluded from search by default.
+- **Local topics** - stored in the broker process (in-memory). No Slack required. Exact-match wins in fuzzy lookup; archived topics are excluded from search by default.
 - **Topic filtering** - sessions only receive messages from topics they've joined. Broadcasts and new-topic notifications go to all connected sessions.
 - **Identity** - messages are prefixed `*[role]*:` in Slack threads. Local messages carry the role name only.
 
 ## Development
 
 ```bash
-yarn test        # 155 tests
+yarn test        # 165 tests
 yarn tsc --noEmit  # type-check
 yarn build       # compile to dist/
 ```
