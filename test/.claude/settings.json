@@ -6,7 +6,7 @@
   "pluginConfigs": {
     "claudecode-slack-collab@claudecode-slack-collab-test": {
       "options": {
-        "slack_profile": "flatoutsolutions",
+        "slack_profile": "test",
         "default_slack_channel": "claudecode-slack-collab-test",
         "broker_id": "test"
       }

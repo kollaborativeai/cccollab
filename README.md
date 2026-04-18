@@ -84,6 +84,33 @@ Three env vars can be set in an MCP server definition:
 
 Credentials (`~/.config/claudecode-slack-collab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
 
+## Pre-seeded session identity
+
+Normally the session calls `introduce` to set its name and (optionally) objective. You can skip that by pre-seeding both at launch, in two ways:
+
+**Dynamic (env vars)** - best for per-ticket / per-worktree launchers:
+
+```bash
+export SLACK_COLLAB_NAME="KAI-80"
+export SLACK_COLLAB_OBJECTIVE="Implement widget resize handles"
+claude ...
+```
+
+The MCP server reads these on startup and auto-introduces the session. The LLM is told not to call `introduce`.
+
+**Static (per-repo file)** - best for a repo whose role never changes:
+
+Create `.slack-collab.json` at the repo root:
+
+```json
+{
+  "name": "platform-reviewer",
+  "objective": "Review PRs for the platform monorepo and enforce style"
+}
+```
+
+The file is found by walking up from `cwd`, so it works from any subdirectory. Env vars take precedence over the file when both are set.
+
 ## Architecture
 
 - **Broker** (`src/broker.ts`) - one per machine, auto-spawned on first session start. Socket Mode connection to Slack + in-memory local topic store. SSE broadcast to all local MCP instances.

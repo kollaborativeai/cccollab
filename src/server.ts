@@ -8,6 +8,7 @@ import { getCredentialsPath } from './credentials.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { runOAuthFlow } from './auth.js'
 import { SessionManager } from './session.js'
+import { resolveInitialIdentity } from './initial-identity.js'
 import { SubscriptionManager } from './subscriptions.js'
 import { MessageBus } from './message-bus.js'
 import { SocketModeListener } from './socket-listener.js'
@@ -99,6 +100,17 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   }
 
   const session = new SessionManager({ username: config.username, cwd: process.cwd(), worktreeName })
+
+  const initial = resolveInitialIdentity(process.cwd())
+  if (initial.name) session.setName(initial.name)
+  if (initial.objective) session.setObjective(initial.objective)
+  if (initial.name || initial.objective) {
+    console.error(
+      `[slack-collab] Preset identity from ${process.env.SLACK_COLLAB_NAME || process.env.SLACK_COLLAB_OBJECTIVE ? 'env' : '.slack-collab.json'}: ` +
+      `name=${initial.name ?? '(unset)'} objective=${initial.objective ?? '(unset)'}`
+    )
+  }
+
   const subscriptions = new SubscriptionManager(botClient)
   const context = new ActiveContext()
   context.joinLocalChannel()
@@ -122,12 +134,15 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="claudecode-slack-collab" ...> tags.',
     '',
   ]
+  const identityLine = session.hasName()
+    ? `Your identity is already set: name="${session.displayName}"${initial.objective ? `, objective="${initial.objective}"` : ''}. Do NOT call introduce.`
+    : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
   if (defaultChannelJoined) {
     instructionLines.push(
       `Your default channel is #${defaultChannelJoined} (already joined). Topics default to this channel.`,
       '',
       'Workflow:',
-      '1. introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").',
+      `1. ${identityLine}`,
       `2. start_topic or join_topic - create or join a conversation (defaults to #${defaultChannelJoined})`,
       '3. send_message - send to your active topic',
       '',
@@ -138,7 +153,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
       'You are always connected to the LOCAL channel by default. You can start and join local topics immediately without joining any Slack channel.',
       '',
       'Workflow:',
-      '1. introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").',
+      `1. ${identityLine}`,
       '2. start_topic or join_topic - create or join a conversation (defaults to local)',
       '3. send_message - send to your active topic',
       '',
