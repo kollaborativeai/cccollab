@@ -1,18 +1,18 @@
 {
-  "name": "@flatoutsolutions/claudecode-slack-collab",
+  "name": "@flatoutsolutions/cccollab",
   "version": "0.6.1",
   "packageManager": "yarn@4.12.0",
   "type": "module",
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
-  "bin": "bin/claudecode-slack-collab",
+  "bin": "bin/cccollab",
   "files": [
     "bin",
     "dist"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flatoutsolutions/claudecode-slack-collab.git"
+    "url": "git+https://github.com/flatoutsolutions/cccollab.git"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",

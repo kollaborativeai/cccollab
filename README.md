@@ -1,4 +1,4 @@
-# claudecode-slack-collab
+# cccollab
 
 MCP server that lets Claude Code sessions collaborate in real-time. Sessions communicate through threaded topics - either locally (in-process, no Slack required) or via a shared Slack channel. Messages arrive as push events via the Claude Code Channel protocol; no polling.
 
@@ -7,14 +7,14 @@ MCP server that lets Claude Code sessions collaborate in real-time. Sessions com
 Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`), [Node.js](https://nodejs.org/) 20+, and [Claude Code](https://claude.com/claude-code).
 
 ```bash
-bash <(gh api /repos/flatoutsolutions/claudecode-slack-collab/contents/install.sh -H "Accept: application/vnd.github.raw")
+bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
 ```
 
 That command:
 - Adds the `read:packages` scope to your gh CLI token if missing (browser consent, one-time).
 - Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc` (idempotent).
-- Installs `@flatoutsolutions/claudecode-slack-collab` globally.
-- Registers the `flatoutsolutions` Claude Code marketplace and installs the `claudecode-slack-collab` plugin (which auto-registers the MCP server and bundles the usage skill).
+- Installs `@flatoutsolutions/cccollab` globally.
+- Registers the `flatoutsolutions` Claude Code marketplace and installs the `cccollab` plugin (which auto-registers the MCP server and bundles the usage skill).
 
 Then open Claude Code and call the `authenticate` tool. A browser opens for Slack OAuth. Authorize, restart the session, and you're ready to go.
 
@@ -23,30 +23,30 @@ Then open Claude Code and call the `authenticate` tool. A browser opens for Slac
 The MCP server pushes messages from other sessions to Claude via the Claude Code Channel protocol. That protocol is opt-in, so you must launch Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels plugin:claudecode-slack-collab@flatoutsolutions
+claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions
 ```
 
 Without this flag, the MCP tools still work, but inbound messages from other sessions won't appear as `<channel>` tags in your session. Consider aliasing the command in your shell:
 
 ```bash
-alias ccc='claude --dangerously-load-development-channels plugin:claudecode-slack-collab@flatoutsolutions'
+alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions'
 ```
 
 ## Local development
 
 ```bash
-git clone git@github.com:flatoutsolutions/claudecode-slack-collab.git
-cd claudecode-slack-collab
+git clone git@github.com:flatoutsolutions/cccollab.git
+cd cccollab
 yarn install
 npm link
 claude plugin marketplace add ./test-marketplace
-claude plugin install claudecode-slack-collab@claudecode-slack-collab-test
+claude plugin install cccollab@cccollab-test
 ```
 
 The repo ships a `test-marketplace/` that references `plugin/` via symlink, plus a `test/` project with `.claude/settings.json` that disables `@flatoutsolutions` and enables the local build. Run `cd test` and launch with the local channel target:
 
 ```bash
-claude --dangerously-load-development-channels plugin:claudecode-slack-collab@claudecode-slack-collab-test
+claude --dangerously-load-development-channels plugin:cccollab@cccollab-test
 ```
 
 The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls back to `dist/server.js`.
@@ -81,11 +81,11 @@ Three env vars can be set in an MCP server definition:
 
 | Var | Description |
 |-----|-------------|
-| `SLACK_PROFILE` | Selects a credentials file: `~/.config/claudecode-slack-collab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
+| `SLACK_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
 | `DEFAULT_SLACK_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
 | `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker, local topics, and Slack connection. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
 
-Credentials (`~/.config/claudecode-slack-collab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
+Credentials (`~/.config/cccollab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
 
 ## Pre-seeded session identity
 
@@ -136,7 +136,7 @@ Releases are fully automatic. Every push to `main` runs the `Release` workflow, 
 
 1. Computes the next version from commit messages since the last tag (`feat:` -> minor, everything else -> patch, `chore: bump version to` commits skipped).
 2. Runs typecheck, tests, and build.
-3. Publishes `@flatoutsolutions/claudecode-slack-collab` to GitHub Packages.
+3. Publishes `@flatoutsolutions/cccollab` to GitHub Packages.
 4. Commits the bumped `package.json` back to `main` and tags it `vX.Y.Z`.
 
 Use [conventional commit](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit `version` in `package.json` by hand.

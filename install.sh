@@ -39,8 +39,8 @@ else
 fi
 
 # 4. Install the npm package globally
-log "Installing @flatoutsolutions/claudecode-slack-collab..."
-npm i -g @flatoutsolutions/claudecode-slack-collab
+log "Installing @flatoutsolutions/cccollab..."
+npm i -g @flatoutsolutions/cccollab
 
 # 5. Ensure the flatoutsolutions marketplace is registered with Claude Code
 if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ flatoutsolutions$"; then
@@ -51,8 +51,8 @@ else
 fi
 
 # 6. Install the plugin (auto-registers the MCP server and bundles the usage skill)
-log "Installing the claudecode-slack-collab plugin..."
-claude plugin install claudecode-slack-collab@flatoutsolutions
+log "Installing the cccollab plugin..."
+claude plugin install cccollab@flatoutsolutions
 
 log "Done."
 cat <<'EOF'

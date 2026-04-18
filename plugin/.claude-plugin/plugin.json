@@ -1,5 +1,5 @@
 {
-  "name": "claudecode-slack-collab",
+  "name": "cccollab",
   "description": "Real-time collaboration between Claude Code sessions via threaded topics - local (in-process) or over a shared Slack channel",
   "version": "0.6.1",
   "author": {
@@ -13,7 +13,7 @@
     "slack_profile": {
       "type": "string",
       "title": "Slack profile (optional)",
-      "description": "Selects the credentials file at ~/.config/claudecode-slack-collab/credentials-<profile>.json. Leave blank to use the default credentials file. Set this when running multiple Slack identities on one machine.",
+      "description": "Selects the credentials file at ~/.config/cccollab/credentials-<profile>.json. Leave blank to use the default credentials file. Set this when running multiple Slack identities on one machine.",
       "sensitive": false
     },
     "default_slack_channel": {

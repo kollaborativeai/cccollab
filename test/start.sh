@@ -8,5 +8,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 exec claude \
   --dangerously-skip-permissions \
-  --dangerously-load-development-channels plugin:claudecode-slack-collab@claudecode-slack-collab-test \
+  --dangerously-load-development-channels plugin:cccollab@cccollab-test \
   "$@"

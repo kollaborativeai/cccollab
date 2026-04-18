@@ -19,7 +19,7 @@ import { createTopicTools, handleTopicTool } from './tools/topics.js'
 
 async function startUnauthenticated() {
   const mcp = new Server(
-    { name: 'claudecode-slack-collab', version: '1.0.0' },
+    { name: 'cccollab', version: '1.0.0' },
     {
       capabilities: { tools: {} },
       instructions: `You are connected to the Slack Claude Bridge, but NOT YET AUTHENTICATED.
@@ -138,7 +138,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   }
 
   const instructionLines = [
-    'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="claudecode-slack-collab" ...> tags.',
+    'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="cccollab" ...> tags.',
     '',
   ]
   if (session.hasName()) {
@@ -188,7 +188,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   )
 
   const mcp = new Server(
-    { name: 'claudecode-slack-collab', version: '1.0.0' },
+    { name: 'cccollab', version: '1.0.0' },
     {
       capabilities: {
         experimental: { 'claude/channel': {} },

@@ -1,13 +1,13 @@
 {
   "enabledPlugins": {
-    "claudecode-slack-collab@claudecode-slack-collab-test": true,
-    "claudecode-slack-collab@flatoutsolutions": false
+    "cccollab@cccollab-test": true,
+    "cccollab@flatoutsolutions": false
   },
   "pluginConfigs": {
-    "claudecode-slack-collab@claudecode-slack-collab-test": {
+    "cccollab@cccollab-test": {
       "options": {
         "slack_profile": "test",
-        "default_slack_channel": "claudecode-slack-collab-test",
+        "default_slack_channel": "cccollab-test",
         "broker_id": "test"
       }
     }

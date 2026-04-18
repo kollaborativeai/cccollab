@@ -13,6 +13,6 @@ if [ -f "$DIR/src/server.ts" ] && [ -x "$DIR/node_modules/.bin/tsx" ]; then
 elif [ -f "$DIR/dist/server.js" ]; then
   exec node "$DIR/dist/server.js" "$@"
 else
-  echo "claudecode-slack-collab: no runnable target found (expected src/server.ts+tsx or dist/server.js)" >&2
+  echo "cccollab: no runnable target found (expected src/server.ts+tsx or dist/server.js)" >&2
   exit 1
 fi

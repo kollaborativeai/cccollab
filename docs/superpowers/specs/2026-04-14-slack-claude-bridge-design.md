@@ -1,7 +1,7 @@
 # Slack Claude Bridge - Design Spec
 
 **Epic:** IRD-46
-**Repo:** https://github.com/flatoutsolutions/claudecode-slack-collab
+**Repo:** https://github.com/flatoutsolutions/cccollab
 **Date:** 2026-04-14
 
 ## Problem

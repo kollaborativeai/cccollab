@@ -215,9 +215,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@flatoutsolutions/claudecode-slack-collab@workspace:.":
+"@flatoutsolutions/cccollab@workspace:.":
   version: 0.0.0-use.local
-  resolution: "@flatoutsolutions/claudecode-slack-collab@workspace:."
+  resolution: "@flatoutsolutions/cccollab@workspace:."
   dependencies:
     "@modelcontextprotocol/sdk": "npm:^1.29.0"
     "@slack/socket-mode": "npm:^2.0.6"
@@ -228,7 +228,7 @@ __metadata:
     vitest: "npm:^4.1.4"
     zod: "npm:^4.3.6"
   bin:
-    claudecode-slack-collab: bin/claudecode-slack-collab
+    cccollab: bin/cccollab
   languageName: unknown
   linkType: soft
 

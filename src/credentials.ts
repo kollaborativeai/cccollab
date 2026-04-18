@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
-const CONFIG_DIR = path.join(homedir(), '.config', 'claudecode-slack-collab')
+const CONFIG_DIR = path.join(homedir(), '.config', 'cccollab')
 
 export interface StoredCredentials {
   botToken: string

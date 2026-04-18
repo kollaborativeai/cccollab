@@ -58,7 +58,7 @@ tests/
 - [ ] **Step 1: Initialize project and install dependencies**
 
 ```bash
-cd /Users/stefan/projects/claudecode-slack-collab
+cd /Users/stefan/projects/cccollab
 yarn init -y
 yarn add @modelcontextprotocol/sdk @slack/web-api @slack/socket-mode zod
 yarn add -D typescript tsx @types/node vitest

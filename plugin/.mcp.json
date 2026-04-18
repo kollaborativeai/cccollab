@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "claudecode-slack-collab": {
-      "command": "claudecode-slack-collab",
+    "cccollab": {
+      "command": "cccollab",
       "env": {
         "SLACK_PROFILE": "${user_config.slack_profile}",
         "DEFAULT_SLACK_CHANNEL": "${user_config.default_slack_channel}",

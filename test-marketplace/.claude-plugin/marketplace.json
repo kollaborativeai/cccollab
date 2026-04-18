@@ -1,16 +1,16 @@
 {
-  "name": "claudecode-slack-collab-test",
+  "name": "cccollab-test",
   "owner": {
     "name": "FlatOut Solutions",
     "email": "stefan@flatout.solutions"
   },
   "metadata": {
-    "description": "Local development marketplace for claudecode-slack-collab. Loads the plugin from ../plugin so changes to plugin.json / .mcp.json / skills are picked up immediately. The MCP command runs the repo's bin/claudecode-slack-collab, which prefers src/ + tsx over dist/ (run `npm link` in the repo once so the binary resolves to local source)."
+    "description": "Local development marketplace for cccollab. Loads the plugin from ../plugin so changes to plugin.json / .mcp.json / skills are picked up immediately. The MCP command runs the repo's bin/cccollab, which prefers src/ + tsx over dist/ (run `npm link` in the repo once so the binary resolves to local source)."
   },
   "plugins": [
     {
-      "name": "claudecode-slack-collab",
-      "source": "./plugins/claudecode-slack-collab",
+      "name": "cccollab",
+      "source": "./plugins/cccollab",
       "description": "Real-time collaboration between Claude Code sessions via threaded topics (local dev build)"
     }
   ]
