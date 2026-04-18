@@ -109,6 +109,13 @@ async function startAuthenticated(config: Config, brokerPort: number) {
       `[slack-collab] Preset identity from ${process.env.SLACK_COLLAB_NAME || process.env.SLACK_COLLAB_OBJECTIVE ? 'env' : '.slack-collab.json'}: ` +
       `name=${initial.name ?? '(unset)'} objective=${initial.objective ?? '(unset)'}`
     )
+    if (initial.name) {
+      fetch(`http://localhost:${brokerPort}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: initial.name, objective: initial.objective }),
+      }).catch(() => { /* best-effort */ })
+    }
   }
 
   const subscriptions = new SubscriptionManager(botClient)
@@ -144,7 +151,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   } else {
     workflowSteps.push('start_topic or join_topic - create or join a conversation (defaults to local)')
   }
-  workflowSteps.push('send_message - send to your active topic')
+  workflowSteps.push('send_message_to_topic - send to your active topic')
 
   if (defaultChannelJoined) {
     instructionLines.push(
@@ -199,9 +206,9 @@ async function startAuthenticated(config: Config, brokerPort: number) {
 
   const identityToolNames = new Set(['introduce'])
   const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
-  const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'send_message', 'send_broadcast', 'resolve_topic', 'deactivate_topic', 'activate_topic', 'ping_availability', 'send_direct'])
+  const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'leave_topic', 'archive_topic', 'unarchive_topic', 'send_message_to_topic', 'send_broadcast', 'list_sessions', 'send_message_to_session'])
 
-  const identityDeps = { session }
+  const identityDeps = { session, brokerPort }
   const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
   const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort }
 
@@ -221,6 +228,14 @@ async function startAuthenticated(config: Config, brokerPort: number) {
       return { content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   })
+
+  const unregisterSession = () => {
+    if (!session.hasName()) return
+    fetch(`http://localhost:${brokerPort}/sessions/${encodeURIComponent(session.displayName)}`, { method: 'DELETE' })
+      .catch(() => { /* best-effort */ })
+  }
+  process.on('SIGTERM', () => { unregisterSession(); process.exit(0) })
+  process.on('SIGINT', () => { unregisterSession(); process.exit(0) })
 
   await mcp.connect(new StdioServerTransport())
   await socketListener.start()

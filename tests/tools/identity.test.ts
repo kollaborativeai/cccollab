@@ -5,6 +5,7 @@ import { SessionManager } from '../../src/session.js'
 function createMockDeps(): IdentityToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    brokerPort: 7850,
   }
 }
 

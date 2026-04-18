@@ -31,16 +31,14 @@ export interface BrokerEvent {
 
 export interface BrokerLocalEvent {
   source: 'local'
-  type: 'message' | 'topic_created' | 'topic_resolved' | 'topic_deactivated' | 'topic_activated' | 'broadcast' | 'ping_availability' | 'pong_availability' | 'direct_message'
+  type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast' | 'direct_message'
   topicId?: string
   topic?: { id: string; topic: string; creator: string; state?: string; createdAt?: string }
   sender?: string
   from?: string
   to?: string
   text?: string
-  objective?: string
-  summary?: string
-  resolver?: string
+  archivedBy?: string
   ts?: string
 }
 
@@ -161,7 +159,8 @@ export class SocketModeListener {
   }
 
   private log(msg: string): void {
-    const line = `[${new Date().toISOString()}] ${msg}\n`
+    const who = this.session.hasName() ? this.session.displayName : `pid${process.pid}`
+    const line = `[${new Date().toISOString()}] [${who}] ${msg}\n`
     appendFileSync(LOG_FILE, line)
   }
 
@@ -169,7 +168,10 @@ export class SocketModeListener {
     switch (event.type) {
       case 'topic_created': {
         // Push topic creation to other sessions (skip the creator)
-        if (!event.topic) return
+        if (!event.topic) {
+          this.log(`DROPPED: topic_created with no topic field`)
+          return
+        }
         if (event.topic.creator && this.session.isExactSelf(event.topic.creator)) {
           this.log(`DROPPED: self topic_created from ${event.topic.creator}`)
           return
@@ -209,54 +211,37 @@ export class SocketModeListener {
         await this.bus.push(msg)
         return
       }
-      case 'topic_resolved': {
+      case 'topic_archived': {
         if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local topic_resolved: topic ${event.topicId ?? 'none'} not joined`)
+          this.log(`DROPPED local topic_archived: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
         const msg: ParsedMessage = {
-          sender: event.resolver ?? 'unknown',
-          text: `Topic resolved: ${event.summary ?? '(no summary)'}`,
+          sender: event.archivedBy ?? 'unknown',
+          text: 'Topic archived',
           ts: new Date().toISOString(),
           channel: 'local',
           channelName: 'local',
           threadTs: event.topicId,
         }
-        this.log(`PUSHING local topic_resolved to Claude`)
+        this.log(`PUSHING local topic_archived to Claude`)
         await this.bus.push(msg)
         return
       }
-      case 'topic_deactivated': {
+      case 'topic_unarchived': {
         if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local topic_deactivated: topic ${event.topicId ?? 'none'} not joined`)
+          this.log(`DROPPED local topic_unarchived: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
         const msg: ParsedMessage = {
           sender: 'system',
-          text: 'Topic deactivated',
+          text: 'Topic unarchived',
           ts: new Date().toISOString(),
           channel: 'local',
           channelName: 'local',
           threadTs: event.topicId,
         }
-        this.log(`PUSHING local topic_deactivated to Claude`)
-        await this.bus.push(msg)
-        return
-      }
-      case 'topic_activated': {
-        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local topic_activated: topic ${event.topicId ?? 'none'} not joined`)
-          return
-        }
-        const msg: ParsedMessage = {
-          sender: 'system',
-          text: 'Topic reactivated',
-          ts: new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
-          threadTs: event.topicId,
-        }
-        this.log(`PUSHING local topic_activated to Claude`)
+        this.log(`PUSHING local topic_unarchived to Claude`)
         await this.bus.push(msg)
         return
       }
@@ -275,39 +260,6 @@ export class SocketModeListener {
           threadTs: undefined,
         }
         this.log(`PUSHING local broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
-        await this.bus.push(msg)
-        return
-      }
-      case 'ping_availability': {
-        // Auto-respond with name + objective - never surfaces to Claude
-        if (!this.session.hasName()) return
-        const from = event.from
-        if (from && this.session.isExactSelf(from)) return
-        this.log(`AUTO-PONG availability to ${from ?? 'unknown'}`)
-        fetch(`${this.brokerUrl}/local-event`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'pong_availability',
-            from: this.session.displayName,
-            objective: this.session.getObjective(),
-          }),
-        }).catch((err) => this.log(`PONG ERROR: ${err}`))
-        return
-      }
-      case 'pong_availability': {
-        // Drop our own pong
-        if (event.from && this.session.isExactSelf(event.from)) return
-        const objective = event.objective ? ` - ${event.objective}` : ''
-        const msg: ParsedMessage = {
-          sender: event.from ?? 'unknown',
-          text: `Available: ${event.from ?? 'unknown'}${objective}`,
-          ts: new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
-          threadTs: undefined,
-        }
-        this.log(`PUSHING pong_availability to Claude: from=${event.from ?? 'unknown'}`)
         await this.bus.push(msg)
         return
       }

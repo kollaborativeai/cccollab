@@ -42,13 +42,20 @@ interface LocalTopic {
   id: string
   topic: string
   creator: string
-  state: 'active' | 'deactivated' | 'resolved'
+  state: 'active' | 'archived'
   createdAt: string
   messages: LocalTopicMessage[]
   joinedSessions: Set<string>
 }
 
+interface SessionInfo {
+  name: string
+  objective?: string
+  registeredAt: string
+}
+
 const topics = new Map<string, LocalTopic>()
+const sessions = new Map<string, SessionInfo>()
 
 const MAX_BODY_SIZE = 1024 * 1024 // 1MB
 
@@ -112,7 +119,8 @@ socketClient.on('message', ({ event, ack }) => {
 // --- Route matching helpers ---
 
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
-const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|resolve|deactivate|activate)$/
+const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
+const SESSION_NAME_ROUTE = /^\/sessions\/([^/]+)$/
 
 // --- HTTP server ---
 
@@ -226,12 +234,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   // GET /topics - list topics
   if (pathname === '/topics' && method === 'GET') {
-    const includeResolved = searchParams.get('include_resolved') === 'true'
-    const includeDeactivated = searchParams.get('include_deactivated') === 'true'
+    const includeArchived = searchParams.get('include_archived') === 'true'
     const result: Array<{ id: string; topic: string; creator: string; state: string; createdAt: string; messageCount: number }> = []
     for (const t of topics.values()) {
-      if (!includeResolved && t.state === 'resolved') continue
-      if (!includeDeactivated && t.state === 'deactivated') continue
+      if (!includeArchived && t.state === 'archived') continue
       result.push({ id: t.id, topic: t.topic, creator: t.creator, state: t.state, createdAt: t.createdAt, messageCount: t.messages.length })
     }
     jsonResponse(res, 200, { topics: result })
@@ -305,47 +311,36 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             jsonResponse(res, 200, { ok: true, messages: t.messages })
             return
           }
-          case 'resolve': {
-            const summary = body.summary as string | undefined
-            const resolver = body.resolver as string | undefined
-            if (!summary) {
-              jsonResponse(res, 400, { error: 'summary is required' })
-              return
-            }
-            t.state = 'resolved'
-            const event = {
-              source: 'local' as const,
-              type: 'topic_resolved' as const,
-              topicId: id,
-              summary,
-              resolver: resolver ?? 'unknown',
-            }
-            broadcast(JSON.stringify(event))
-            log(`LOCAL TOPIC RESOLVED: ${id} by ${resolver ?? 'unknown'}`)
+          case 'leave': {
+            const sessionId = body.sessionId as string | undefined
+            if (sessionId) t.joinedSessions.delete(sessionId)
+            log(`LOCAL LEAVE: session ${sessionId ?? 'unknown'} left topic ${id}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
-          case 'deactivate': {
-            t.state = 'deactivated'
+          case 'archive': {
+            const archivedBy = body.archivedBy as string | undefined
+            t.state = 'archived'
             const event = {
               source: 'local' as const,
-              type: 'topic_deactivated' as const,
+              type: 'topic_archived' as const,
               topicId: id,
+              archivedBy: archivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))
-            log(`LOCAL TOPIC DEACTIVATED: ${id}`)
+            log(`LOCAL TOPIC ARCHIVED: ${id} by ${archivedBy ?? 'unknown'}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
-          case 'activate': {
+          case 'unarchive': {
             t.state = 'active'
             const event = {
               source: 'local' as const,
-              type: 'topic_activated' as const,
+              type: 'topic_unarchived' as const,
               topicId: id,
             }
             broadcast(JSON.stringify(event))
-            log(`LOCAL TOPIC ACTIVATED: ${id}`)
+            log(`LOCAL TOPIC UNARCHIVED: ${id}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
@@ -354,6 +349,42 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         jsonResponse(res, 400, { error: 'invalid JSON' })
       }
     })()
+    return
+  }
+
+  // GET /sessions - list registered sessions
+  if (pathname === '/sessions' && method === 'GET') {
+    const result = [...sessions.values()]
+    jsonResponse(res, 200, { sessions: result })
+    return
+  }
+
+  // POST /sessions - register a session
+  if (pathname === '/sessions' && method === 'POST') {
+    void (async () => {
+      try {
+        const body = JSON.parse(await readBody(req)) as { name?: string; objective?: string }
+        if (!body.name) {
+          jsonResponse(res, 400, { error: 'name is required' })
+          return
+        }
+        sessions.set(body.name, { name: body.name, objective: body.objective, registeredAt: new Date().toISOString() })
+        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
+        jsonResponse(res, 200, { ok: true })
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
+    return
+  }
+
+  // DELETE /sessions/:name - unregister a session
+  const sessionNameMatch = SESSION_NAME_ROUTE.exec(pathname)
+  if (sessionNameMatch && method === 'DELETE') {
+    const name = decodeURIComponent(sessionNameMatch[1]!)
+    sessions.delete(name)
+    log(`SESSION UNREGISTERED: ${name}`)
+    jsonResponse(res, 200, { ok: true })
     return
   }
 

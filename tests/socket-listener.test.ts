@@ -280,52 +280,51 @@ describe('SocketModeListener', () => {
       expect(mockBus.push).not.toHaveBeenCalled()
     })
 
-    it('pushes topic_resolved events for joined topics', async () => {
-      context.joinTopic('uuid-resolved', 'Resolved topic', 'local')
+    it('pushes topic_archived events for joined topics', async () => {
+      context.joinTopic('uuid-archived', 'Archived topic', 'local')
       const event: BrokerLocalEvent = {
         source: 'local',
-        type: 'topic_resolved',
-        topicId: 'uuid-resolved',
-        summary: 'Decided on approach A',
-        resolver: 'architect',
+        type: 'topic_archived',
+        topicId: 'uuid-archived',
+        archivedBy: 'architect',
       }
       listener.processLocalEvent(event)
       await vi.waitFor(() => {
         expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
           sender: 'architect',
-          text: 'Topic resolved: Decided on approach A',
+          text: 'Topic archived',
           channel: 'local',
-          threadTs: 'uuid-resolved',
+          threadTs: 'uuid-archived',
         }))
       })
     })
 
-    it('drops topic_resolved events for topics not joined', async () => {
+    it('drops topic_archived events for topics not joined', async () => {
       const event: BrokerLocalEvent = {
         source: 'local',
-        type: 'topic_resolved',
+        type: 'topic_archived',
         topicId: 'uuid-not-joined',
-        summary: 'Done',
+        archivedBy: 'architect',
       }
       listener.processLocalEvent(event)
       await new Promise<void>((r) => setTimeout(r, 50))
       expect(mockBus.push).not.toHaveBeenCalled()
     })
 
-    it('pushes topic_deactivated events for joined topics', async () => {
-      context.joinTopic('uuid-deact', 'Deactivated topic', 'local')
+    it('pushes topic_unarchived events for joined topics', async () => {
+      context.joinTopic('uuid-unarch', 'Unarchived topic', 'local')
       const event: BrokerLocalEvent = {
         source: 'local',
-        type: 'topic_deactivated',
-        topicId: 'uuid-deact',
+        type: 'topic_unarchived',
+        topicId: 'uuid-unarch',
       }
       listener.processLocalEvent(event)
       await vi.waitFor(() => {
         expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
           sender: 'system',
-          text: 'Topic deactivated',
+          text: 'Topic unarchived',
           channel: 'local',
-          threadTs: 'uuid-deact',
+          threadTs: 'uuid-unarch',
         }))
       })
     })
