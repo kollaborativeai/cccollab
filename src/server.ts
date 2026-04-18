@@ -134,17 +134,24 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="claudecode-slack-collab" ...> tags.',
     '',
   ]
-  const identityLine = session.hasName()
-    ? `Your identity is already set: name="${session.displayName}"${initial.objective ? `, objective="${initial.objective}"` : ''}. Do NOT call introduce.`
+  const introduceStep = session.hasName()
+    ? null
     : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
+  const workflowSteps: string[] = []
+  if (introduceStep) workflowSteps.push(introduceStep)
+  if (defaultChannelJoined) {
+    workflowSteps.push(`start_topic or join_topic - create or join a conversation (defaults to #${defaultChannelJoined})`)
+  } else {
+    workflowSteps.push('start_topic or join_topic - create or join a conversation (defaults to local)')
+  }
+  workflowSteps.push('send_message - send to your active topic')
+
   if (defaultChannelJoined) {
     instructionLines.push(
       `Your default channel is #${defaultChannelJoined} (already joined). Topics default to this channel.`,
       '',
       'Workflow:',
-      `1. ${identityLine}`,
-      `2. start_topic or join_topic - create or join a conversation (defaults to #${defaultChannelJoined})`,
-      '3. send_message - send to your active topic',
+      ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
       '',
       'Use channel: "local" on any topic tool to explicitly target local topics instead of the default Slack channel.',
     )
@@ -153,9 +160,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
       'You are always connected to the LOCAL channel by default. You can start and join local topics immediately without joining any Slack channel.',
       '',
       'Workflow:',
-      `1. ${identityLine}`,
-      '2. start_topic or join_topic - create or join a conversation (defaults to local)',
-      '3. send_message - send to your active topic',
+      ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
       '',
       'Local topics are the default. Only use join_channel if the user explicitly asks to collaborate via a Slack channel.',
     )
