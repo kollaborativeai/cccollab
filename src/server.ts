@@ -22,7 +22,7 @@ async function startUnauthenticated() {
     { name: 'cccollab', version: '1.0.0' },
     {
       capabilities: { tools: {} },
-      instructions: `You are connected to the Slack Claude Bridge, but NOT YET AUTHENTICATED.
+      instructions: `You are connected to CCCollab, but NOT YET AUTHENTICATED.
 
 Call the 'authenticate' tool to connect your Slack account. This will open a browser for authorization.
 
@@ -62,7 +62,7 @@ After authentication completes, restart your Claude Code session to start collab
   })
 
   await mcp.connect(new StdioServerTransport())
-  console.error('[slack-collab] Not authenticated. Waiting for authenticate tool call...')
+  console.error('[cccollab] Not authenticated. Waiting for authenticate tool call...')
 }
 
 async function startAuthenticated(config: Config, brokerPort: number) {
@@ -106,7 +106,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   if (initial.objective) session.setObjective(initial.objective)
   if (initial.name || initial.objective) {
     console.error(
-      `[slack-collab] Preset identity from ${process.env.SLACK_COLLAB_NAME || process.env.SLACK_COLLAB_OBJECTIVE ? 'env' : '.slack-collab.json'}: ` +
+      `[cccollab] Preset identity from ${process.env.CCCOLLAB_NAME || process.env.CCCOLLAB_OBJECTIVE ? 'env' : '.cccollab.json'}: ` +
       `name=${initial.name ?? '(unset)'} objective=${initial.objective ?? '(unset)'}`
     )
     if (initial.name) {
@@ -131,9 +131,9 @@ async function startAuthenticated(config: Config, brokerPort: number) {
       const { channelId } = await subscriptions.join(config.defaultChannel)
       context.setActiveChannel(channelId, config.defaultChannel)
       defaultChannelJoined = config.defaultChannel
-      console.error(`[slack-collab] Auto-joined default channel #${config.defaultChannel}`)
+      console.error(`[cccollab] Auto-joined default channel #${config.defaultChannel}`)
     } catch (err) {
-      console.error(`[slack-collab] Failed to auto-join #${config.defaultChannel}: ${err instanceof Error ? err.message : String(err)}`)
+      console.error(`[cccollab] Failed to auto-join #${config.defaultChannel}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -247,7 +247,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   await mcp.connect(new StdioServerTransport())
   await socketListener.start()
 
-  console.error(`[slack-collab] Session "${session.sessionName}" connected as ${config.username}`)
+  console.error(`[cccollab] Session "${session.sessionName}" connected as ${config.username}`)
 }
 
 async function ensureBroker(appToken: string): Promise<number> {
@@ -294,7 +294,7 @@ async function main() {
     await startAuthenticated(config, brokerPort)
   }
 
-  const cleanup = () => { console.error('[slack-collab] Shutting down...'); process.exit(0) }
+  const cleanup = () => { console.error('[cccollab] Shutting down...'); process.exit(0) }
   process.on('SIGINT', cleanup)
   process.on('SIGTERM', cleanup)
 
@@ -303,4 +303,4 @@ async function main() {
   process.stdin.on('close', cleanup)
 }
 
-main().catch((err) => { console.error('[slack-collab] Fatal error:', err); process.exit(1) })
+main().catch((err) => { console.error('[cccollab] Fatal error:', err); process.exit(1) })

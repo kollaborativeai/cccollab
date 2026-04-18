@@ -7,7 +7,7 @@ import type { ActiveContext } from './context.js'
 import { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 
-const LOG_FILE = '/tmp/slack-collab-debug.log'
+const LOG_FILE = '/tmp/cccollab-debug.log'
 const RECONNECT_DELAY_MS = 2000
 
 interface SocketModeListenerOptions {

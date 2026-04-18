@@ -12,11 +12,11 @@ const mockLoadCredentials = vi.mocked(loadCredentials)
 describe('loadConfig', () => {
   beforeEach(() => {
     vi.resetAllMocks()
-    delete process.env.DEFAULT_SLACK_CHANNEL
+    delete process.env.CCCOLLAB_DEFAULT_CHANNEL
   })
 
   afterEach(() => {
-    delete process.env.DEFAULT_SLACK_CHANNEL
+    delete process.env.CCCOLLAB_DEFAULT_CHANNEL
   })
 
   it('returns unauthenticated config when no credentials exist', () => {
@@ -72,8 +72,8 @@ describe('loadConfig', () => {
     expect(config.defaultChannel).toBeUndefined()
   })
 
-  it('defaultChannel is read from DEFAULT_SLACK_CHANNEL env var', () => {
-    process.env.DEFAULT_SLACK_CHANNEL = 'engineering'
+  it('defaultChannel is read from CCCOLLAB_DEFAULT_CHANNEL env var', () => {
+    process.env.CCCOLLAB_DEFAULT_CHANNEL = 'engineering'
     mockLoadCredentials.mockReturnValue({
       botToken: 'x', userToken: 'x', teamId: 'T', teamName: 'T', userId: 'U', userName: 'u',
     })
@@ -83,7 +83,7 @@ describe('loadConfig', () => {
   })
 
   it('defaultChannel strips leading # from env var', () => {
-    process.env.DEFAULT_SLACK_CHANNEL = '#engineering'
+    process.env.CCCOLLAB_DEFAULT_CHANNEL = '#engineering'
     mockLoadCredentials.mockReturnValue({
       botToken: 'x', userToken: 'x', teamId: 'T', teamName: 'T', userId: 'U', userName: 'u',
     })
@@ -93,7 +93,7 @@ describe('loadConfig', () => {
   })
 
   it('defaultChannel is undefined when env var is empty/whitespace', () => {
-    process.env.DEFAULT_SLACK_CHANNEL = '   '
+    process.env.CCCOLLAB_DEFAULT_CHANNEL = '   '
     mockLoadCredentials.mockReturnValue({
       botToken: 'x', userToken: 'x', teamId: 'T', teamName: 'T', userId: 'U', userName: 'u',
     })

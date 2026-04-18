@@ -81,8 +81,8 @@ Three env vars can be set in an MCP server definition:
 
 | Var | Description |
 |-----|-------------|
-| `SLACK_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
-| `DEFAULT_SLACK_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
+| `CCCOLLAB_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
+| `CCCOLLAB_DEFAULT_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
 | `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker, local topics, and Slack connection. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
 
 Credentials (`~/.config/cccollab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
@@ -94,8 +94,8 @@ Normally the session calls `introduce` to set its name and (optionally) objectiv
 **Dynamic (env vars)** - best for per-ticket / per-worktree launchers:
 
 ```bash
-export SLACK_COLLAB_NAME="KAI-80"
-export SLACK_COLLAB_OBJECTIVE="Implement widget resize handles"
+export CCCOLLAB_NAME="KAI-80"
+export CCCOLLAB_OBJECTIVE="Implement widget resize handles"
 claude ...
 ```
 
@@ -103,7 +103,7 @@ The MCP server reads these on startup and auto-introduces the session. The LLM i
 
 **Static (per-repo file)** - best for a repo whose role never changes:
 
-Create `.slack-collab.json` at the repo root:
+Create `.cccollab.json` at the repo root:
 
 ```json
 {

@@ -1,4 +1,4 @@
-# Slack Claude Bridge - Design Spec
+# CCCollab - Design Spec
 
 **Epic:** IRD-46
 **Repo:** https://github.com/flatoutsolutions/cccollab

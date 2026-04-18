@@ -6,8 +6,8 @@
   "pluginConfigs": {
     "cccollab@cccollab-test": {
       "options": {
-        "slack_profile": "test",
-        "default_slack_channel": "cccollab-test",
+        "profile": "test",
+        "default_channel": "cccollab-test",
         "broker_id": "test"
       }
     }

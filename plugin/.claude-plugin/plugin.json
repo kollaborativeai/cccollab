@@ -10,15 +10,15 @@
     "./skills/"
   ],
   "userConfig": {
-    "slack_profile": {
+    "profile": {
       "type": "string",
-      "title": "Slack profile (optional)",
+      "title": "Profile (optional)",
       "description": "Selects the credentials file at ~/.config/cccollab/credentials-<profile>.json. Leave blank to use the default credentials file. Set this when running multiple Slack identities on one machine.",
       "sensitive": false
     },
-    "default_slack_channel": {
+    "default_channel": {
       "type": "string",
-      "title": "Default Slack channel (optional)",
+      "title": "Default channel (optional)",
       "description": "Slack channel name (without leading #) to auto-join on startup. Topics default to this channel instead of local. Leave blank to default to local topics.",
       "sensitive": false
     },

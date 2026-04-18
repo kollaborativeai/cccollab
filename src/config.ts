@@ -23,7 +23,7 @@ export function loadConfig(): AppConfig {
     return { authenticated: false }
   }
 
-  const defaultChannelRaw = process.env.DEFAULT_SLACK_CHANNEL?.trim()
+  const defaultChannelRaw = process.env.CCCOLLAB_DEFAULT_CHANNEL?.trim()
   const defaultChannel = defaultChannelRaw ? defaultChannelRaw.replace(/^#/, '') : undefined
 
   return {

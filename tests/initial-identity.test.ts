@@ -8,7 +8,7 @@ describe('resolveInitialIdentity', () => {
   let root: string
 
   beforeEach(() => {
-    root = mkdtempSync(path.join(tmpdir(), 'slack-collab-identity-'))
+    root = mkdtempSync(path.join(tmpdir(), 'cccollab-identity-'))
   })
 
   afterEach(() => {
@@ -20,7 +20,7 @@ describe('resolveInitialIdentity', () => {
   })
 
   it('reads name and objective from env vars', () => {
-    const env = { SLACK_COLLAB_NAME: 'architect', SLACK_COLLAB_OBJECTIVE: 'Design auth flow' }
+    const env = { CCCOLLAB_NAME: 'architect', CCCOLLAB_OBJECTIVE: 'Design auth flow' }
     expect(resolveInitialIdentity(root, env)).toEqual({
       name: 'architect',
       objective: 'Design auth flow',
@@ -28,11 +28,11 @@ describe('resolveInitialIdentity', () => {
   })
 
   it('trims whitespace and treats empty env as unset', () => {
-    const env = { SLACK_COLLAB_NAME: '  architect  ', SLACK_COLLAB_OBJECTIVE: '   ' }
+    const env = { CCCOLLAB_NAME: '  architect  ', CCCOLLAB_OBJECTIVE: '   ' }
     expect(resolveInitialIdentity(root, env)).toEqual({ name: 'architect' })
   })
 
-  it('falls back to .slack-collab.json at cwd when env is empty', () => {
+  it('falls back to .cccollab.json at cwd when env is empty', () => {
     writeFileSync(
       path.join(root, IDENTITY_FILE_NAME),
       JSON.stringify({ name: 'platform-reviewer', objective: 'Review PRs' }),
@@ -43,7 +43,7 @@ describe('resolveInitialIdentity', () => {
     })
   })
 
-  it('walks up parent directories to find .slack-collab.json', () => {
+  it('walks up parent directories to find .cccollab.json', () => {
     writeFileSync(path.join(root, IDENTITY_FILE_NAME), JSON.stringify({ name: 'static-name' }))
     const nested = path.join(root, 'a', 'b', 'c')
     mkdirSync(nested, { recursive: true })
@@ -56,13 +56,13 @@ describe('resolveInitialIdentity', () => {
       JSON.stringify({ name: 'static', objective: 'static-obj' }),
     )
     expect(
-      resolveInitialIdentity(root, { SLACK_COLLAB_NAME: 'dynamic' }),
+      resolveInitialIdentity(root, { CCCOLLAB_NAME: 'dynamic' }),
     ).toEqual({ name: 'dynamic' })
   })
 
   it('env objective alone is also accepted', () => {
     expect(
-      resolveInitialIdentity(root, { SLACK_COLLAB_OBJECTIVE: 'Implement widget' }),
+      resolveInitialIdentity(root, { CCCOLLAB_OBJECTIVE: 'Implement widget' }),
     ).toEqual({ objective: 'Implement widget' })
   })
 

@@ -6,12 +6,12 @@ export interface InitialIdentity {
   objective?: string
 }
 
-export const IDENTITY_FILE_NAME = '.slack-collab.json'
+export const IDENTITY_FILE_NAME = '.cccollab.json'
 
 /**
  * Resolve an initial session identity from (in precedence order):
- *   1. SLACK_COLLAB_NAME / SLACK_COLLAB_OBJECTIVE env vars
- *   2. A .slack-collab.json file found by walking up from cwd
+ *   1. CCCOLLAB_NAME / CCCOLLAB_OBJECTIVE env vars
+ *   2. A .cccollab.json file found by walking up from cwd
  *
  * If neither source is present, returns {} and the LLM must call `introduce`.
  * The env lookup and file read are both failure-tolerant: malformed JSON
@@ -22,8 +22,8 @@ export function resolveInitialIdentity(
   cwd: string,
   env: NodeJS.ProcessEnv = process.env,
 ): InitialIdentity {
-  const envName = trimOrUndefined(env.SLACK_COLLAB_NAME)
-  const envObjective = trimOrUndefined(env.SLACK_COLLAB_OBJECTIVE)
+  const envName = trimOrUndefined(env.CCCOLLAB_NAME)
+  const envObjective = trimOrUndefined(env.CCCOLLAB_OBJECTIVE)
   if (envName || envObjective) {
     return { name: envName, objective: envObjective }
   }
@@ -49,7 +49,7 @@ function readIdentityFile(startDir: string): InitialIdentity | undefined {
       const raw = readFileSync(candidate, 'utf-8')
       const parsed = JSON.parse(raw) as unknown
       if (!parsed || typeof parsed !== 'object') {
-        console.error(`[slack-collab] ${candidate} is not a JSON object, ignoring`)
+        console.error(`[cccollab] ${candidate} is not a JSON object, ignoring`)
         return undefined
       }
       const record = parsed as Record<string, unknown>
@@ -61,7 +61,7 @@ function readIdentityFile(startDir: string): InitialIdentity | undefined {
       // ENOENT: keep walking. Any other error: log and abort walk.
       const code = (err as NodeJS.ErrnoException).code
       if (code && code !== 'ENOENT') {
-        console.error(`[slack-collab] Failed to read ${candidate}: ${err instanceof Error ? err.message : String(err)}`)
+        console.error(`[cccollab] Failed to read ${candidate}: ${err instanceof Error ? err.message : String(err)}`)
         return undefined
       }
     }

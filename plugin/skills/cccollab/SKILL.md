@@ -19,7 +19,7 @@ Use a short role-based name, not a person's name. Roles make messages readable w
 
 Local topics require no setup and no Slack. Use them for coordination between sessions on the same machine or across machines sharing the local broker.
 
-Only call `join_channel` when the user explicitly asks to collaborate via Slack, or when `DEFAULT_SLACK_CHANNEL` is configured for this session.
+Only call `join_channel` when the user explicitly asks to collaborate via Slack, or when `CCCOLLAB_DEFAULT_CHANNEL` is configured for this session.
 
 ## Finding out who is available
 
@@ -63,5 +63,5 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 
 Two env vars on the MCP server definition:
 
-- `SLACK_PROFILE` - selects `~/.config/cccollab/credentials-<profile>.json`. Enables multiple Slack identities on one machine.
-- `DEFAULT_SLACK_CHANNEL` - auto-joins this channel on startup; topics default to it instead of local.
+- `CCCOLLAB_PROFILE` - selects `~/.config/cccollab/credentials-<profile>.json`. Enables multiple Slack identities on one machine.
+- `CCCOLLAB_DEFAULT_CHANNEL` - auto-joins this channel on startup; topics default to it instead of local.

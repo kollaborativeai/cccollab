@@ -7,8 +7,8 @@ import { SocketModeClient } from '@slack/socket-mode'
 import { BROKER_ID, BROKER_RENDEZVOUS_FILE } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 
-const PID_FILE = `/tmp/slack-collab-broker-${BROKER_ID}.pid`
-const LOG_FILE = `/tmp/slack-collab-broker-${BROKER_ID}.log`
+const PID_FILE = `/tmp/cccollab-broker-${BROKER_ID}.pid`
+const LOG_FILE = `/tmp/cccollab-broker-${BROKER_ID}.log`
 
 type SSEResponse = ServerResponse & { req: IncomingMessage }
 

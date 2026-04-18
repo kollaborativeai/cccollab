@@ -21,7 +21,7 @@ export function createIdentityTools() {
     },
     {
       name: 'whoami',
-      description: 'Show your current session identity (name and objective). Useful after context compaction or when a session was pre-seeded via env vars or .slack-collab.json.',
+      description: 'Show your current session identity (name and objective). Useful after context compaction or when a session was pre-seeded via env vars or .cccollab.json.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
   ]
