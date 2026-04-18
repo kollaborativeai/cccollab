@@ -208,6 +208,16 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'topic and creator are required' })
           return
         }
+        const wanted = body.topic.trim().toLowerCase()
+        for (const t of topics.values()) {
+          if (t.state === 'active' && t.topic.trim().toLowerCase() === wanted) {
+            jsonResponse(res, 409, {
+              error: `A local topic named "${t.topic}" already exists. Join it instead, or use a different name.`,
+              existing: { id: t.id, topic: t.topic, creator: t.creator, state: t.state, createdAt: t.createdAt },
+            })
+            return
+          }
+        }
         const id = crypto.randomUUID()
         const createdAt = new Date().toISOString()
         const localTopic: LocalTopic = {

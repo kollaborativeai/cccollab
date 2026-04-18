@@ -253,6 +253,14 @@ export async function handleTopicTool(
 
       const channelId = deps.context.getChannelId()
       const channelName = deps.context.getChannelName()
+
+      const wanted = topic.trim().toLowerCase()
+      const existing = await fetchTopics(channelId, deps.webClient)
+      const clash = existing.find((t) => t.state === 'active' && t.topic.trim().toLowerCase() === wanted)
+      if (clash) {
+        return `A topic named "${clash.topic}" already exists in #${channelName}. Join it instead, or use a different name.`
+      }
+
       const headerText = `:large_green_circle: ${topic}`
       const result = await deps.postClient.chat.postMessage({ channel: channelId, text: headerText })
       // Post detail as first thread reply if provided
@@ -542,12 +550,19 @@ async function handleLocalListTopics(
 }
 
 async function handleLocalStartTopic(deps: TopicToolDeps, topic: string): Promise<string> {
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics`
-  const data = await brokerFetch<BrokerTopicData>(url, {
+  const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/topics`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, creator: deps.session.displayName }),
   })
+  if (res.status === 409) {
+    const body = await res.json() as { error: string }
+    return body.error
+  }
+  if (!res.ok) {
+    throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
+  }
+  const data = await res.json() as BrokerTopicData
   deps.context.joinTopic(data.id, topic, 'local')
   return `Local topic started: "${topic}". This is now your active topic.`
 }

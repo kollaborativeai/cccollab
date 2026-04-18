@@ -116,29 +116,48 @@ describe('Topic Tools', () => {
 
     describe('start_topic', () => {
       it('posts topic message and sets active topic', async () => {
-        const result = await handleTopicTool('start_topic', { topic: 'Auth refactor' }, deps)
+        const result = await handleTopicTool('start_topic', { topic: 'Perf tuning' }, deps)
         expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
           channel: 'C123',
-          text: ':large_green_circle: Auth refactor',
+          text: ':large_green_circle: Perf tuning',
         })
         expect(deps.context.hasTopic()).toBe(true)
         expect(deps.context.getThreadTs()).toBe('300.100')
-        expect(result).toContain('Auth refactor')
+        expect(result).toContain('Perf tuning')
         expect(result).toContain('active topic')
       })
 
       it('includes detail and participants as first thread reply', async () => {
-        await handleTopicTool('start_topic', { topic: 'Auth refactor', detail: 'JWT vs session', participants_needed: 'backend' }, deps)
+        await handleTopicTool('start_topic', { topic: 'Perf tuning', detail: 'JWT vs session', participants_needed: 'backend' }, deps)
         // First call: header message
         expect(deps.postClient.chat.postMessage).toHaveBeenNthCalledWith(1, {
           channel: 'C123',
-          text: ':large_green_circle: Auth refactor',
+          text: ':large_green_circle: Perf tuning',
         })
         // Second call: detail in thread
         expect(deps.postClient.chat.postMessage).toHaveBeenNthCalledWith(2, {
           channel: 'C123',
           thread_ts: '300.100',
           text: expect.stringContaining('JWT vs session'),
+        })
+      })
+
+      it('rejects duplicate active topic name (case-insensitive)', async () => {
+        const result = await handleTopicTool('start_topic', { topic: 'auth REFACTOR' }, deps)
+        expect(result).toContain('already exists')
+        expect(result).toContain('Auth refactor')
+        expect(deps.postClient.chat.postMessage).not.toHaveBeenCalled()
+        expect(deps.context.hasTopic()).toBe(false)
+      })
+
+      it('allows reusing an archived topic name', async () => {
+        // Mock history has archived "Setup CI"
+        const result = await handleTopicTool('start_topic', { topic: 'Setup CI' }, deps)
+        expect(result).toContain('Setup CI')
+        expect(result).toContain('active topic')
+        expect(deps.postClient.chat.postMessage).toHaveBeenCalledWith({
+          channel: 'C123',
+          text: ':large_green_circle: Setup CI',
         })
       })
     })
@@ -316,6 +335,7 @@ describe('Topic Tools', () => {
 
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
+        status: 200,
         json: () => Promise.resolve({
           id: 'uuid-new', topic: 'DB migration', creator: 'stefan', state: 'active', createdAt: '2026-01-01T00:00:00Z',
         }),
@@ -332,6 +352,27 @@ describe('Topic Tools', () => {
         expect.stringContaining('/topics'),
         expect.objectContaining({ method: 'POST' }),
       )
+
+      vi.unstubAllGlobals()
+    })
+
+    it('start_topic surfaces broker 409 as friendly error and does not join', async () => {
+      deps.context.clearChannel()
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({
+          error: 'A local topic named "DB migration" already exists. Join it instead, or use a different name.',
+          existing: { id: 'uuid-existing', topic: 'DB migration', creator: 'other', state: 'active', createdAt: '2026-01-01T00:00:00Z' },
+        }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const result = await handleTopicTool('start_topic', { topic: 'DB migration' }, deps)
+      expect(result).toContain('already exists')
+      expect(result).toContain('DB migration')
+      expect(deps.context.hasTopic()).toBe(false)
 
       vi.unstubAllGlobals()
     })
