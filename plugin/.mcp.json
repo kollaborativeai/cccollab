@@ -1,10 +1,7 @@
 {
   "mcpServers": {
     "cccollab": {
-      "command": "cccollab",
-      "env": {
-        "CCCOLLAB_PROFILE": "${user_config.profile}"
-      }
+      "command": "cccollab"
     }
   }
 }
