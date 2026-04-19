@@ -6,9 +6,7 @@
   "pluginConfigs": {
     "cccollab@cccollab-test": {
       "options": {
-        "profile": "test",
-        "default_channel": "cccollab-test",
-        "broker_id": "test"
+        "profile": "test"
       }
     }
   }

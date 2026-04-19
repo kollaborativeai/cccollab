@@ -16,19 +16,19 @@ This replaces claude-peers as the sole inter-agent communication system.
 
 ## Architecture Decisions
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Transport | Slack Socket Mode (inbound) + Web API (outbound) | Zero polling, zero deployed infrastructure, event-driven |
-| Delivery model | Claude Code Channel protocol (push-first) | Messages arrive without tool calls; tools for outbound only |
-| Slack app model | Single shared bot ("Claude Bridge") per workspace | Simple, no per-developer app management, session identity via message prefix |
-| Authentication | Bot Token (xoxb) + App-Level Token (xapp) | Both stay local on each dev's machine; xapp required for Socket Mode |
-| Channel model | One Slack channel per team, threads for conversations | No channel sprawl; threads are free, instant, unlimited |
-| Session identity | `*[SESSION_NAME]*:` prefix in messages | AI clearly identifiable as AI; humans look like humans |
-| Session naming | `USERNAME-REPO-WORKTREE`, auto-derived, overridable at runtime | Unique by default, human-readable, flexible |
-| Technology | Node.js + TypeScript, MCP SDK, Slack SDK, zod | Standard stack, ES Modules, ES2022, runs via npx tsx |
-| Multi-workspace | Single workspace for v1 | Architecture clean for future expansion - no hardcoded single-workspace assumptions |
-| Official Slack MCP | Coexists independently | Official Slack MCP is user's personal assistant; this is agent collaboration layer |
-| Wait-for tools | None | Channel push eliminates the need; no polling, no wait loops |
+| Decision           | Choice                                                         | Rationale                                                                           |
+| ------------------ | -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Transport          | Slack Socket Mode (inbound) + Web API (outbound)               | Zero polling, zero deployed infrastructure, event-driven                            |
+| Delivery model     | Claude Code Channel protocol (push-first)                      | Messages arrive without tool calls; tools for outbound only                         |
+| Slack app model    | Single shared bot ("Claude Bridge") per workspace              | Simple, no per-developer app management, session identity via message prefix        |
+| Authentication     | Bot Token (xoxb) + App-Level Token (xapp)                      | Both stay local on each dev's machine; xapp required for Socket Mode                |
+| Channel model      | One Slack channel per team, threads for conversations          | No channel sprawl; threads are free, instant, unlimited                             |
+| Session identity   | `*[SESSION_NAME]*:` prefix in messages                         | AI clearly identifiable as AI; humans look like humans                              |
+| Session naming     | `USERNAME-REPO-WORKTREE`, auto-derived, overridable at runtime | Unique by default, human-readable, flexible                                         |
+| Technology         | Node.js + TypeScript, MCP SDK, Slack SDK, zod                  | Standard stack, ES Modules, ES2022, runs via npx tsx                                |
+| Multi-workspace    | Single workspace for v1                                        | Architecture clean for future expansion - no hardcoded single-workspace assumptions |
+| Official Slack MCP | Coexists independently                                         | Official Slack MCP is user's personal assistant; this is agent collaboration layer  |
+| Wait-for tools     | None                                                           | Channel push eliminates the need; no polling, no wait loops                         |
 
 ## System Architecture
 
@@ -101,10 +101,12 @@ Manages this session's identity. Auto-derives session name from `USERNAME` env v
 ### SubscriptionManager (subscriptions.ts)
 
 Local subscription filter. Two-level model:
+
 - **Slack-level:** Bot is a member of channels (shared across all sessions)
 - **Local-level:** This session's `Set<string>` of channel IDs it cares about
 
 Key methods:
+
 - `join(channelName)` - calls `conversations.join` (idempotent) + adds to local set
 - `leave(channelId)` - removes from local set only (does NOT remove bot from Slack)
 - `isSubscribed(channelId)` - `Set.has()` lookup, hot path, called for every WebSocket event
@@ -113,6 +115,7 @@ Key methods:
 ### SocketModeListener (socket-listener.ts)
 
 Bridges Slack's WebSocket to the rest of the system. On every incoming event:
+
 1. `ack()` immediately
 2. Filter subtypes (channel_join, bot_message, etc.)
 3. `isSubscribed()` check - drop unsubscribed channels with zero processing
@@ -130,58 +133,69 @@ Thin pass-through in v1. Receives parsed messages from Socket Mode, emits to eve
 ### Session Management (3)
 
 **announce_session**
+
 - Register in the `#ai-collab-registry` channel
 - Posts: `:robot_face: *[SESSION_NAME]* online | Role: {role} | Status: {status}`
 - Parameters: `role` (required), `status` (optional), `name_override` (optional)
 
 **list_sessions**
+
 - Reads registry channel, de-duplicates by session name (keeps most recent)
 - Returns: session name, role, status, last seen timestamp
 
 **set_status**
+
 - Updates this session's status in the registry
 - Parameters: `status` (required)
 
 ### Channel Subscriptions (3)
 
 **subscribe_channel**
+
 - Joins Slack channel + starts receiving pushed events
 - Optionally reads recent history on first subscribe
 - Announces presence in the channel
 - Parameters: `channel` (required), `read_history` (optional, default true)
 
 **unsubscribe_channel**
+
 - Stops receiving events from a channel (local filter only)
 - Optionally posts departure message
 - Parameters: `channel` (required), `post_departure` (optional, default true)
 
 **list_subscriptions**
+
 - Returns all channels this session is subscribed to with human-readable names
 
 ### Conversations (5)
 
 **start_conversation**
+
 - Posts a top-level message in a team channel, creating a new thread
 - Format includes topic, detail, participants needed
 - Returns `thread_ts` (conversation ID) for others to join
 - Parameters: `channel` (required), `topic` (required), `detail` (optional), `participants_needed` (optional)
 
 **join_conversation**
+
 - Fetches full thread history via `conversations.replies`
 - Announces presence in the thread
 - Returns conversation context so Claude gets up to speed
 - Parameters: `channel` (required), `thread_ts` (required)
 
 **reply_in_conversation**
+
 - Posts a reply to an existing thread, auto-tagged with session identity
 - Parameters: `channel` (required), `thread_ts` (required), `text` (required)
 
 **list_conversations**
+
 - Lists active/resolved conversations in a channel
 - Returns thread_ts, author, reply count, status for each
 - Parameters: `channel` (required), `include_resolved` (optional, default false)
 
 **resolve_conversation**
+
 - Posts resolution summary with checkmark emoji, marks conversation done
 - Parameters: `channel` (required), `thread_ts` (required), `summary` (required)
 
@@ -194,6 +208,7 @@ Thin pass-through in v1. Receives parsed messages from Socket Mode, emits to eve
 ```
 
 Parsing regex:
+
 ```ts
 const PATTERN = /^\*\[(.+?)\]\*:\s*([\s\S]*)$/
 ```
@@ -206,13 +221,13 @@ Messages without the `*[...]*:` prefix are from humans. Resolve the Slack user I
 
 ### Environment Variables (from MCP config)
 
-| Variable | Required | Description |
-|---|---|---|
-| `SLACK_BOT_TOKEN` | Yes | Bot User OAuth Token (xoxb-...) |
-| `SLACK_APP_TOKEN` | Yes | App-Level Token (xapp-...) with connections:write scope |
-| `USERNAME` | Yes | Developer's name, used as session name prefix |
-| `SESSION_ROLE` | No | Default role for announce_session |
-| `REGISTRY_CHANNEL` | No | Registry channel name (default: ai-collab-registry) |
+| Variable           | Required | Description                                             |
+| ------------------ | -------- | ------------------------------------------------------- |
+| `SLACK_BOT_TOKEN`  | Yes      | Bot User OAuth Token (xoxb-...)                         |
+| `SLACK_APP_TOKEN`  | Yes      | App-Level Token (xapp-...) with connections:write scope |
+| `USERNAME`         | Yes      | Developer's name, used as session name prefix           |
+| `SESSION_ROLE`     | No       | Default role for announce_session                       |
+| `REGISTRY_CHANNEL` | No       | Registry channel name (default: ai-collab-registry)     |
 
 ### MCP Config (.mcp.json)
 
@@ -244,6 +259,7 @@ claude --dangerously-load-development-channels server:slack-collab
 Create a Slack app ("Claude Bridge") with:
 
 **Bot Token Scopes:**
+
 - `channels:manage` - create channels
 - `channels:read` - list channels
 - `channels:history` - read messages
@@ -252,12 +268,15 @@ Create a Slack app ("Claude Bridge") with:
 - `users:read` - resolve user display names
 
 **Event Subscriptions (Socket Mode):**
+
 - `message.channels` - public channel messages
 
 **App-Level Token:**
+
 - Scope: `connections:write`
 
 **Channels to create:**
+
 - `#ai-collab-registry` - global session registry
 - `#team-{name}-collab` - one per team
 
@@ -301,17 +320,17 @@ src/
 
 ## Jira Tickets
 
-| Key | Summary |
-|---|---|
-| IRD-47 | Slack App Setup & Configuration |
-| IRD-48 | Project Scaffolding & Core Types |
-| IRD-49 | MessageBus Implementation |
-| IRD-50 | SubscriptionManager Implementation |
-| IRD-51 | Socket Mode Listener & Event Routing |
-| IRD-52 | MCP Tools - Session & Channel Management |
-| IRD-53 | MCP Tools - Conversation & Messaging |
+| Key    | Summary                                                                                        |
+| ------ | ---------------------------------------------------------------------------------------------- |
+| IRD-47 | Slack App Setup & Configuration                                                                |
+| IRD-48 | Project Scaffolding & Core Types                                                               |
+| IRD-49 | MessageBus Implementation                                                                      |
+| IRD-50 | SubscriptionManager Implementation                                                             |
+| IRD-51 | Socket Mode Listener & Event Routing                                                           |
+| IRD-52 | MCP Tools - Session & Channel Management                                                       |
+| IRD-53 | MCP Tools - Conversation & Messaging                                                           |
 | IRD-54 | MCP Tools - Real-Time Waiting (to be updated - remove wait tools, keep as Channel integration) |
-| IRD-55 | Claude Code Channel Integration |
-| IRD-56 | Testing & Cross-Machine Validation |
-| IRD-57 | Documentation & Team Rollout |
-| IRD-58 | SaaS Distribution - OAuth Install Flow & Token Management |
+| IRD-55 | Claude Code Channel Integration                                                                |
+| IRD-56 | Testing & Cross-Machine Validation                                                             |
+| IRD-57 | Documentation & Team Rollout                                                                   |
+| IRD-58 | SaaS Distribution - OAuth Install Flow & Token Management                                      |

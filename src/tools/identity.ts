@@ -1,7 +1,9 @@
 import type { SessionManager } from '../session.js'
+import type { ActiveContext } from '../context.js'
 
 export interface IdentityToolDeps {
   session: SessionManager
+  context: ActiveContext
   brokerPort: number
 }
 
@@ -9,11 +11,15 @@ export function createIdentityTools() {
   return [
     {
       name: 'introduce',
-      description: 'Set your name and optionally your current objective. Required before any topic/messaging tool will work.',
+      description:
+        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Returns JSON.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          name: { type: 'string' as const, description: 'Your display name (e.g., "architect", "frontend", "reviewer")' },
+          name: {
+            type: 'string' as const,
+            description: 'Your display name (e.g., "architect", "frontend", "reviewer")',
+          },
           objective: { type: 'string' as const, description: 'What you are currently working on (optional)' },
         },
         required: ['name'],
@@ -21,14 +27,17 @@ export function createIdentityTools() {
     },
     {
       name: 'whoami',
-      description: 'Show your current session identity (name and objective). Useful after context compaction or when a session was pre-seeded via env vars or .cccollab.json.',
+      description:
+        'Return your session identity as JSON: {name, objective?, activeChannel?, activeTopic?: {name, channel}, subscribedChannels: [{name, source}]}.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
   ]
 }
 
 export async function handleIdentityTool(
-  name: string, args: Record<string, unknown>, deps: IdentityToolDeps
+  name: string,
+  args: Record<string, unknown>,
+  deps: IdentityToolDeps,
 ): Promise<string> {
   switch (name) {
     case 'introduce': {
@@ -36,16 +45,40 @@ export async function handleIdentityTool(
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
       await registerSession(deps.brokerPort, displayName, objective)
-      return `Introduced as "${displayName}".${objective ? ` Objective: ${objective}` : ''}`
+
+      for (const ch of deps.context.getSubscribedChannels()) {
+        try {
+          await fetch(`http://localhost:${deps.brokerPort}/channels/join`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: displayName, channel: ch.name }),
+          })
+        } catch {
+          // Non-fatal: channel listing may be stale until re-introduce.
+        }
+      }
+
+      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
-        return 'This session has no identity set. Call `introduce` with a name to identify yourself.'
+        return JSON.stringify({ error: 'No identity set. Call introduce with a name.' })
       }
       const objective = deps.session.getObjective()
-      const lines = [`Name: ${deps.session.displayName}`]
-      lines.push(`Objective: ${objective ?? '(not set)'}`)
-      return lines.join('\n')
+      const activeChannel = deps.context.getActiveChannel()
+      const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
+      const activeTopicChannel = deps.context.getTopicChannel()
+      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({ name: c.name, source: c.source }))
+
+      return JSON.stringify({
+        name: deps.session.displayName,
+        ...(objective ? { objective } : {}),
+        ...(activeChannel ? { activeChannel } : {}),
+        ...(activeTopicName
+          ? { activeTopic: { name: activeTopicName, ...(activeTopicChannel ? { channel: activeTopicChannel } : {}) } }
+          : {}),
+        subscribedChannels,
+      })
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)

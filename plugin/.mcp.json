@@ -3,9 +3,7 @@
     "cccollab": {
       "command": "cccollab",
       "env": {
-        "CCCOLLAB_PROFILE": "${user_config.profile}",
-        "CCCOLLAB_DEFAULT_CHANNEL": "${user_config.default_channel}",
-        "BROKER_ID": "${user_config.broker_id}"
+        "CCCOLLAB_PROFILE": "${user_config.profile}"
       }
     }
   }

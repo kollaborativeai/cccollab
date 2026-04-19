@@ -51,19 +51,14 @@ describe('resolveInitialIdentity', () => {
   })
 
   it('env takes precedence over file', () => {
-    writeFileSync(
-      path.join(root, IDENTITY_FILE_NAME),
-      JSON.stringify({ name: 'static', objective: 'static-obj' }),
-    )
-    expect(
-      resolveInitialIdentity(root, { CCCOLLAB_NAME: 'dynamic' }),
-    ).toEqual({ name: 'dynamic' })
+    writeFileSync(path.join(root, IDENTITY_FILE_NAME), JSON.stringify({ name: 'static', objective: 'static-obj' }))
+    expect(resolveInitialIdentity(root, { CCCOLLAB_NAME: 'dynamic' })).toEqual({ name: 'dynamic' })
   })
 
   it('env objective alone is also accepted', () => {
-    expect(
-      resolveInitialIdentity(root, { CCCOLLAB_OBJECTIVE: 'Implement widget' }),
-    ).toEqual({ objective: 'Implement widget' })
+    expect(resolveInitialIdentity(root, { CCCOLLAB_OBJECTIVE: 'Implement widget' })).toEqual({
+      objective: 'Implement widget',
+    })
   })
 
   it('ignores malformed JSON and continues', () => {
@@ -82,10 +77,7 @@ describe('resolveInitialIdentity', () => {
   })
 
   it('trims whitespace in file values', () => {
-    writeFileSync(
-      path.join(root, IDENTITY_FILE_NAME),
-      JSON.stringify({ name: '  spaced  ', objective: '\n\tpad\n' }),
-    )
+    writeFileSync(path.join(root, IDENTITY_FILE_NAME), JSON.stringify({ name: '  spaced  ', objective: '\n\tpad\n' }))
     expect(resolveInitialIdentity(root, {})).toEqual({
       name: 'spaced',
       objective: 'pad',

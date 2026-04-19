@@ -1,18 +1,18 @@
-// NOTE: This file is named `socket-listener.ts` for legacy reasons (the original
-// version bridged Slack Socket Mode events). It now only consumes local broker
-// events over SSE. A rename (e.g. to `broker-event-listener.ts`) is pending a
-// follow-up cleanup pass in CCC-26.
 import http from 'node:http'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { MessageBus } from './message-bus.js'
 import type { ActiveContext } from './context.js'
 import type { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
+import { normalizeChannelName } from './context.js'
+import { CCCOLLAB_LOGS_DIR } from './constants.js'
 
-const LOG_FILE = '/tmp/cccollab-debug.log'
+mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
+const LOG_FILE = join(CCCOLLAB_LOGS_DIR, 'debug.log')
 const RECONNECT_DELAY_MS = 2000
 
-interface SocketModeListenerOptions {
+interface BrokerEventListenerOptions {
   brokerUrl: string
   messageBus: MessageBus
   sessionManager: SessionManager
@@ -22,8 +22,9 @@ interface SocketModeListenerOptions {
 export interface BrokerLocalEvent {
   source: 'local'
   type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast' | 'direct_message'
+  channel?: string
   topicId?: string
-  topic?: { id: string; topic: string; creator: string; state?: string; createdAt?: string }
+  topic?: { id: string; topic: string; channel?: string; creator: string; state?: string; createdAt?: string }
   sender?: string
   from?: string
   to?: string
@@ -36,7 +37,7 @@ function isLocalEvent(data: unknown): data is BrokerLocalEvent {
   return typeof data === 'object' && data !== null && (data as Record<string, unknown>).source === 'local'
 }
 
-export class SocketModeListener {
+export class BrokerEventListener {
   private readonly brokerUrl: string
   private readonly bus: MessageBus
   private readonly session: SessionManager
@@ -44,7 +45,7 @@ export class SocketModeListener {
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
 
-  constructor(options: SocketModeListenerOptions) {
+  constructor(options: BrokerEventListenerOptions) {
     this.brokerUrl = options.brokerUrl
     this.bus = options.messageBus
     this.session = options.sessionManager
@@ -71,7 +72,7 @@ export class SocketModeListener {
     const url = `${this.brokerUrl}/events`
     this.log(`Connecting to broker at ${url}`)
 
-    const req = http.get(url, { headers: { 'Accept': 'text/event-stream' } }, (res) => {
+    const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
       let buffer = ''
 
       res.on('data', (chunk: Buffer) => {
@@ -121,7 +122,9 @@ export class SocketModeListener {
   }
 
   processLocalEvent(event: BrokerLocalEvent): void {
-    this.log(`LOCAL EVENT: type=${event.type} topicId=${event.topicId ?? 'none'} sender=${event.sender ?? 'none'}`)
+    this.log(
+      `LOCAL EVENT: type=${event.type} channel=${event.channel ?? 'none'} topicId=${event.topicId ?? 'none'} sender=${event.sender ?? 'none'}`,
+    )
     this.handleLocalEvent(event).catch((err) => {
       this.log(`LOCAL HANDLE ERROR: ${err}`)
     })
@@ -133,12 +136,21 @@ export class SocketModeListener {
     appendFileSync(LOG_FILE, line)
   }
 
+  private channelSubscribed(channel: string | undefined): boolean {
+    if (!channel) return false
+    return this.context.isChannelSubscribed(channel)
+  }
+
   private async handleLocalEvent(event: BrokerLocalEvent): Promise<void> {
     switch (event.type) {
       case 'topic_created': {
-        // Push topic creation to other sessions (skip the creator)
         if (!event.topic) {
           this.log(`DROPPED: topic_created with no topic field`)
+          return
+        }
+        const channel = normalizeChannelName(event.channel ?? event.topic.channel ?? '')
+        if (!this.channelSubscribed(channel)) {
+          this.log(`DROPPED topic_created: channel "${channel}" not subscribed`)
           return
         }
         if (event.topic.creator && this.session.isExactSelf(event.topic.creator)) {
@@ -147,104 +159,121 @@ export class SocketModeListener {
         }
         const msg: ParsedMessage = {
           sender: event.topic.creator,
-          text: `New local topic: "${event.topic.topic}"`,
+          text: `New topic in "${channel}": "${event.topic.topic}"`,
           ts: event.topic.createdAt ?? new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel,
+          channelName: channel,
           threadTs: undefined,
         }
-        this.log(`PUSHING local topic_created to Claude: "${event.topic.topic}"`)
+        this.log(`PUSHING topic_created to Claude: "${event.topic.topic}"`)
         await this.bus.push(msg)
         return
       }
       case 'message': {
-        // Only push if this session has joined the topic
-        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local message: topic ${event.topicId ?? 'none'} not joined`)
+        const channel = normalizeChannelName(event.channel ?? '')
+        if (!this.channelSubscribed(channel)) {
+          this.log(`DROPPED message: channel "${channel}" not subscribed`)
           return
         }
-        // Skip self-messages (strict match on chosen name, not username fallback)
+        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
+          this.log(`DROPPED message: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
         if (event.sender && this.session.isExactSelf(event.sender)) {
-          this.log(`DROPPED: self local message from ${event.sender}`)
+          this.log(`DROPPED: self message from ${event.sender}`)
           return
         }
         const msg: ParsedMessage = {
           sender: event.sender ?? 'unknown',
           text: event.text ?? '',
           ts: event.ts ?? new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel,
+          channelName: channel,
           threadTs: event.topicId,
         }
-        this.log(`PUSHING local message to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
+        this.log(`PUSHING message to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
         return
       }
       case 'topic_archived': {
+        const channel = normalizeChannelName(event.channel ?? '')
+        if (!this.channelSubscribed(channel)) {
+          this.log(`DROPPED topic_archived: channel "${channel}" not subscribed`)
+          return
+        }
         if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local topic_archived: topic ${event.topicId ?? 'none'} not joined`)
+          this.log(`DROPPED topic_archived: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
         const msg: ParsedMessage = {
           sender: event.archivedBy ?? 'unknown',
           text: 'Topic archived',
           ts: new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel,
+          channelName: channel,
           threadTs: event.topicId,
         }
-        this.log(`PUSHING local topic_archived to Claude`)
+        this.log(`PUSHING topic_archived to Claude`)
         await this.bus.push(msg)
         return
       }
       case 'topic_unarchived': {
+        const channel = normalizeChannelName(event.channel ?? '')
+        if (!this.channelSubscribed(channel)) {
+          this.log(`DROPPED topic_unarchived: channel "${channel}" not subscribed`)
+          return
+        }
         if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED local topic_unarchived: topic ${event.topicId ?? 'none'} not joined`)
+          this.log(`DROPPED topic_unarchived: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
         const msg: ParsedMessage = {
           sender: 'system',
           text: 'Topic unarchived',
           ts: new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel,
+          channelName: channel,
           threadTs: event.topicId,
         }
-        this.log(`PUSHING local topic_unarchived to Claude`)
+        this.log(`PUSHING topic_unarchived to Claude`)
         await this.bus.push(msg)
         return
       }
       case 'broadcast': {
-        // Skip self-messages (strict match on chosen name, not username fallback)
+        const channel = normalizeChannelName(event.channel ?? '')
+        if (!this.channelSubscribed(channel)) {
+          this.log(`DROPPED broadcast: channel "${channel}" not subscribed`)
+          return
+        }
         if (event.sender && this.session.isExactSelf(event.sender)) {
-          this.log(`DROPPED: self local broadcast from ${event.sender}`)
+          this.log(`DROPPED: self broadcast from ${event.sender}`)
           return
         }
         const msg: ParsedMessage = {
           sender: event.sender ?? 'unknown',
           text: event.text ?? '',
           ts: event.ts ?? new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel,
+          channelName: channel,
           threadTs: undefined,
         }
-        this.log(`PUSHING local broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
+        this.log(`PUSHING broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
         return
       }
       case 'direct_message': {
-        // Only deliver if this session is the intended recipient
         if (!event.to || !this.session.isExactSelf(event.to)) {
           this.log(`DROPPED direct_message: not for us (to=${event.to ?? 'none'})`)
           return
         }
         if (event.from && this.session.isExactSelf(event.from)) return
+        const activeChannel = this.context.getActiveChannel() ?? 'direct'
         const msg: ParsedMessage = {
           sender: event.from ?? 'unknown',
           text: `Direct message from ${event.from ?? 'unknown'}: ${event.text ?? ''}`,
           ts: new Date().toISOString(),
-          channel: 'local',
-          channelName: 'local',
+          channel: activeChannel,
+          channelName: activeChannel,
           threadTs: undefined,
         }
         this.log(`PUSHING direct_message to Claude: from=${event.from ?? 'unknown'}`)

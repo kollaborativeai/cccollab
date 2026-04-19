@@ -45,7 +45,12 @@ describe('MessageBus', () => {
         method: 'notifications/claude/channel',
         params: {
           content: 'hello world',
-          meta: { sender: 'stefan | dispatcher', channel: 'team-alpha-collab', channel_id: 'C123', ts: '1234567890.123456' },
+          meta: {
+            sender: 'stefan | dispatcher',
+            channel: 'team-alpha-collab',
+            channel_id: 'C123',
+            ts: '1234567890.123456',
+          },
         },
       })
     })

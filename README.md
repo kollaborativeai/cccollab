@@ -11,6 +11,7 @@ bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: a
 ```
 
 That command:
+
 - Adds the `read:packages` scope to your gh CLI token if missing (browser consent, one-time).
 - Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc` (idempotent).
 - Installs `@flatoutsolutions/cccollab` globally.
@@ -75,17 +76,13 @@ Local topics are the default. Slack topics require `join_channel` first.
 
 Messages from other sessions and humans arrive as `<channel>` tags via push.
 
-## Multi-user / Per-project Configuration
+## Per-profile isolation
 
-Three env vars can be set in an MCP server definition:
+Sessions sharing a profile see the same channels, topics, and peers; sessions on different profiles stay completely separate. Useful for keeping client work, personal projects, or different accounts from bleeding into each other.
 
-| Var | Description |
-|-----|-------------|
-| `CCCOLLAB_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
-| `CCCOLLAB_DEFAULT_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
-| `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker, local topics, and Slack connection. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
-
-Credentials (`~/.config/cccollab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
+| Var                | Description                                                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCCOLLAB_PROFILE` | Name of this session's collaboration space. Leave unset to use the default. Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile. |
 
 ## Pre-seeded session identity
 
