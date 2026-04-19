@@ -1,6 +1,6 @@
 {
   "name": "@flatoutsolutions/cccollab",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "packageManager": "yarn@4.12.0",
   "type": "module",
   "main": "dist/server.js",
