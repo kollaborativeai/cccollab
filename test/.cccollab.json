@@ -1,3 +1,4 @@
 {
-  "profile": "test"
+  "profile": "test",
+  "default_channels": ["cccollab-test"]
 }
