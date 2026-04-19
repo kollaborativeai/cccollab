@@ -81,9 +81,8 @@ Three env vars can be set in an MCP server definition:
 
 | Var | Description |
 |-----|-------------|
-| `CCCOLLAB_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. Use to run multiple Slack identities on the same machine. |
-| `CCCOLLAB_DEFAULT_CHANNEL` | Auto-joins this channel on startup (strips leading `#`). Topics default to it instead of local. |
-| `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker, local topics, and Slack connection. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
+| `CCCOLLAB_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. |
+| `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker and local topics. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
 
 Credentials (`~/.config/cccollab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
 
