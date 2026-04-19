@@ -1,10 +1,12 @@
+// NOTE: This file is named `socket-listener.ts` for legacy reasons (the original
+// version bridged Slack Socket Mode events). It now only consumes local broker
+// events over SSE. A rename (e.g. to `broker-event-listener.ts`) is pending a
+// follow-up cleanup pass in CCC-26.
 import http from 'node:http'
 import { appendFileSync } from 'node:fs'
-import type { WebClient } from '@slack/web-api'
 import type { MessageBus } from './message-bus.js'
-import type { SubscriptionManager } from './subscriptions.js'
 import type { ActiveContext } from './context.js'
-import { SessionManager } from './session.js'
+import type { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 
 const LOG_FILE = '/tmp/cccollab-debug.log'
@@ -13,20 +15,8 @@ const RECONNECT_DELAY_MS = 2000
 interface SocketModeListenerOptions {
   brokerUrl: string
   messageBus: MessageBus
-  subscriptionManager: SubscriptionManager
   sessionManager: SessionManager
   context: ActiveContext
-  botUserId: string
-  webClient: WebClient
-}
-
-export interface BrokerEvent {
-  channel: string
-  user: string | null
-  text: string | null
-  ts: string
-  thread_ts: string | null
-  subtype: string | null
 }
 
 export interface BrokerLocalEvent {
@@ -42,12 +32,6 @@ export interface BrokerLocalEvent {
   ts?: string
 }
 
-const IGNORED_SUBTYPES = new Set([
-  'channel_join', 'channel_leave', 'channel_topic', 'channel_purpose',
-  'channel_name', 'channel_archive', 'channel_unarchive',
-  'bot_message', 'me_message', 'message_changed', 'message_deleted', 'thread_broadcast',
-])
-
 function isLocalEvent(data: unknown): data is BrokerLocalEvent {
   return typeof data === 'object' && data !== null && (data as Record<string, unknown>).source === 'local'
 }
@@ -55,23 +39,16 @@ function isLocalEvent(data: unknown): data is BrokerLocalEvent {
 export class SocketModeListener {
   private readonly brokerUrl: string
   private readonly bus: MessageBus
-  private readonly subs: SubscriptionManager
   private readonly session: SessionManager
   private readonly context: ActiveContext
-  private readonly botUserId: string
-  private readonly webClient: WebClient
-  private readonly userNameCache = new Map<string, string>()
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
 
   constructor(options: SocketModeListenerOptions) {
     this.brokerUrl = options.brokerUrl
     this.bus = options.messageBus
-    this.subs = options.subscriptionManager
     this.session = options.sessionManager
     this.context = options.context
-    this.botUserId = options.botUserId
-    this.webClient = options.webClient
   }
 
   async start(): Promise<void> {
@@ -109,8 +86,7 @@ export class SocketModeListener {
               if (isLocalEvent(parsed)) {
                 this.processLocalEvent(parsed)
               } else {
-                const event = parsed as unknown as BrokerEvent
-                this.processEvent(event)
+                this.log(`DROPPED: non-local event ignored: ${json.slice(0, 120)}`)
               }
             } catch {
               this.log(`SSE parse error: ${json}`)
@@ -142,13 +118,6 @@ export class SocketModeListener {
     if (this.stopped) return
     this.log(`Reconnecting in ${RECONNECT_DELAY_MS}ms...`)
     setTimeout(() => this.connect(), RECONNECT_DELAY_MS)
-  }
-
-  processEvent(event: BrokerEvent): void {
-    this.log(`EVENT: channel=${event.channel} user=${event.user} subtype=${event.subtype} text="${(event.text ?? '').slice(0, 80)}"`)
-    this.handleEvent(event).catch((err) => {
-      this.log(`HANDLE ERROR: ${err}`)
-    })
   }
 
   processLocalEvent(event: BrokerLocalEvent): void {
@@ -282,78 +251,6 @@ export class SocketModeListener {
         await this.bus.push(msg)
         return
       }
-    }
-  }
-
-  private async handleEvent(event: BrokerEvent): Promise<void> {
-    if (event.subtype && IGNORED_SUBTYPES.has(event.subtype)) {
-      this.log(`DROPPED: subtype=${event.subtype}`)
-      return
-    }
-    if (!this.subs.isSubscribed(event.channel)) {
-      this.log(`DROPPED: channel ${event.channel} not subscribed`)
-      return
-    }
-
-    // Thread-level filtering: only receive messages from topics we've joined
-    // Top-level messages (no thread_ts) always come through (broadcasts, new topics)
-    if (event.thread_ts && !this.context.isTopicJoined(event.thread_ts)) {
-      this.log(`DROPPED: thread ${event.thread_ts} not joined`)
-      return
-    }
-
-    const text = event.text ?? ''
-    const parsed = SessionManager.parse(text)
-    const isFromBot = event.user === this.botUserId
-
-    let sender: string
-    let messageText: string
-
-    if (parsed) {
-      // Session-prefixed message (from any Claude Code session)
-      if (this.session.isSelf(parsed.sender)) {
-        this.log(`DROPPED: self-message from ${parsed.sender}`)
-        return
-      }
-      this.log(`ROUTING: session message from ${parsed.sender}`)
-      sender = parsed.sender
-      messageText = parsed.text
-    } else if (isFromBot) {
-      // Bot system message (topic headers, etc.) - skip
-      this.log(`DROPPED: bot system message`)
-      return
-    } else {
-      // Human message
-      const userId = event.user ?? 'unknown'
-      const displayName = await this.resolveUserName(userId)
-      sender = `human:${displayName}`
-      messageText = text
-    }
-
-    const channelName = this.subs.getChannelName(event.channel)
-
-    const msg: ParsedMessage = {
-      sender, text: messageText, ts: event.ts, channel: event.channel,
-      channelName,
-      threadTs: event.thread_ts ?? undefined,
-    }
-
-    this.log(`PUSHING to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
-    this.bus.push(msg).catch((err) => {
-      this.log(`PUSH ERROR: ${err}`)
-    })
-  }
-
-  private async resolveUserName(userId: string): Promise<string> {
-    const cached = this.userNameCache.get(userId)
-    if (cached) return cached
-    try {
-      const result = await this.webClient.users.info({ user: userId })
-      const name = result.user?.real_name ?? result.user?.name ?? userId
-      this.userNameCache.set(userId, name)
-      return name
-    } catch {
-      return userId
     }
   }
 }

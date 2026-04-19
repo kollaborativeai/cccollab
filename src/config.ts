@@ -1,37 +1,11 @@
-import { loadCredentials } from './credentials.js'
-import { SLACK_APP_TOKEN } from './constants.js'
+import os from 'node:os'
 
 export interface Config {
-  slackBotToken: string
-  slackAppToken: string
-  slackUserToken: string
   username: string
-  defaultChannel: string | undefined
-  authenticated: true
 }
 
-export interface UnauthenticatedConfig {
-  authenticated: false
-}
-
-export type AppConfig = Config | UnauthenticatedConfig
-
-export function loadConfig(): AppConfig {
-  const creds = loadCredentials()
-
-  if (!creds) {
-    return { authenticated: false }
-  }
-
-  const defaultChannelRaw = process.env.CCCOLLAB_DEFAULT_CHANNEL?.trim()
-  const defaultChannel = defaultChannelRaw ? defaultChannelRaw.replace(/^#/, '') : undefined
-
+export function loadConfig(): Config {
   return {
-    slackBotToken: creds.botToken,
-    slackAppToken: SLACK_APP_TOKEN,
-    slackUserToken: creds.userToken,
-    username: creds.userName,
-    defaultChannel,
-    authenticated: true,
+    username: os.userInfo().username,
   }
 }

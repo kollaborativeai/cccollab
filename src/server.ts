@@ -3,80 +3,18 @@ import { writeFileSync, unlinkSync, statSync } from 'node:fs'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { WebClient } from '@slack/web-api'
 import { BROKER_ID } from './constants.js'
 import { loadConfig, type Config } from './config.js'
-import { getCredentialsPath } from './credentials.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
-import { runOAuthFlow } from './auth.js'
 import { SessionManager } from './session.js'
 import { resolveInitialIdentity } from './initial-identity.js'
-import { SubscriptionManager } from './subscriptions.js'
 import { MessageBus } from './message-bus.js'
 import { SocketModeListener } from './socket-listener.js'
 import { ActiveContext } from './context.js'
 import { createIdentityTools, handleIdentityTool } from './tools/identity.js'
-import { createChannelTools, handleChannelTool } from './tools/channels.js'
 import { createTopicTools, handleTopicTool } from './tools/topics.js'
 
-async function startUnauthenticated() {
-  const mcp = new Server(
-    { name: 'cccollab', version: '1.0.0' },
-    {
-      capabilities: { tools: {} },
-      instructions: `You are connected to CCCollab, but NOT YET AUTHENTICATED.
-
-Call the 'authenticate' tool to connect your Slack account. This will open a browser for authorization.
-
-After authentication completes, restart your Claude Code session to start collaborating.`,
-    }
-  )
-
-  const authTool = {
-    name: 'authenticate',
-    description: 'Connect your Slack account via OAuth. Opens a browser for authorization.',
-    inputSchema: { type: 'object' as const, properties: {} },
-  }
-
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [authTool],
-  }))
-
-  mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-    if (req.params.name !== 'authenticate') {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated. Call authenticate first.' }], isError: true }
-    }
-
-    try {
-      const creds = await runOAuthFlow()
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Authenticated as ${creds.userName} in ${creds.teamName}!\n\nCredentials saved to ${getCredentialsPath()}\n\nPlease restart your Claude Code session to start collaborating.`,
-        }],
-      }
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Authentication failed: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      }
-    }
-  })
-
-  await mcp.connect(new StdioServerTransport())
-  console.error('[cccollab] Not authenticated. Waiting for authenticate tool call...')
-}
-
-async function startAuthenticated(config: Config, brokerPort: number) {
-  const botClient = new WebClient(config.slackBotToken)
-  const postClient = new WebClient(config.slackUserToken)
-
-  const authResult = await botClient.auth.test()
-  const botUserId = authResult.user_id ?? ''
-  if (!botUserId) {
-    throw new Error('Failed to determine bot user ID. Your credentials may be expired. Delete ' + getCredentialsPath() + ' and re-authenticate.')
-  }
-
+async function startServer(config: Config, brokerPort: number) {
   // Detect worktree name
   let worktreeName: string | undefined
   try {
@@ -120,24 +58,8 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     }
   }
 
-  const subscriptions = new SubscriptionManager(botClient)
   const context = new ActiveContext()
   context.joinLocalChannel()
-
-  // Broker already ensured; brokerPort passed in
-
-  // Auto-join default channel if configured
-  let defaultChannelJoined: string | undefined
-  if (config.defaultChannel) {
-    try {
-      const { channelId } = await subscriptions.join(config.defaultChannel)
-      context.setActiveChannel(channelId, config.defaultChannel)
-      defaultChannelJoined = config.defaultChannel
-      console.error(`[cccollab] Auto-joined default channel #${config.defaultChannel}`)
-    } catch (err) {
-      console.error(`[cccollab] Failed to auto-join #${config.defaultChannel}: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
 
   const instructionLines = [
     'You are connected to the Claude Code Collaboration server. Messages from other sessions arrive as <channel source="cccollab" ...> tags.',
@@ -155,32 +77,15 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
   const workflowSteps: string[] = []
   if (introduceStep) workflowSteps.push(introduceStep)
-  if (defaultChannelJoined) {
-    workflowSteps.push(`start_topic or join_topic - create or join a conversation (defaults to #${defaultChannelJoined})`)
-  } else {
-    workflowSteps.push('start_topic or join_topic - create or join a conversation (defaults to local)')
-  }
+  workflowSteps.push('start_topic or join_topic - create or join a local conversation')
   workflowSteps.push('send_message_to_topic - send to your active topic')
 
-  if (defaultChannelJoined) {
-    instructionLines.push(
-      `Your default channel is #${defaultChannelJoined} (already joined). Topics default to this channel.`,
-      '',
-      'Workflow:',
-      ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
-      '',
-      'Use channel: "local" on any topic tool to explicitly target local topics instead of the default Slack channel.',
-    )
-  } else {
-    instructionLines.push(
-      'You are always connected to the LOCAL channel by default. You can start and join local topics immediately without joining any Slack channel.',
-      '',
-      'Workflow:',
-      ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
-      '',
-      'Local topics are the default. Only use join_channel if the user explicitly asks to collaborate via a Slack channel.',
-    )
-  }
+  instructionLines.push(
+    'You are always connected to the LOCAL channel. You can start and join local topics immediately.',
+    '',
+    'Workflow:',
+    ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
+  )
   instructionLines.push(
     '',
     'The server remembers your active topic. You don\'t need to repeat it.',
@@ -204,22 +109,17 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   const socketListener = new SocketModeListener({
     brokerUrl: `http://127.0.0.1:${brokerPort}`,
     messageBus,
-    subscriptionManager: subscriptions,
     sessionManager: session,
     context,
-    botUserId,
-    webClient: botClient,
   })
 
-  const allTools = [...createIdentityTools(), ...createChannelTools(), ...createTopicTools()]
+  const allTools = [...createIdentityTools(), ...createTopicTools()]
 
   const identityToolNames = new Set(['introduce', 'whoami'])
-  const channelToolNames = new Set(['join_channel', 'leave_channel', 'list_channels'])
   const topicToolNames = new Set(['list_topics', 'start_topic', 'join_topic', 'leave_topic', 'archive_topic', 'unarchive_topic', 'send_message_to_topic', 'send_broadcast', 'list_sessions', 'send_message_to_session'])
 
   const identityDeps = { session, brokerPort }
-  const channelDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context }
-  const topicDeps = { session, webClient: botClient, postClient, subscriptionManager: subscriptions, context, brokerPort }
+  const topicDeps = { session, context, brokerPort }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }))
 
@@ -229,7 +129,6 @@ async function startAuthenticated(config: Config, brokerPort: number) {
     try {
       let result: string
       if (identityToolNames.has(name)) result = await handleIdentityTool(name, toolArgs, identityDeps)
-      else if (channelToolNames.has(name)) result = await handleChannelTool(name, toolArgs, channelDeps)
       else if (topicToolNames.has(name)) result = await handleTopicTool(name, toolArgs, topicDeps)
       else throw new Error(`Unknown tool: ${name}`)
       return { content: [{ type: 'text' as const, text: result }] }
@@ -252,7 +151,7 @@ async function startAuthenticated(config: Config, brokerPort: number) {
   console.error(`[cccollab] Session "${session.sessionName}" connected as ${config.username}`)
 }
 
-async function ensureBroker(appToken: string): Promise<number> {
+async function ensureBroker(): Promise<number> {
   const existing = readRendezvous()
   if (existing && await probeBroker(existing.port)) {
     return existing.port
@@ -307,7 +206,7 @@ async function ensureBroker(appToken: string): Promise<number> {
     }
 
     const child = spawn(command, args, {
-      env: { ...process.env, SLACK_APP_TOKEN: appToken },
+      env: { ...process.env },
       detached: true,
       stdio: 'ignore',
     })
@@ -322,13 +221,8 @@ async function ensureBroker(appToken: string): Promise<number> {
 
 async function main() {
   const config = loadConfig()
-
-  if (!config.authenticated) {
-    await startUnauthenticated()
-  } else {
-    const brokerPort = await ensureBroker(config.slackAppToken)
-    await startAuthenticated(config, brokerPort)
-  }
+  const brokerPort = await ensureBroker()
+  await startServer(config, brokerPort)
 
   const cleanup = () => { console.error('[cccollab] Shutting down...'); process.exit(0) }
   process.on('SIGINT', cleanup)

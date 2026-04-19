@@ -3,7 +3,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net'
 import { writeFileSync, appendFileSync } from 'node:fs'
 import crypto from 'node:crypto'
-import { SocketModeClient } from '@slack/socket-mode'
 import { BROKER_ID, BROKER_RENDEZVOUS_FILE } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 
@@ -86,35 +85,6 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
   const parsed = new URL(url, 'http://localhost')
   return { pathname: parsed.pathname, searchParams: parsed.searchParams }
 }
-
-// --- Slack Socket Mode ---
-
-const appToken = process.env.SLACK_APP_TOKEN
-if (!appToken) {
-  log('FATAL: SLACK_APP_TOKEN is required')
-  process.exit(1)
-}
-
-const socketClient = new SocketModeClient({ appToken })
-
-socketClient.on('message', ({ event, ack }) => {
-  // Ack immediately
-  void Promise.resolve(ack())
-
-  if (!event || event.type !== 'message') return
-
-  const data = JSON.stringify({
-    channel: event.channel as string,
-    user: (event.user as string | undefined) ?? null,
-    text: (event.text as string | undefined) ?? null,
-    ts: event.ts as string,
-    thread_ts: (event.thread_ts as string | undefined) ?? null,
-    subtype: (event.subtype as string | undefined) ?? null,
-  })
-
-  log(`BROADCAST: ${data}`)
-  broadcast(data)
-})
 
 // --- Route matching helpers ---
 
@@ -419,9 +389,6 @@ process.on('SIGINT', shutdown)
 async function main(): Promise<void> {
   writeFileSync(PID_FILE, String(process.pid))
   log(`PID ${process.pid} (id=${BROKER_ID}) written to ${PID_FILE}`)
-
-  await socketClient.start()
-  log('Socket Mode connected')
 
   server.listen(0, '127.0.0.1', () => {
     const addr = server.address() as AddressInfo
