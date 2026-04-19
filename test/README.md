@@ -11,8 +11,7 @@ From the repo root, once:
 
 ```bash
 yarn install
-yarn build       # optional: bin/cccollab prefers src/ + tsx if present
-npm link         # so `cccollab` resolves on PATH (the plugin's .mcp.json calls it bare)
+npm link         # repoint the global `cccollab` binary at this repo so the harness exercises local src/ (instead of the published @flatoutsolutions/cccollab from install.sh)
 claude plugin marketplace add ./test-marketplace
 claude plugin install cccollab@cccollab-test
 ```
@@ -36,7 +35,6 @@ Open two terminals. In each, from anywhere in the repo:
 Each launch:
 
 - `cd`s into `test/`, so `.cccollab.json` is found by walking up from `cwd`.
-- Unsets every `SLACK_*` env var inherited from the parent shell.
 - Exports `CCCOLLAB_NAME=<positional>` so the session pre-seeds its identity.
 - Runs `claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:cccollab@cccollab-test -n <name>`.
 
