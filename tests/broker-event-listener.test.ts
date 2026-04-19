@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SocketModeListener, type BrokerLocalEvent } from '../src/socket-listener.js'
+import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
 
@@ -7,8 +7,8 @@ function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
 }
 
-describe('SocketModeListener (local events only)', () => {
-  let listener: SocketModeListener
+describe('BrokerEventListener (channel-aware)', () => {
+  let listener: BrokerEventListener
   let mockBus: ReturnType<typeof createMockMessageBus>
   let context: ActiveContext
 
@@ -17,9 +17,9 @@ describe('SocketModeListener (local events only)', () => {
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
     session.setName('architect')
     context = new ActiveContext()
-    context.joinLocalChannel()
+    context.joinChannel('default', 'fallback')
 
-    listener = new SocketModeListener({
+    listener = new BrokerEventListener({
       brokerUrl: 'http://localhost:7850',
       messageBus: mockBus as never,
       sessionManager: session,
@@ -27,28 +27,42 @@ describe('SocketModeListener (local events only)', () => {
     })
   })
 
-  it('pushes topic_created events from other sessions to the bus', async () => {
+  it('pushes topic_created events from other sessions on subscribed channel', async () => {
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_created',
-      topic: { id: 'uuid-1', topic: 'Auth discussion', creator: 'tester' },
+      channel: 'default',
+      topic: { id: 'uuid-1', topic: 'Auth discussion', channel: 'default', creator: 'tester' },
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'tester',
-        text: 'New local topic: "Auth discussion"',
-        channel: 'local',
-        channelName: 'local',
+        text: expect.stringContaining('Auth discussion'),
+        channel: 'default',
+        channelName: 'default',
       }))
     })
   })
 
-  it('pushes local message events for joined topics', async () => {
-    context.joinTopic('uuid-topic', 'Test local', 'local')
+  it('drops topic_created for a channel we are not subscribed to', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'topic_created',
+      channel: 'other',
+      topic: { id: 'uuid-1', topic: 'Noise', channel: 'other', creator: 'tester' },
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('pushes message events for joined topics on subscribed channel', async () => {
+    context.joinTopic('uuid-topic', 'Test topic', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'message',
+      channel: 'default',
       topicId: 'uuid-topic',
       sender: 'bob',
       text: 'Working on it',
@@ -59,16 +73,31 @@ describe('SocketModeListener (local events only)', () => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'bob',
         text: 'Working on it',
-        channel: 'local',
+        channel: 'default',
         threadTs: 'uuid-topic',
       }))
     })
+  })
+
+  it('drops message events for unsubscribed channel', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'message',
+      channel: 'project_x',
+      topicId: 'uuid-topic',
+      sender: 'bob',
+      text: 'Secret stuff',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
   })
 
   it('drops local message events for topics not joined', async () => {
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'message',
+      channel: 'default',
       topicId: 'uuid-not-joined',
       sender: 'bob',
       text: 'Should not see this',
@@ -79,10 +108,11 @@ describe('SocketModeListener (local events only)', () => {
   })
 
   it('drops self local messages', async () => {
-    context.joinTopic('uuid-self', 'Self topic', 'local')
+    context.joinTopic('uuid-self', 'Self topic', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'message',
+      channel: 'default',
       topicId: 'uuid-self',
       sender: 'architect',
       text: 'My own message',
@@ -92,11 +122,12 @@ describe('SocketModeListener (local events only)', () => {
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
-  it('pushes topic_archived events for joined topics', async () => {
-    context.joinTopic('uuid-archived', 'Archived topic', 'local')
+  it('pushes topic_archived events for joined topics on subscribed channel', async () => {
+    context.joinTopic('uuid-archived', 'Archived topic', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_archived',
+      channel: 'default',
       topicId: 'uuid-archived',
       archivedBy: 'architect',
     }
@@ -105,29 +136,18 @@ describe('SocketModeListener (local events only)', () => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'architect',
         text: 'Topic archived',
-        channel: 'local',
+        channel: 'default',
         threadTs: 'uuid-archived',
       }))
     })
   })
 
-  it('drops topic_archived events for topics not joined', async () => {
-    const event: BrokerLocalEvent = {
-      source: 'local',
-      type: 'topic_archived',
-      topicId: 'uuid-not-joined',
-      archivedBy: 'architect',
-    }
-    listener.processLocalEvent(event)
-    await new Promise<void>((r) => setTimeout(r, 50))
-    expect(mockBus.push).not.toHaveBeenCalled()
-  })
-
-  it('pushes topic_unarchived events for joined topics', async () => {
-    context.joinTopic('uuid-unarch', 'Unarchived topic', 'local')
+  it('pushes topic_unarchived for joined topics on subscribed channel', async () => {
+    context.joinTopic('uuid-unarch', 'Unarchived', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_unarchived',
+      channel: 'default',
       topicId: 'uuid-unarch',
     }
     listener.processLocalEvent(event)
@@ -135,16 +155,16 @@ describe('SocketModeListener (local events only)', () => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'system',
         text: 'Topic unarchived',
-        channel: 'local',
-        threadTs: 'uuid-unarch',
+        channel: 'default',
       }))
     })
   })
 
-  it('pushes broadcast events from other sessions to the bus', async () => {
+  it('pushes broadcast events from other sessions on subscribed channel', async () => {
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'broadcast',
+      channel: 'default',
       sender: 'tester',
       text: 'Heads up everyone',
       ts: '2026-01-01T00:00:00Z',
@@ -154,17 +174,31 @@ describe('SocketModeListener (local events only)', () => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'tester',
         text: 'Heads up everyone',
-        channel: 'local',
-        channelName: 'local',
+        channel: 'default',
+        channelName: 'default',
         threadTs: undefined,
       }))
     })
+  })
+
+  it('drops broadcast for unsubscribed channel', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'broadcast',
+      channel: 'not_subscribed',
+      sender: 'tester',
+      text: 'Noise',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
   })
 
   it('drops self broadcast events', async () => {
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'broadcast',
+      channel: 'default',
       sender: 'architect',
       text: 'My own broadcast',
     }
@@ -186,7 +220,6 @@ describe('SocketModeListener (local events only)', () => {
       expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
         sender: 'reviewer',
         text: expect.stringContaining('Got a sec?'),
-        channel: 'local',
       }))
     })
   })

@@ -1,5 +1,6 @@
 import type { SessionManager } from '../session.js'
 import type { ActiveContext } from '../context.js'
+import { normalizeChannelName } from '../context.js'
 
 export interface TopicToolDeps {
   session: SessionManager
@@ -9,7 +10,6 @@ export interface TopicToolDeps {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-/** Pick the best match from a list of candidates by name. Exact match wins; else unique substring. */
 function pickMatch<T extends { topic: string }>(candidates: T[], query: string): { match: T | null; ambiguous: T[] } {
   const q = query.toLowerCase()
   const exact = candidates.filter((t) => t.topic.toLowerCase() === q)
@@ -28,6 +28,7 @@ function brokerBaseUrl(port: number): string {
 interface BrokerTopicData {
   id: string
   topic: string
+  channel: string
   creator: string
   state: string
   createdAt: string
@@ -36,6 +37,7 @@ interface BrokerTopicData {
 
 interface BrokerJoinData {
   ok: boolean
+  channel?: string
   messages: Array<{ sender: string; text: string; ts: string }>
 }
 
@@ -52,10 +54,11 @@ export function createTopicTools() {
   return [
     {
       name: 'list_topics',
-      description: 'List local topics. Defaults to active topics only.',
+      description: 'List topics. With no channel, lists across every subscribed channel. With a channel, scopes to that channel (you must be subscribed). Defaults to active topics only.',
       inputSchema: {
         type: 'object' as const,
         properties: {
+          channel: { type: 'string' as const, description: 'Channel to scope to. Defaults to all subscribed channels.' },
           include_archived: { type: 'boolean' as const, description: 'Include archived topics (default: false)' },
         },
         required: [],
@@ -63,18 +66,19 @@ export function createTopicTools() {
     },
     {
       name: 'start_topic',
-      description: 'Create a new local topic and set it as the active topic.',
+      description: 'Create a topic in a channel (defaults to the active channel). The new topic becomes your active topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           topic: { type: 'string' as const, description: 'Topic name / title' },
+          channel: { type: 'string' as const, description: 'Channel to create the topic in. Defaults to active channel.' },
         },
         required: ['topic'],
       },
     },
     {
       name: 'join_topic',
-      description: 'Join a local topic by name (fuzzy match) or UUID. Fetches history and sets it as the active topic.',
+      description: 'Join a topic by name (fuzzy match) or UUID, across your subscribed channels. Fetches history and sets it as the active topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -91,6 +95,17 @@ export function createTopicTools() {
         properties: {
           topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to the active topic.' },
         },
+      },
+    },
+    {
+      name: 'set_active_topic',
+      description: 'Set the active topic. You must already have joined it.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          topic: { type: 'string' as const, description: 'Topic name or UUID of a joined topic.' },
+        },
+        required: ['topic'],
       },
     },
     {
@@ -116,35 +131,29 @@ export function createTopicTools() {
     },
     {
       name: 'send_message_to_topic',
-      description: 'Send a message to a topic. Defaults to the most recently joined topic.',
+      description: 'Send a message to a topic. Defaults to the active topic.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           text: { type: 'string' as const, description: 'Message text' },
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to most recently joined topic.' },
-        },
-        required: ['text'],
-      },
-    },
-    {
-      name: 'send_broadcast',
-      description: 'Send a top-level message to all subscribers. Not in a topic thread.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          text: { type: 'string' as const, description: 'Message text' },
+          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to active topic.' },
         },
         required: ['text'],
       },
     },
     {
       name: 'list_sessions',
-      description: 'List all sessions currently registered on this broker. Only shows sessions that have introduced themselves.',
-      inputSchema: { type: 'object' as const, properties: {} },
+      description: 'List sessions visible through any of your subscribed channels. With a channel arg, scopes to that channel (you must be subscribed).',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          channel: { type: 'string' as const, description: 'Channel to scope to. Defaults to all your subscribed channels.' },
+        },
+      },
     },
     {
       name: 'send_message_to_session',
-      description: 'Send a private direct message to another session by name.',
+      description: 'Send a private direct message to another session by name. Requires at least one shared subscribed channel with the recipient.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -157,10 +166,13 @@ export function createTopicTools() {
   ]
 }
 
-const REQUIRES_NAME = new Set(['start_topic', 'join_topic', 'leave_topic', 'archive_topic', 'unarchive_topic', 'send_message_to_topic', 'send_broadcast', 'list_sessions', 'send_message_to_session'])
+const REQUIRES_NAME = new Set([
+  'start_topic', 'join_topic', 'leave_topic', 'set_active_topic', 'archive_topic', 'unarchive_topic',
+  'send_message_to_topic', 'list_sessions', 'send_message_to_session',
+])
 
 export async function handleTopicTool(
-  name: string, args: Record<string, unknown>, deps: TopicToolDeps
+  name: string, args: Record<string, unknown>, deps: TopicToolDeps,
 ): Promise<string> {
   if (REQUIRES_NAME.has(name) && !deps.session.hasName()) {
     return 'This session has no name set. Call `introduce` first with a name (e.g., "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.'
@@ -168,56 +180,42 @@ export async function handleTopicTool(
 
   switch (name) {
     case 'list_topics': {
-      const { include_archived } = args as { include_archived?: boolean }
-      return handleLocalListTopics(deps, include_archived)
+      const { channel, include_archived } = args as { channel?: string; include_archived?: boolean }
+      return handleListTopics(deps, channel, include_archived)
     }
     case 'start_topic': {
-      const { topic } = args as { topic: string }
-      return handleLocalStartTopic(deps, topic)
+      const { topic, channel } = args as { topic: string; channel?: string }
+      return handleStartTopic(deps, topic, channel)
     }
     case 'join_topic': {
       const { topic } = args as { topic: string }
-      return handleLocalJoinTopic(deps, topic)
+      return handleJoinTopic(deps, topic)
+    }
+    case 'set_active_topic': {
+      const { topic } = args as { topic: string }
+      return handleSetActiveTopic(deps, topic)
     }
     case 'send_message_to_topic': {
       const { text, topic } = args as { text: string; topic?: string }
-
       if (typeof text !== 'string' || text.trim() === '') {
         return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
       }
-
-      // Active topic with no topic arg
       if (deps.context.hasTopic() && !topic) {
-        return handleLocalSendMessage(deps, text, deps.context.getThreadTs())
+        return handleSendMessage(deps, text, deps.context.getThreadTs())
       }
-
       if (topic) {
         const found = deps.context.findJoinedTopic(topic)
-        if (found) {
-          return handleLocalSendMessage(deps, text, found.threadTs)
-        }
-        // Not joined - resolve by name/UUID and post without joining
-        const resolved = await resolveLocalTopicId(deps.brokerPort, topic)
+        if (found) return handleSendMessage(deps, text, found.threadTs)
+        const resolved = await resolveTopicIdInSubscribedChannels(deps, topic)
         if (resolved.error) return resolved.error
-        return handleLocalSendMessage(deps, text, resolved.id!)
+        return handleSendMessage(deps, text, resolved.id!)
       }
-
       return 'No active topic. Use join_topic or start_topic first, or pass a `topic` argument.'
-    }
-    case 'send_broadcast': {
-      const { text } = args as { text: string }
-
-      if (typeof text !== 'string' || text.trim() === '') {
-        return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
-      }
-
-      return handleLocalBroadcast(deps, text)
     }
     case 'leave_topic': {
       const { topic } = args as { topic?: string }
       let threadTs: string
       let topicName: string
-
       if (topic) {
         const found = deps.context.findJoinedTopic(topic)
         if (!found) return `No joined topic matching "${topic}".`
@@ -228,7 +226,6 @@ export async function handleTopicTool(
         threadTs = deps.context.getThreadTs()
         topicName = deps.context.getTopicName() ?? 'topic'
       }
-
       await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${threadTs}/leave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -239,36 +236,23 @@ export async function handleTopicTool(
     }
     case 'archive_topic': {
       const { topic } = args as { topic?: string }
-
       if (deps.context.hasTopic() && !topic) {
-        return handleLocalArchiveTopic(deps, deps.context.getThreadTs())
+        return handleArchiveTopic(deps, deps.context.getThreadTs())
       }
-
       if (topic) {
         const found = deps.context.findJoinedTopic(topic)
-        if (found) {
-          return handleLocalArchiveTopic(deps, found.threadTs)
-        }
-        return handleLocalArchiveTopicByName(deps, topic)
+        if (found) return handleArchiveTopic(deps, found.threadTs)
+        return handleArchiveTopicByName(deps, topic)
       }
-
       return 'No active topic. Use join_topic or start_topic first.'
     }
     case 'unarchive_topic': {
       const { topic } = args as { topic: string }
-      return handleLocalUnarchiveTopic(deps, topic)
+      return handleUnarchiveTopic(deps, topic)
     }
     case 'list_sessions': {
-      const data = await brokerFetch<{ sessions: Array<{ name: string; objective?: string; registeredAt: string }> }>(
-        `${brokerBaseUrl(deps.brokerPort)}/sessions`
-      )
-      if (data.sessions.length === 0) return 'No sessions currently registered.'
-      const lines = ['Active sessions:']
-      for (const s of data.sessions) {
-        const obj = s.objective ? ` - ${s.objective}` : ''
-        lines.push(`  ${s.name}${obj}`)
-      }
-      return lines.join('\n')
+      const { channel } = args as { channel?: string }
+      return handleListSessions(deps, channel)
     }
     case 'send_message_to_session': {
       const { to, text } = args as { to: string; text: string }
@@ -278,11 +262,18 @@ export async function handleTopicTool(
       if (typeof to !== 'string' || to.trim() === '') {
         return 'Error: `to` is required and must be a non-empty string.'
       }
-      await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/local-event`, {
+      const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/direct-message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'direct_message', from: deps.session.displayName, to, text }),
+        body: JSON.stringify({ from: deps.session.displayName, to, text }),
       })
+      if (res.status === 403 || res.status === 404) {
+        const body = await res.json() as { error?: string }
+        return body.error ?? `Could not deliver DM to ${to}.`
+      }
+      if (!res.ok) {
+        throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
+      }
       return `Direct message sent to ${to}.`
     }
     default:
@@ -290,36 +281,57 @@ export async function handleTopicTool(
   }
 }
 
-// --- Local topic handlers ---
-
-async function handleLocalListTopics(
-  deps: TopicToolDeps, includeArchived?: boolean
+async function handleListTopics(
+  deps: TopicToolDeps, channelArg?: string, includeArchived?: boolean,
 ): Promise<string> {
   const params = new URLSearchParams()
   if (includeArchived) params.set('include_archived', 'true')
+
+  if (channelArg) {
+    const channel = normalizeChannelName(channelArg)
+    if (!channel) return 'Error: channel name must be non-empty.'
+    if (!deps.context.isChannelSubscribed(channel)) {
+      return `Not subscribed to #${channel}. Use join_channel first.`
+    }
+    params.set('channel', channel)
+  } else {
+    params.set('sessionId', deps.session.displayName)
+  }
+
   const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
   if (data.topics.length === 0) {
-    return 'No active local topics.'
+    return channelArg ? `No active topics in #${normalizeChannelName(channelArg)}.` : 'No active topics in your subscribed channels.'
   }
+
   const statusLabel: Record<string, string> = {
     active: '[active]',
     archived: '[archived]',
   }
-  const lines = ['Local topics:']
+  const activeThread = deps.context.hasTopic() ? deps.context.getThreadTs() : null
+  const lines = ['Topics:']
   for (const t of data.topics) {
     const joined = deps.context.isTopicJoined(t.id) ? ' <-- joined' : ''
-    const active = t.id === (deps.context.hasTopic() ? deps.context.getThreadTs() : null) ? ' (active)' : ''
-    lines.push(`  ${statusLabel[t.state] ?? `[${t.state}]`} "${t.topic}" (${t.messageCount ?? 0} messages)${joined}${active}`)
+    const active = t.id === activeThread ? ' (active)' : ''
+    lines.push(`  ${statusLabel[t.state] ?? `[${t.state}]`} #${t.channel} "${t.topic}" (${t.messageCount ?? 0} messages)${joined}${active}`)
   }
   return lines.join('\n')
 }
 
-async function handleLocalStartTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?: string): Promise<string> {
+  let channel = channelArg ? normalizeChannelName(channelArg) : undefined
+  if (!channel) channel = deps.context.getActiveChannel()
+  if (!channel) {
+    return 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.'
+  }
+  if (!deps.context.isChannelSubscribed(channel)) {
+    return `Not subscribed to #${channel}. Use join_channel first.`
+  }
+
   const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/topics`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, creator: deps.session.displayName }),
+    body: JSON.stringify({ topic, creator: deps.session.displayName, channel }),
   })
   if (res.status === 409) {
     const body = await res.json() as { error: string }
@@ -329,35 +341,48 @@ async function handleLocalStartTopic(deps: TopicToolDeps, topic: string): Promis
     throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
   }
   const data = await res.json() as BrokerTopicData
-  deps.context.joinTopic(data.id, topic, 'local')
-  return `Local topic started: "${topic}". This is now your active topic.`
+  deps.context.joinTopic(data.id, topic, data.channel ?? channel)
+  return `Topic started in #${channel}: "${topic}". This is now your active topic.`
 }
 
-async function handleLocalJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
-  // Direct UUID lookup
+async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchLocalTopicById(deps.brokerPort, topic)
-    if (!byId) return `No local topic with id "${topic}" found.`
-    return joinLocalTopic(deps, byId)
+    const byId = await fetchTopicById(deps.brokerPort, topic)
+    if (!byId) return `No topic with id "${topic}" found.`
+    if (!deps.context.isChannelSubscribed(byId.channel)) {
+      return `Topic "${byId.topic}" is in channel #${byId.channel}, which you are not subscribed to. Use join_channel first.`
+    }
+    return joinTopicByData(deps, byId)
   }
 
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics`
+  const params = new URLSearchParams()
+  params.set('sessionId', deps.session.displayName)
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
   const { match, ambiguous } = pickMatch(data.topics, topic)
 
   if (!match) {
     if (ambiguous.length > 1) {
-      const lines = [`Multiple local topics match "${topic}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      const lines = [`Multiple topics match "${topic}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
       return lines.join('\n')
     }
-    return `No active local topic matching "${topic}" found.`
+    return `No active topic matching "${topic}" found in your subscribed channels.`
   }
 
-  return joinLocalTopic(deps, match)
+  return joinTopicByData(deps, match)
 }
 
-async function fetchLocalTopicById(brokerPort: number, id: string): Promise<BrokerTopicData | null> {
+async function handleSetActiveTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+  const found = deps.context.findJoinedTopic(topic)
+  if (!found) {
+    return `No joined topic matching "${topic}". Use join_topic first.`
+  }
+  deps.context.joinTopic(found.threadTs, found.topicName, found.channel)
+  return `Active topic set to "${found.topicName}" (#${found.channel}).`
+}
+
+async function fetchTopicById(brokerPort: number, id: string): Promise<BrokerTopicData | null> {
   try {
     const url = `${brokerBaseUrl(brokerPort)}/topics/${id}`
     const res = await fetch(url)
@@ -369,7 +394,7 @@ async function fetchLocalTopicById(brokerPort: number, id: string): Promise<Brok
   }
 }
 
-async function joinLocalTopic(deps: TopicToolDeps, topic: BrokerTopicData): Promise<string> {
+async function joinTopicByData(deps: TopicToolDeps, topic: BrokerTopicData): Promise<string> {
   const joinUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${topic.id}/join`
   const joinData = await brokerFetch<BrokerJoinData>(joinUrl, {
     method: 'POST',
@@ -377,16 +402,16 @@ async function joinLocalTopic(deps: TopicToolDeps, topic: BrokerTopicData): Prom
     body: JSON.stringify({ sessionId: deps.session.sessionName }),
   })
 
-  deps.context.joinTopic(topic.id, topic.topic, 'local')
+  deps.context.joinTopic(topic.id, topic.topic, topic.channel)
 
-  const lines = [`Joined local topic "${topic.topic}". This is now your active topic.`, '', 'Topic history:']
+  const lines = [`Joined topic "${topic.topic}" in #${topic.channel}. This is now your active topic.`, '', 'Topic history:']
   for (const msg of joinData.messages) {
     lines.push(`  [${msg.sender}]: ${msg.text}`)
   }
   return lines.join('\n')
 }
 
-async function handleLocalSendMessage(deps: TopicToolDeps, text: string, topicId: string): Promise<string> {
+async function handleSendMessage(deps: TopicToolDeps, text: string, topicId: string): Promise<string> {
   const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/messages`
   await brokerFetch<{ ok: boolean }>(url, {
     method: 'POST',
@@ -396,17 +421,7 @@ async function handleLocalSendMessage(deps: TopicToolDeps, text: string, topicId
   return 'Message sent.'
 }
 
-async function handleLocalBroadcast(deps: TopicToolDeps, text: string): Promise<string> {
-  const url = `${brokerBaseUrl(deps.brokerPort)}/broadcast`
-  await brokerFetch<{ ok: boolean }>(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, sender: deps.session.displayName }),
-  })
-  return 'Broadcast sent in local.'
-}
-
-async function handleLocalArchiveTopic(deps: TopicToolDeps, topicId: string): Promise<string> {
+async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise<string> {
   const topicName = deps.context.getTopicName() ?? 'topic'
   await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/archive`, {
     method: 'POST',
@@ -417,43 +432,49 @@ async function handleLocalArchiveTopic(deps: TopicToolDeps, topicId: string): Pr
   return `Topic "${topicName}" archived.`
 }
 
-async function handleLocalArchiveTopicByName(deps: TopicToolDeps, name: string): Promise<string> {
-  const id = await resolveLocalTopicId(deps.brokerPort, name)
-  if (id.error) return id.error
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${id.id}/archive`, {
+async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Promise<string> {
+  const resolved = await resolveTopicIdInSubscribedChannels(deps, name)
+  if (resolved.error) return resolved.error
+  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${resolved.id}/archive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ archivedBy: deps.session.displayName }),
   })
-  deps.context.leaveTopic(id.id!)
-  return `Topic "${id.topicName}" archived.`
+  deps.context.leaveTopic(resolved.id!)
+  return `Topic "${resolved.topicName}" archived.`
 }
 
-async function handleLocalUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise<string> {
+async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchLocalTopicById(deps.brokerPort, topic)
-    if (!byId || byId.state !== 'archived') return `No archived local topic with id "${topic}".`
+    const byId = await fetchTopicById(deps.brokerPort, topic)
+    if (!byId || byId.state !== 'archived') return `No archived topic with id "${topic}".`
+    if (!deps.context.isChannelSubscribed(byId.channel)) {
+      return `Topic "${byId.topic}" is in #${byId.channel}, which you are not subscribed to. Use join_channel first.`
+    }
     await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${byId.id}/unarchive`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     })
-    return `Local topic "${byId.topic}" unarchived.`
+    return `Topic "${byId.topic}" unarchived.`
   }
 
+  const params = new URLSearchParams()
+  params.set('include_archived', 'true')
+  params.set('sessionId', deps.session.displayName)
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(
-    `${brokerBaseUrl(deps.brokerPort)}/topics?include_archived=true`
+    `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`,
   )
   const archived = data.topics.filter((t) => t.state === 'archived')
   const { match, ambiguous } = pickMatch(archived, topic)
 
   if (!match) {
     if (ambiguous.length > 1) {
-      const lines = [`Multiple archived local topics match "${topic}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      const lines = [`Multiple archived topics match "${topic}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
       return lines.join('\n')
     }
-    return `No archived local topic matching "${topic}".`
+    return `No archived topic matching "${topic}" in your subscribed channels.`
   }
 
   await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/unarchive`, {
@@ -461,27 +482,61 @@ async function handleLocalUnarchiveTopic(deps: TopicToolDeps, topic: string): Pr
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   })
-  return `Local topic "${match.topic}" unarchived.`
+  return `Topic "${match.topic}" unarchived.`
 }
 
-async function resolveLocalTopicId(
-  brokerPort: number, name: string,
+async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Promise<string> {
+  const params = new URLSearchParams()
+  if (channelArg) {
+    const channel = normalizeChannelName(channelArg)
+    if (!channel) return 'Error: channel name must be non-empty.'
+    if (!deps.context.isChannelSubscribed(channel)) {
+      return `Not subscribed to #${channel}. Use join_channel first.`
+    }
+    params.set('channel', channel)
+  }
+  const url = `${brokerBaseUrl(deps.brokerPort)}/sessions${params.toString() ? `?${params.toString()}` : ''}`
+  const data = await brokerFetch<{ sessions: Array<{ name: string; objective?: string; registeredAt: string; channels?: string[] }> }>(url)
+
+  const myChannels = new Set(deps.context.getSubscribedChannels().map((c) => c.name))
+  const visible = channelArg ? data.sessions : data.sessions.filter((s) => {
+    if (!s.channels || s.channels.length === 0) return false
+    return s.channels.some((ch) => myChannels.has(ch))
+  })
+
+  if (visible.length === 0) return 'No sessions visible.'
+  const lines = ['Visible sessions:']
+  for (const s of visible) {
+    const obj = s.objective ? ` - ${s.objective}` : ''
+    const channels = s.channels && s.channels.length > 0 ? ` (#${s.channels.join(', #')})` : ''
+    lines.push(`  ${s.name}${obj}${channels}`)
+  }
+  return lines.join('\n')
+}
+
+async function resolveTopicIdInSubscribedChannels(
+  deps: TopicToolDeps, name: string,
 ): Promise<{ id?: string; topicName?: string; error?: string }> {
   if (UUID_PATTERN.test(name)) {
-    const byId = await fetchLocalTopicById(brokerPort, name)
-    if (!byId) return { error: `No local topic with id "${name}".` }
+    const byId = await fetchTopicById(deps.brokerPort, name)
+    if (!byId) return { error: `No topic with id "${name}".` }
+    if (!deps.context.isChannelSubscribed(byId.channel)) {
+      return { error: `Topic "${byId.topic}" is in #${byId.channel}, which you are not subscribed to.` }
+    }
     return { id: byId.id, topicName: byId.topic }
   }
-  const url = `${brokerBaseUrl(brokerPort)}/topics`
+  const params = new URLSearchParams()
+  params.set('sessionId', deps.session.displayName)
+  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
   const { match, ambiguous } = pickMatch(data.topics, name)
   if (!match) {
     if (ambiguous.length > 1) {
-      const lines = [`Multiple local topics match "${name}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  "${m.topic}"`)
+      const lines = [`Multiple topics match "${name}". Be more specific:`]
+      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
       return { error: lines.join('\n') }
     }
-    return { error: `No active local topic matching "${name}".` }
+    return { error: `No active topic matching "${name}" in your subscribed channels.` }
   }
   return { id: match.id, topicName: match.topic }
 }

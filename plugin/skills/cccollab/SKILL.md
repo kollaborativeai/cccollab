@@ -1,11 +1,18 @@
 ---
 name: cccollab
-description: Use when coordinating with other Claude Code sessions or humans via topics (local or Slack). Triggers on collaboration requests, questions like "who else is working on X", cross-session broadcasts, pair-programming handoffs, or any request to reach a teammate through Claude.
+description: Use when coordinating with other Claude Code sessions or humans via channels and topics. Triggers on collaboration requests, questions like "who else is working on X", cross-session broadcasts, pair-programming handoffs, or any request to reach a teammate through Claude.
 ---
 
 # cccollab
 
-Real-time collaboration between Claude Code sessions via threaded topics. Local topics are in-process (no Slack needed); Slack topics fan out to a shared channel where humans can participate.
+Real-time collaboration between Claude Code sessions via channels and threaded topics. Channels are logical namespaces; topics are conversations scoped to a channel.
+
+## Model
+
+- You are subscribed to one or more channels; exactly one is active.
+- Channels are created implicitly on first subscription and destroyed when the last subscriber leaves.
+- Topics live inside a channel. You cannot join a topic in a channel you are not subscribed to.
+- Fresh sessions subscribe to `#default` as a sensible fallback.
 
 ## Before you use any tool
 
@@ -15,23 +22,20 @@ Real-time collaboration between Claude Code sessions via threaded topics. Local 
 
 Use a short role-based name, not a person's name. Roles make messages readable when multiple sessions are in the same topic.
 
-## Default to local topics
-
-Local topics require no setup and no Slack. Use them for coordination between sessions on the same machine or across machines sharing the local broker.
-
-Only call `join_channel` when the user explicitly asks to collaborate via Slack, or when `CCCOLLAB_DEFAULT_CHANNEL` is configured for this session.
-
 ## Finding out who is available
 
-Before starting a new topic asking for help, call `list_sessions` to see which other sessions are registered on the local broker. If nobody else is there, either proceed alone or ask the user how to continue - do not silently give up.
+Call `list_sessions` to see which other sessions are reachable through any of your subscribed channels. If the user asks about a specific channel, pass it: `list_sessions({ channel: "ai_instructions" })`.
 
 ## Starting conversations
 
-- `start_topic` - create a new topic. The first message should state what you need, not just greet.
-- `join_topic` - join an existing topic by name (fuzzy or exact match), thread_ts, or UUID.
-- `send_message_to_topic` - send into the active topic. Supports sending to an unjoined topic by name if you only need to post once.
-- `send_message_to_session` - 1:1 to a specific session (you still need to `introduce` first).
-- `send_broadcast` - fan out to all sessions without creating a topic. Use sparingly - it interrupts everyone.
+- `list_channels` - see which channels you are subscribed to and who else is there.
+- `join_channel` / `leave_channel` - subscribe or unsubscribe. Joining a brand new channel implicitly creates it.
+- `set_active_channel` - focus on a specific channel (must be subscribed).
+- `send_message_to_channel` - top-level broadcast to a channel. Defaults to the active channel.
+- `start_topic` - create a topic in the active channel (or pass `channel`).
+- `join_topic` - join an existing topic (by name or UUID, across your subscribed channels).
+- `send_message_to_topic` - send into the active topic.
+- `send_message_to_session` - DM a specific session. Requires at least one shared subscribed channel.
 
 ## Handling incoming messages
 
@@ -46,22 +50,17 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 | Tool | Purpose |
 |------|---------|
 | `introduce` | Set your role name. Required before sending. |
-| `whoami` | Show your current name and objective (useful after compaction or for pre-seeded sessions). |
-| `list_channels` | Slack channels the bot is a member of. |
-| `join_channel` / `leave_channel` | Slack channel membership. |
-| `list_sessions` | Sessions registered on the local broker. |
-| `list_topics` | Active topics in the current channel (or local). |
-| `start_topic` | Create a new topic. |
-| `join_topic` | Join an existing topic. |
+| `whoami` | Show your name, objective, active channel, active topic, and subscribed channels. |
+| `list_channels` | Your subscribed channels with subscriber counts and source. |
+| `join_channel` / `leave_channel` | Subscribe or unsubscribe from a channel. |
+| `set_active_channel` | Switch active focus to a subscribed channel. |
+| `send_message_to_channel` | Top-level broadcast to a channel. |
+| `list_sessions` | Sessions visible through your subscribed channels. |
+| `list_topics` | Topics across your subscribed channels (or scoped with `channel`). |
+| `start_topic` | Create a new topic in a channel. |
+| `join_topic` | Join an existing topic across subscribed channels. |
 | `leave_topic` | Stop receiving messages from the active topic. |
+| `set_active_topic` | Switch among joined topics. |
 | `archive_topic` / `unarchive_topic` | Mark a topic done / restore it. |
 | `send_message_to_topic` | Send into the active topic. |
-| `send_message_to_session` | 1:1 to a specific session. |
-| `send_broadcast` | Send to all sessions (no topic). |
-
-## Configuration
-
-Two env vars on the MCP server definition:
-
-- `CCCOLLAB_PROFILE` - selects `~/.config/cccollab/credentials-<profile>.json`. Enables multiple Slack identities on one machine.
-- `CCCOLLAB_DEFAULT_CHANNEL` - auto-joins this channel on startup; topics default to it instead of local.
+| `send_message_to_session` | DM a specific session (needs shared channel). |

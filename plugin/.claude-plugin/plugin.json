@@ -1,6 +1,6 @@
 {
   "name": "cccollab",
-  "description": "Real-time collaboration between Claude Code sessions via threaded topics - local (in-process) or over a shared Slack channel",
+  "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics",
   "version": "0.6.4",
   "author": {
     "name": "FlatOut Solutions",
@@ -13,19 +13,19 @@
     "profile": {
       "type": "string",
       "title": "Profile (optional)",
-      "description": "Selects the credentials file at ~/.config/cccollab/credentials-<profile>.json. Leave blank to use the default credentials file. Set this when running multiple Slack identities on one machine.",
+      "description": "Selects the credentials file at ~/.config/cccollab/credentials-<profile>.json. Leave blank to use the default credentials file.",
       "sensitive": false
     },
     "default_channel": {
       "type": "string",
       "title": "Default channel (optional)",
-      "description": "Slack channel name (without leading #) to auto-join on startup. Topics default to this channel instead of local. Leave blank to default to local topics.",
+      "description": "Channel name to auto-subscribe and set as active on startup. Leave blank to auto-subscribe only to #default.",
       "sensitive": false
     },
     "broker_id": {
       "type": "string",
       "title": "Broker ID (optional)",
-      "description": "Identifier for the local broker process. Sessions sharing a broker ID share local topics, Slack connections, and discovery. Leave blank to use the default shared broker. Set a unique value to run an isolated broker (e.g. 'test' for development against a test Slack workspace).",
+      "description": "Identifier for the local broker process. Sessions sharing a broker ID share channels, topics, and discovery. Leave blank to use the default shared broker. Set a unique value to run an isolated broker (e.g. 'test' for development).",
       "sensitive": false
     }
   }
