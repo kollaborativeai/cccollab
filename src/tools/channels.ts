@@ -21,16 +21,20 @@ async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+const NO_NAME_ERROR = JSON.stringify({
+  error: 'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
+})
+
 export function createChannelTools() {
   return [
     {
       name: 'list_channels',
-      description: 'List channels you are subscribed to, each with subscriber count and source (manual, fallback, env, cccollab.json). Marks the active channel.',
+      description: 'Return subscribed channels as JSON array: [{name, source, subscriberCount, isActive}].',
       inputSchema: { type: 'object' as const, properties: {} },
     },
     {
       name: 'join_channel',
-      description: 'Subscribe to a channel (implicitly created on first subscription). Idempotent. If you had no active channel, this becomes the active one; otherwise your active channel is unchanged.',
+      description: 'Subscribe to a channel (implicitly created). Idempotent. Returns {channel, becameActive, subscriberCount}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -41,7 +45,7 @@ export function createChannelTools() {
     },
     {
       name: 'leave_channel',
-      description: 'Unsubscribe from a channel. If it was your active channel, the first of your remaining subscribed channels becomes active (or none if you have none left).',
+      description: 'Unsubscribe from a channel. Returns {channel, removed, newActiveChannel}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -52,7 +56,7 @@ export function createChannelTools() {
     },
     {
       name: 'set_active_channel',
-      description: 'Set your active channel. You must already be subscribed to it.',
+      description: 'Set your active channel. Returns {activeChannel}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -63,7 +67,7 @@ export function createChannelTools() {
     },
     {
       name: 'send_message_to_channel',
-      description: 'Send a top-level broadcast to a channel (not in a topic). Defaults to your active channel.',
+      description: 'Send a top-level broadcast to a channel (not in a topic). Defaults to active channel. Returns {channel}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -82,7 +86,7 @@ export async function handleChannelTool(
   name: string, args: Record<string, unknown>, deps: ChannelToolDeps,
 ): Promise<string> {
   if (REQUIRES_NAME.has(name) && !deps.session.hasName()) {
-    return 'This session has no name set. Call `introduce` first with a name (e.g., "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.'
+    return NO_NAME_ERROR
   }
 
   switch (name) {
@@ -103,8 +107,6 @@ export async function handleChannelTool(
 
 async function handleListChannels(deps: ChannelToolDeps): Promise<string> {
   const subscribed = deps.context.getSubscribedChannels()
-  if (subscribed.length === 0) return 'No channels subscribed.'
-
   const counts = new Map<string, number>()
   try {
     const data = await brokerFetch<{ channels: Array<{ name: string; subscriberCount: number }> }>(
@@ -116,35 +118,37 @@ async function handleListChannels(deps: ChannelToolDeps): Promise<string> {
   }
 
   const active = deps.context.getActiveChannel()
-  const lines = ['Subscribed channels:']
-  for (const c of subscribed) {
-    const marker = c.name === active ? ' [active]' : ''
-    const count = counts.get(c.name) ?? 1
-    lines.push(`  ${c.name} - ${count} subscriber${count === 1 ? '' : 's'} (source: ${c.source})${marker}`)
-  }
-  return lines.join('\n')
+  const result = subscribed.map((c) => ({
+    name: c.name,
+    source: c.source,
+    subscriberCount: counts.get(c.name) ?? 1,
+    isActive: c.name === active,
+  }))
+  return JSON.stringify(result)
 }
 
 async function handleJoinChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
   const normalized = normalizeChannelName(rawName)
-  if (!normalized) return 'Error: channel name must be non-empty.'
+  if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
 
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/channels/join`, {
+  const data = await brokerFetch<{ subscriberCount?: number }>(`${brokerBaseUrl(deps.brokerPort)}/channels/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId: deps.session.displayName, channel: normalized }),
   })
   const { becameActive } = deps.context.joinChannel(normalized, 'manual')
-  return becameActive
-    ? `Joined "${normalized}". This is now your active channel.`
-    : `Joined "${normalized}". Active channel unchanged ("${deps.context.getActiveChannel() ?? 'none'}").`
+  return JSON.stringify({
+    channel: normalized,
+    becameActive,
+    subscriberCount: data.subscriberCount ?? 1,
+  })
 }
 
 async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
   const normalized = normalizeChannelName(rawName)
-  if (!normalized) return 'Error: channel name must be non-empty.'
+  if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
   if (!deps.context.isChannelSubscribed(normalized)) {
-    return `Not subscribed to "${normalized}".`
+    return JSON.stringify({ error: `Not subscribed to "${normalized}".` })
   }
 
   await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/channels/leave`, {
@@ -152,19 +156,22 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string): Promi
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId: deps.session.displayName, channel: normalized }),
   })
-  const { newActive } = deps.context.leaveChannel(normalized)
-  if (!newActive) return `Left "${normalized}". No active channel.`
-  return `Left "${normalized}". Active channel is now "${newActive}".`
+  const { removed, newActive } = deps.context.leaveChannel(normalized)
+  return JSON.stringify({
+    channel: normalized,
+    removed,
+    newActiveChannel: newActive ?? null,
+  })
 }
 
 async function handleSetActiveChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
   const normalized = normalizeChannelName(rawName)
-  if (!normalized) return 'Error: channel name must be non-empty.'
+  if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
   if (!deps.context.isChannelSubscribed(normalized)) {
-    return `Not subscribed to "${normalized}". Use join_channel first.`
+    return JSON.stringify({ error: `Not subscribed to "${normalized}". Use join_channel first.` })
   }
   deps.context.setActiveChannel(normalized)
-  return `Active channel set to "${normalized}".`
+  return JSON.stringify({ activeChannel: normalized })
 }
 
 async function handleSendMessageToChannel(
@@ -172,16 +179,16 @@ async function handleSendMessageToChannel(
 ): Promise<string> {
   const text = args.text
   if (typeof text !== 'string' || text.trim() === '') {
-    return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
+    return JSON.stringify({ error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)' })
   }
 
   let target = args.channel ? normalizeChannelName(args.channel) : undefined
   if (!target) target = deps.context.getActiveChannel()
   if (!target) {
-    return 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.'
+    return JSON.stringify({ error: 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.' })
   }
   if (!deps.context.isChannelSubscribed(target)) {
-    return `Not subscribed to "${target}". Use join_channel first.`
+    return JSON.stringify({ error: `Not subscribed to "${target}". Use join_channel first.` })
   }
 
   await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/broadcast`, {
@@ -189,5 +196,5 @@ async function handleSendMessageToChannel(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, sender: deps.session.displayName, channel: target }),
   })
-  return `Broadcast sent in "${target}".`
+  return JSON.stringify({ channel: target })
 }

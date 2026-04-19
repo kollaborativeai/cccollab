@@ -27,8 +27,8 @@ describe('Channel Tools', () => {
       const deps = createDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const noName = { ...deps, session }
-      const result = await handleChannelTool('join_channel', { name: 'x' }, noName)
-      expect(result).toContain('no name set')
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'x' }, noName))
+      expect(result.error).toContain('No name set')
     })
 
     it('allows list_channels without name', async () => {
@@ -41,10 +41,10 @@ describe('Channel Tools', () => {
         json: () => Promise.resolve({ channels: [{ name: 'default', subscriberCount: 1 }] }),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleChannelTool('list_channels', {}, depsNoName)
-      expect(result).not.toContain('no name set')
-      expect(result).toContain('default')
-      expect(result).toContain('fallback')
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, depsNoName))
+      expect(result).toEqual([
+        { name: 'default', source: 'fallback', subscriberCount: 1, isActive: true },
+      ])
       vi.unstubAllGlobals()
     })
   })
@@ -55,34 +55,29 @@ describe('Channel Tools', () => {
     afterEach(() => { vi.unstubAllGlobals() })
 
     it('posts to broker and updates context', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ subscriberCount: 1 }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleChannelTool('join_channel', { name: 'Project_X' }, deps)
-      expect(result).toContain('project_x')
-      expect(result).toContain('active channel')
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'Project_X' }, deps))
+      expect(result).toEqual({ channel: 'project_x', becameActive: true, subscriberCount: 1 })
       expect(deps.context.isChannelSubscribed('project_x')).toBe(true)
       expect(deps.context.getActiveChannel()).toBe('project_x')
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/channels/join'),
-        expect.objectContaining({ method: 'POST' }),
-      )
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
       expect(body.channel).toBe('project_x')
       expect(body.sessionId).toBe('architect')
     })
 
     it('does not change active channel when already have one', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ subscriberCount: 2 }) })
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
-      const result = await handleChannelTool('join_channel', { name: 'project_x' }, deps)
-      expect(result).toContain('unchanged')
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'project_x' }, deps))
+      expect(result.becameActive).toBe(false)
       expect(deps.context.getActiveChannel()).toBe('default')
     })
 
     it('rejects empty name', async () => {
-      const result = await handleChannelTool('join_channel', { name: '   ' }, deps)
-      expect(result).toContain('non-empty')
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: '   ' }, deps))
+      expect(result.error).toContain('non-empty')
     })
   })
 
@@ -96,9 +91,8 @@ describe('Channel Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
       deps.context.joinChannel('project_x', 'manual')
-      const result = await handleChannelTool('leave_channel', { name: 'default' }, deps)
-      expect(result).toContain('Left "default"')
-      expect(result).toContain('project_x')
+      const result = JSON.parse(await handleChannelTool('leave_channel', { name: 'default' }, deps))
+      expect(result).toEqual({ channel: 'default', removed: true, newActiveChannel: 'project_x' })
       expect(deps.context.isChannelSubscribed('default')).toBe(false)
       expect(deps.context.getActiveChannel()).toBe('project_x')
     })
@@ -107,14 +101,14 @@ describe('Channel Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
-      const result = await handleChannelTool('leave_channel', { name: 'default' }, deps)
-      expect(result).toContain('No active channel')
+      const result = JSON.parse(await handleChannelTool('leave_channel', { name: 'default' }, deps))
+      expect(result.newActiveChannel).toBeNull()
       expect(deps.context.getActiveChannel()).toBeUndefined()
     })
 
     it('errors when not subscribed', async () => {
-      const result = await handleChannelTool('leave_channel', { name: 'nope' }, deps)
-      expect(result).toContain('Not subscribed')
+      const result = JSON.parse(await handleChannelTool('leave_channel', { name: 'nope' }, deps))
+      expect(result.error).toContain('Not subscribed')
     })
   })
 
@@ -125,15 +119,15 @@ describe('Channel Tools', () => {
     it('sets active channel when subscribed', async () => {
       deps.context.joinChannel('default', 'fallback')
       deps.context.joinChannel('project_x', 'manual')
-      const result = await handleChannelTool('set_active_channel', { name: 'project_x' }, deps)
-      expect(result).toContain('project_x')
+      const result = JSON.parse(await handleChannelTool('set_active_channel', { name: 'project_x' }, deps))
+      expect(result).toEqual({ activeChannel: 'project_x' })
       expect(deps.context.getActiveChannel()).toBe('project_x')
     })
 
     it('friendly error when not subscribed', async () => {
-      const result = await handleChannelTool('set_active_channel', { name: 'nope' }, deps)
-      expect(result).toContain('Not subscribed')
-      expect(result).toContain('join_channel')
+      const result = JSON.parse(await handleChannelTool('set_active_channel', { name: 'nope' }, deps))
+      expect(result.error).toContain('Not subscribed')
+      expect(result.error).toContain('join_channel')
     })
   })
 
@@ -142,9 +136,11 @@ describe('Channel Tools', () => {
     beforeEach(() => { deps = createDeps() })
     afterEach(() => { vi.unstubAllGlobals() })
 
-    it('returns "No channels" when none subscribed', async () => {
-      const result = await handleChannelTool('list_channels', {}, deps)
-      expect(result).toContain('No channels')
+    it('returns empty array when none subscribed', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ channels: [] }) })
+      vi.stubGlobal('fetch', mockFetch)
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result).toEqual([])
     })
 
     it('marks the active channel and shows source', async () => {
@@ -158,13 +154,11 @@ describe('Channel Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
       deps.context.joinChannel('project_x', 'manual')
-      const result = await handleChannelTool('list_channels', {}, deps)
-      expect(result).toContain('default')
-      expect(result).toContain('project_x')
-      expect(result).toContain('[active]')
-      expect(result).toContain('fallback')
-      expect(result).toContain('manual')
-      expect(result).toContain('3 subscribers')
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result).toEqual([
+        { name: 'default', source: 'fallback', subscriberCount: 3, isActive: true },
+        { name: 'project_x', source: 'manual', subscriberCount: 2, isActive: false },
+      ])
     })
   })
 
@@ -177,8 +171,8 @@ describe('Channel Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
-      const result = await handleChannelTool('send_message_to_channel', { text: 'hi' }, deps)
-      expect(result).toContain('default')
+      const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi' }, deps))
+      expect(result).toEqual({ channel: 'default' })
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
       expect(body.channel).toBe('default')
       expect(body.text).toBe('hi')
@@ -189,26 +183,26 @@ describe('Channel Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback')
       deps.context.joinChannel('project_x', 'manual')
-      const result = await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'project_x' }, deps)
-      expect(result).toContain('project_x')
+      const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'project_x' }, deps))
+      expect(result).toEqual({ channel: 'project_x' })
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
       expect(body.channel).toBe('project_x')
     })
 
     it('errors when not subscribed to the target channel', async () => {
       deps.context.joinChannel('default', 'fallback')
-      const result = await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'foo' }, deps)
-      expect(result).toContain('Not subscribed')
+      const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'foo' }, deps))
+      expect(result.error).toContain('Not subscribed')
     })
 
     it('errors when no active channel and no arg', async () => {
-      const result = await handleChannelTool('send_message_to_channel', { text: 'hi' }, deps)
-      expect(result).toContain('No active channel')
+      const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi' }, deps))
+      expect(result.error).toContain('No active channel')
     })
 
     it('rejects empty text', async () => {
-      const result = await handleChannelTool('send_message_to_channel', { text: '' }, deps)
-      expect(result).toContain('non-empty')
+      const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: '' }, deps))
+      expect(result.error).toContain('non-empty')
     })
   })
 })

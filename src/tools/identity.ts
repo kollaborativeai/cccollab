@@ -11,7 +11,7 @@ export function createIdentityTools() {
   return [
     {
       name: 'introduce',
-      description: 'Set your name and optionally your current objective. Required before any topic/messaging tool will work.',
+      description: 'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Returns JSON.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -23,7 +23,7 @@ export function createIdentityTools() {
     },
     {
       name: 'whoami',
-      description: 'Show your session identity: name, objective, active channel, active topic, and subscribed channels with their sources.',
+      description: 'Return your session identity as JSON: {name, objective?, activeChannel?, activeTopic?: {name, channel}, subscribedChannels: [{name, source}]}.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
   ]
@@ -51,38 +51,25 @@ export async function handleIdentityTool(
         }
       }
 
-      return `Introduced as "${displayName}".${objective ? ` Objective: ${objective}` : ''}`
+      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
-        return 'This session has no identity set. Call `introduce` with a name to identify yourself.'
+        return JSON.stringify({ error: 'No identity set. Call introduce with a name.' })
       }
       const objective = deps.session.getObjective()
-      const lines = [`Name: ${deps.session.displayName}`]
-      lines.push(`Objective: ${objective ?? '(not set)'}`)
-
       const activeChannel = deps.context.getActiveChannel()
-      lines.push(`Active channel: ${activeChannel ? `"${activeChannel}"` : '(none)'}`)
-
-      const activeTopic = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
+      const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
-      lines.push(
-        activeTopic
-          ? `Active topic: "${activeTopic}"${activeTopicChannel ? ` in "${activeTopicChannel}"` : ''}`
-          : 'Active topic: (none)',
-      )
+      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({ name: c.name, source: c.source }))
 
-      const channels = deps.context.getSubscribedChannels()
-      if (channels.length === 0) {
-        lines.push('Subscribed channels: (none)')
-      } else {
-        lines.push('Subscribed channels:')
-        for (const c of channels) {
-          lines.push(`  ${c.name} (source: ${c.source})`)
-        }
-      }
-
-      return lines.join('\n')
+      return JSON.stringify({
+        name: deps.session.displayName,
+        ...(objective ? { objective } : {}),
+        ...(activeChannel ? { activeChannel } : {}),
+        ...(activeTopicName ? { activeTopic: { name: activeTopicName, ...(activeTopicChannel ? { channel: activeTopicChannel } : {}) } } : {}),
+        subscribedChannels,
+      })
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)

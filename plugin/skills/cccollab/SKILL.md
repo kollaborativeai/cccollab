@@ -7,6 +7,8 @@ description: Use when coordinating with other Claude Code sessions or humans via
 
 Real-time collaboration between Claude Code sessions via channels and threaded topics. Channels are logical namespaces; topics are conversations scoped to a channel.
 
+All tools return JSON. Success responses are tool-specific objects or arrays. Errors are `{error: "human-readable message", ...}` - optionally with structured fields (e.g. `matches` for ambiguous lookups, `channel`/`name` for context). Check for an `error` key before trusting the payload. Render results in the user's preferred style; the JSON is for you, not for direct display.
+
 ## Model
 
 - You are subscribed to one or more channels; exactly one is active.

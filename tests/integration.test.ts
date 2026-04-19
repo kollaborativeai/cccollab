@@ -183,12 +183,12 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       B.received.length = 0
       C.received.length = 0
 
-      const dmResult = await handleTopicTool(
+      const dmResult = JSON.parse(await handleTopicTool(
         'send_message_to_session',
         { to: 'b-project-x', text: 'ping' },
         A.topicDeps,
-      )
-      expect(dmResult).toContain('sent')
+      ))
+      expect(dmResult.to).toBe('b-project-x')
 
       await waitUntil(() => (B.received.length > 0 ? true : null), 3000)
       expect(B.received.some((m) => m.text.includes('ping'))).toBe(true)
@@ -198,12 +198,12 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       C.received.length = 0
 
       await handleChannelTool('leave_channel', { name: 'ai_instructions' }, A.channelDeps)
-      const dmResult2 = await handleTopicTool(
+      const dmResult2 = JSON.parse(await handleTopicTool(
         'send_message_to_session',
         { to: 'b-project-x', text: 'should fail' },
         A.topicDeps,
-      )
-      expect(dmResult2).toContain('do not share')
+      ))
+      expect(dmResult2.error).toContain('do not share')
       expect(B.received.some((m) => m.text.includes('should fail'))).toBe(false)
     } finally {
       A.listener.stop()

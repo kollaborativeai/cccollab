@@ -37,17 +37,17 @@ describe('Topic Tools', () => {
       const deps = createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
-      const result = await handleTopicTool('start_topic', { topic: 'Test' }, depsNoName)
-      expect(result).toContain('no name set')
-      expect(result).toContain('introduce')
+      const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'Test' }, depsNoName))
+      expect(result.error).toContain('No name set')
+      expect(result.error).toContain('introduce')
     })
 
     it('returns error when session has no name and tries to send_message_to_topic', async () => {
       const deps = createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
-      const result = await handleTopicTool('send_message_to_topic', { text: 'Hi' }, depsNoName)
-      expect(result).toContain('no name set')
+      const result = JSON.parse(await handleTopicTool('send_message_to_topic', { text: 'Hi' }, depsNoName))
+      expect(result.error).toContain('No name set')
     })
 
     it('allows list_topics without name', async () => {
@@ -56,8 +56,8 @@ describe('Topic Tools', () => {
       const depsNoName = { ...deps, session }
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ topics: [] }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('list_topics', {}, depsNoName)
-      expect(result).not.toContain('no name set')
+      const result = JSON.parse(await handleTopicTool('list_topics', {}, depsNoName))
+      expect(result).toEqual([])
       vi.unstubAllGlobals()
     })
   })
@@ -74,18 +74,18 @@ describe('Topic Tools', () => {
       })
       vi.stubGlobal('fetch', mockFetch)
 
-      const result = await handleTopicTool('list_topics', {}, deps)
-      expect(result).toContain('No active topics in your subscribed channels')
+      const result = JSON.parse(await handleTopicTool('list_topics', {}, deps))
+      expect(result).toEqual([])
       const calledUrl = mockFetch.mock.calls[0]![0] as string
       expect(calledUrl).toContain('sessionId=architect')
     })
 
-    it('list_topics with explicit channel scopes broker call and rejects unsubscribed', async () => {
-      const result = await handleTopicTool('list_topics', { channel: 'foo' }, deps)
-      expect(result).toContain('Not subscribed')
+    it('list_topics with explicit channel rejects unsubscribed', async () => {
+      const result = JSON.parse(await handleTopicTool('list_topics', { channel: 'foo' }, deps))
+      expect(result.error).toContain('Not subscribed')
     })
 
-    it('list_topics with subscribed channel passes channel param', async () => {
+    it('list_topics with subscribed channel returns structured JSON', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ topics: [
@@ -93,11 +93,35 @@ describe('Topic Tools', () => {
         ] }),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('list_topics', { channel: 'default' }, deps)
-      expect(result).toContain('Auth design')
-      expect(result).toContain('default')
+      const result = JSON.parse(await handleTopicTool('list_topics', { channel: 'default' }, deps))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({
+        id: 'uuid-1',
+        name: 'Auth design',
+        channel: 'default',
+        state: 'active',
+        messageCount: 3,
+        isJoined: false,
+        isMyActive: false,
+        creator: 'architect',
+      })
       const calledUrl = mockFetch.mock.calls[0]![0] as string
       expect(calledUrl).toContain('channel=default')
+    })
+
+    it('list_topics flags isJoined and isMyActive per topic', async () => {
+      deps.context.joinTopic('uuid-joined', 'joined topic', 'default')
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ topics: [
+          { id: 'uuid-joined', topic: 'joined topic', channel: 'default', creator: 'architect', state: 'active', createdAt: '2026-01-01T00:00:00Z', messageCount: 0 },
+          { id: 'uuid-other', topic: 'other', channel: 'default', creator: 'architect', state: 'active', createdAt: '2026-01-01T00:00:00Z', messageCount: 0 },
+        ] }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      const result = JSON.parse(await handleTopicTool('list_topics', {}, deps))
+      expect(result.find((t: { id: string }) => t.id === 'uuid-joined')).toMatchObject({ isJoined: true, isMyActive: true })
+      expect(result.find((t: { id: string }) => t.id === 'uuid-other')).toMatchObject({ isJoined: false, isMyActive: false })
     })
 
     it('start_topic creates in active channel when none specified', async () => {
@@ -110,8 +134,8 @@ describe('Topic Tools', () => {
       })
       vi.stubGlobal('fetch', mockFetch)
 
-      const result = await handleTopicTool('start_topic', { topic: 'DB migration' }, deps)
-      expect(result).toContain('Topic started in "default"')
+      const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'DB migration' }, deps))
+      expect(result).toEqual({ id: 'uuid-new', name: 'DB migration', channel: 'default' })
       expect(deps.context.hasTopic()).toBe(true)
       expect(deps.context.getThreadTs()).toBe('uuid-new')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
@@ -119,8 +143,8 @@ describe('Topic Tools', () => {
     })
 
     it('start_topic with explicit unsubscribed channel rejects', async () => {
-      const result = await handleTopicTool('start_topic', { topic: 'x', channel: 'nope' }, deps)
-      expect(result).toContain('Not subscribed')
+      const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'x', channel: 'nope' }, deps))
+      expect(result.error).toContain('Not subscribed')
     })
 
     it('start_topic with no active channel and no arg rejects', async () => {
@@ -128,11 +152,11 @@ describe('Topic Tools', () => {
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       session.setName('architect')
       const deps2 = { session, context, brokerPort: 7850 }
-      const result = await handleTopicTool('start_topic', { topic: 'x' }, deps2)
-      expect(result).toContain('No active channel')
+      const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'x' }, deps2))
+      expect(result.error).toContain('No active channel')
     })
 
-    it('start_topic surfaces broker 409 as friendly error and does not join', async () => {
+    it('start_topic surfaces broker 409 as structured error and does not join', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 409,
@@ -140,8 +164,10 @@ describe('Topic Tools', () => {
       })
       vi.stubGlobal('fetch', mockFetch)
 
-      const result = await handleTopicTool('start_topic', { topic: 'DB migration' }, deps)
-      expect(result).toContain('already exists')
+      const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'DB migration' }, deps))
+      expect(result.error).toContain('already exists')
+      expect(result.channel).toBe('default')
+      expect(result.name).toBe('DB migration')
       expect(deps.context.hasTopic()).toBe(false)
     })
 
@@ -159,9 +185,13 @@ describe('Topic Tools', () => {
         })
       vi.stubGlobal('fetch', mockFetch)
 
-      const result = await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps)
-      expect(result).toContain('Joined topic "Direct"')
-      expect(result).toContain('default')
+      const result = JSON.parse(await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps))
+      expect(result).toMatchObject({
+        id: '11111111-2222-3333-4444-555555555555',
+        name: 'Direct',
+        channel: 'default',
+        history: [],
+      })
     })
 
     it('join_topic rejects UUID in unsubscribed channel', async () => {
@@ -172,11 +202,12 @@ describe('Topic Tools', () => {
         }),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps)
-      expect(result).toContain('not subscribed to')
+      const result = JSON.parse(await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps))
+      expect(result.error).toContain('not subscribed to')
+      expect(result.channel).toBe('other')
     })
 
-    it('join_topic: ambiguous matches across channels list candidates', async () => {
+    it('join_topic: ambiguous matches return structured list', async () => {
       const mockFetch = vi.fn().mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -187,12 +218,13 @@ describe('Topic Tools', () => {
         }),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('join_topic', { topic: 'auth' }, deps)
-      expect(result).toContain('Multiple topics match')
-      expect(result).toContain('default')
+      const result = JSON.parse(await handleTopicTool('join_topic', { topic: 'auth' }, deps))
+      expect(result.error).toContain('Multiple topics match')
+      expect(result.matches).toHaveLength(2)
+      expect(result.matches[0]).toMatchObject({ channel: 'default' })
     })
 
-    it('join_topic joins matching topic and shows history', async () => {
+    it('join_topic joins matching topic and returns history', async () => {
       const mockFetch = vi.fn()
         .mockResolvedValueOnce({
           ok: true,
@@ -211,33 +243,33 @@ describe('Topic Tools', () => {
         })
       vi.stubGlobal('fetch', mockFetch)
 
-      const result = await handleTopicTool('join_topic', { topic: 'API' }, deps)
-      expect(result).toContain('Joined topic')
-      expect(result).toContain('API design')
-      expect(result).toContain('default')
-      expect(result).toContain('REST patterns')
+      const result = JSON.parse(await handleTopicTool('join_topic', { topic: 'API' }, deps))
+      expect(result.name).toBe('API design')
+      expect(result.channel).toBe('default')
+      expect(result.history).toHaveLength(1)
+      expect(result.history[0].text).toBe('Let us discuss REST patterns')
       expect(deps.context.hasTopic()).toBe(true)
     })
 
     it('set_active_topic switches among joined', async () => {
       deps.context.joinTopic('uuid-1', 'First', 'default')
       deps.context.joinTopic('uuid-2', 'Second', 'default')
-      const result = await handleTopicTool('set_active_topic', { topic: 'First' }, deps)
-      expect(result).toContain('First')
+      const result = JSON.parse(await handleTopicTool('set_active_topic', { topic: 'First' }, deps))
+      expect(result).toEqual({ id: 'uuid-1', name: 'First', channel: 'default' })
       expect(deps.context.getThreadTs()).toBe('uuid-1')
     })
 
     it('set_active_topic errors when not joined', async () => {
-      const result = await handleTopicTool('set_active_topic', { topic: 'unknown' }, deps)
-      expect(result).toContain('No joined topic')
+      const result = JSON.parse(await handleTopicTool('set_active_topic', { topic: 'unknown' }, deps))
+      expect(result.error).toContain('No joined topic')
     })
 
     it('archive_topic via active topic', async () => {
       deps.context.joinTopic('uuid-archive', 'Archive me', 'default')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('archive_topic', {}, deps)
-      expect(result).toContain('archived')
+      const result = JSON.parse(await handleTopicTool('archive_topic', {}, deps))
+      expect(result).toEqual({ id: 'uuid-archive', name: 'Archive me' })
       expect(deps.context.hasTopic()).toBe(false)
     })
 
@@ -245,8 +277,8 @@ describe('Topic Tools', () => {
       deps.context.joinTopic('uuid-leave', 'stale', 'default')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('leave_topic', {}, deps)
-      expect(result).toContain('Left topic')
+      const result = JSON.parse(await handleTopicTool('leave_topic', {}, deps))
+      expect(result).toEqual({ id: 'uuid-leave', name: 'stale' })
       expect(deps.context.hasTopic()).toBe(false)
     })
 
@@ -254,8 +286,8 @@ describe('Topic Tools', () => {
       deps.context.joinTopic('uuid-topic', 'Test', 'default')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('send_message_to_topic', { text: 'Hello' }, deps)
-      expect(result).toBe('Message sent.')
+      const result = JSON.parse(await handleTopicTool('send_message_to_topic', { text: 'Hello' }, deps))
+      expect(result).toEqual({ topicId: 'uuid-topic' })
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/topics/uuid-topic/messages'),
         expect.objectContaining({ method: 'POST' }),
@@ -274,13 +306,13 @@ describe('Topic Tools', () => {
         })
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('unarchive_topic', { topic: 'Unarchive' }, deps)
-      expect(result).toContain('unarchived')
+      const result = JSON.parse(await handleTopicTool('unarchive_topic', { topic: 'Unarchive' }, deps))
+      expect(result).toEqual({ id: 'uuid-unarch', name: 'Unarchive me', channel: 'default' })
     })
 
     it('list_sessions with channel arg rejects unsubscribed', async () => {
-      const result = await handleTopicTool('list_sessions', { channel: 'foo' }, deps)
-      expect(result).toContain('Not subscribed')
+      const result = JSON.parse(await handleTopicTool('list_sessions', { channel: 'foo' }, deps))
+      expect(result.error).toContain('Not subscribed')
     })
 
     it('list_sessions filters to sessions sharing at least one subscribed channel', async () => {
@@ -294,16 +326,16 @@ describe('Topic Tools', () => {
         }),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('list_sessions', {}, deps)
-      expect(result).toContain('architect')
-      expect(result).not.toContain('stranger')
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ name: 'architect', objective: 'Design', channels: ['default'] })
     })
 
     it('send_message_to_session posts to /direct-message', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ viaChannel: 'default' }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hey Bob' }, deps)
-      expect(result).toContain('bob')
+      const result = JSON.parse(await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hey Bob' }, deps))
+      expect(result).toEqual({ to: 'bob', viaChannel: 'default' })
       const calledUrl = mockFetch.mock.calls[0]![0] as string
       expect(calledUrl).toContain('/direct-message')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
@@ -311,15 +343,15 @@ describe('Topic Tools', () => {
       expect(body.to).toBe('bob')
     })
 
-    it('send_message_to_session surfaces 403 as friendly error', async () => {
+    it('send_message_to_session surfaces 403 as structured error', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: false, status: 403,
         json: () => Promise.resolve({ error: 'You and "bob" do not share any subscribed channel. Join a common channel first.' }),
         text: () => Promise.resolve(''),
       })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hi' }, deps)
-      expect(result).toContain('do not share')
+      const result = JSON.parse(await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hi' }, deps))
+      expect(result.error).toContain('do not share')
     })
 
     it('throws on unknown tool', async () => {

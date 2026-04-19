@@ -34,18 +34,18 @@ describe('Identity Tools', () => {
       expect(deps.session.displayName).toBe('architect')
     })
 
-    it('introduce returns confirmation with name', async () => {
+    it('introduce returns JSON with name', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleIdentityTool('introduce', { name: 'architect' }, deps)
-      expect(result).toContain('architect')
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result).toEqual({ name: 'architect' })
     })
 
-    it('introduce includes objective in confirmation when provided', async () => {
+    it('introduce includes objective in JSON when provided', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps)
-      expect(result).toContain('reviewing auth module')
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps))
+      expect(result).toEqual({ name: 'architect', objective: 'reviewing auth module' })
     })
 
     it('introduce re-registers already-subscribed channels with broker', async () => {
@@ -72,23 +72,23 @@ describe('Identity Tools', () => {
         deps.context.joinChannel('project_x', 'manual')
         await handleIdentityTool('introduce', { name: 'architect', objective: 'design the API' }, deps)
 
-        const result = await handleIdentityTool('whoami', {}, deps)
-        expect(result).toContain('Name: architect')
-        expect(result).toContain('Objective: design the API')
-        expect(result).toContain('Active channel: "default"')
-        expect(result).toContain('default')
-        expect(result).toContain('fallback')
-        expect(result).toContain('project_x')
-        expect(result).toContain('manual')
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.name).toBe('architect')
+        expect(result.objective).toBe('design the API')
+        expect(result.activeChannel).toBe('default')
+        expect(result.subscribedChannels).toEqual([
+          { name: 'default', source: 'fallback' },
+          { name: 'project_x', source: 'manual' },
+        ])
       })
 
-      it('reports no active topic when none', async () => {
+      it('omits activeTopic when none set', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
-        const result = await handleIdentityTool('whoami', {}, deps)
-        expect(result).toContain('Active topic: (none)')
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.activeTopic).toBeUndefined()
       })
 
       it('reports active topic with its channel', async () => {
@@ -97,15 +97,13 @@ describe('Identity Tools', () => {
         deps.context.joinChannel('default', 'fallback')
         deps.context.joinTopic('uuid-1', 'Auth refactor', 'default')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
-        const result = await handleIdentityTool('whoami', {}, deps)
-        expect(result).toContain('Active topic: "Auth refactor"')
-        expect(result).toContain('default')
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.activeTopic).toEqual({ name: 'Auth refactor', channel: 'default' })
       })
 
-      it('returns guidance when no name has been set', async () => {
-        const result = await handleIdentityTool('whoami', {}, deps)
-        expect(result).toContain('no identity set')
-        expect(result).toContain('introduce')
+      it('returns error JSON when no name has been set', async () => {
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.error).toContain('introduce')
       })
     })
   })
