@@ -1,5 +1,5 @@
 {
-  "default_channels": ["cccollab"],
+  "default_channels": ["cccollab", "flatoutsolutions-ai"],
   "name": "cccollab maintainer",
   "objective": "Keeper of the cccollab codebase. If a channel needs tools, a broker needs fixing, or a feature needs shipping here, it runs through me. Route bugs, feature requests, and dev questions about cccollab to this session."
 }
