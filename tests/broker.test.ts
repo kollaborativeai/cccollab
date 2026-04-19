@@ -42,9 +42,12 @@ async function leaveChannel(port: number, sessionId: string, channel: string): P
   })
 }
 
-async function listChannels(port: number, sessionId: string): Promise<Array<{ name: string; subscriberCount: number }>> {
+async function listChannels(
+  port: number,
+  sessionId: string,
+): Promise<Array<{ name: string; subscriberCount: number }>> {
   const res = await fetch(`http://127.0.0.1:${port}/channels?sessionId=${encodeURIComponent(sessionId)}`)
-  const body = await res.json() as { channels: Array<{ name: string; subscriberCount: number }> }
+  const body = (await res.json()) as { channels: Array<{ name: string; subscriberCount: number }> }
   return body.channels
 }
 
@@ -91,14 +94,16 @@ describe('Broker: isolation guards and invariants', () => {
       env: { ...process.env, CCCOLLAB_PROFILE: PROFILE },
       stdio: 'ignore',
     })
-    await waitUntil(() => existsSync(RENDEZVOUS) ? true : null, 10_000)
+    await waitUntil(() => (existsSync(RENDEZVOUS) ? true : null), 10_000)
     const rendezvous = JSON.parse(readFileSync(RENDEZVOUS, 'utf-8')) as { port: number }
     port = rendezvous.port
     await waitUntil(async () => {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`)
         return res.ok ? true : null
-      } catch { return null }
+      } catch {
+        return null
+      }
     }, 10_000)
   }, 20_000)
 
@@ -106,7 +111,11 @@ describe('Broker: isolation guards and invariants', () => {
     if (broker && !broker.killed) {
       broker.kill('SIGTERM')
       await new Promise<void>((r) => setTimeout(r, 200))
-      try { unlinkSync(RENDEZVOUS) } catch { /* ignore */ }
+      try {
+        unlinkSync(RENDEZVOUS)
+      } catch {
+        /* ignore */
+      }
     }
   })
 
@@ -117,7 +126,7 @@ describe('Broker: isolation guards and invariants', () => {
       await registerSession(port, 'guard-bcast-2')
       const res = await broadcast(port, 'guard-bcast-2', 'guard-bcast-ch', 'should fail')
       expect(res.status).toBe(400)
-      const body = await res.json() as { error: string }
+      const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/not subscribed/i)
     })
 
@@ -135,18 +144,18 @@ describe('Broker: isolation guards and invariants', () => {
       // No joinChannel for guard-st-1
       const res = await createTopic(port, 'guard-st-1', 'denied-topic', 'guard-st-ch')
       expect(res.status).toBe(400)
-      const body = await res.json() as { error: string }
+      const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/not subscribed/i)
     })
   })
 
   describe('join_topic guard', () => {
-    it('refuses topic join when session is not subscribed to the topic\'s channel', async () => {
+    it("refuses topic join when session is not subscribed to the topic's channel", async () => {
       await registerSession(port, 'guard-jt-creator')
       await joinChannel(port, 'guard-jt-creator', 'guard-jt-ch')
       const createRes = await createTopic(port, 'guard-jt-creator', 'gated', 'guard-jt-ch')
       expect(createRes.status).toBe(200)
-      const { id } = await createRes.json() as { id: string }
+      const { id } = (await createRes.json()) as { id: string }
 
       await registerSession(port, 'guard-jt-outsider')
       const res = await joinTopic(port, id, 'guard-jt-outsider')
@@ -155,11 +164,11 @@ describe('Broker: isolation guards and invariants', () => {
   })
 
   describe('send_message_to_topic guard', () => {
-    it('refuses message posting when sender is not subscribed to the topic\'s channel', async () => {
+    it("refuses message posting when sender is not subscribed to the topic's channel", async () => {
       await registerSession(port, 'guard-mt-creator')
       await joinChannel(port, 'guard-mt-creator', 'guard-mt-ch')
       const createRes = await createTopic(port, 'guard-mt-creator', 'mt-topic', 'guard-mt-ch')
-      const { id } = await createRes.json() as { id: string }
+      const { id } = (await createRes.json()) as { id: string }
 
       await registerSession(port, 'guard-mt-outsider')
       const res = await postTopicMessage(port, id, 'guard-mt-outsider', 'should fail')
@@ -175,7 +184,7 @@ describe('Broker: isolation guards and invariants', () => {
       expect(first.status).toBe(200)
       const second = await createTopic(port, 'uniq-1', 'duplicate-name', 'uniq-ch')
       expect(second.status).toBe(409)
-      const body = await second.json() as { error: string }
+      const body = (await second.json()) as { error: string }
       expect(body.error).toMatch(/already exists/i)
     })
 
@@ -187,8 +196,8 @@ describe('Broker: isolation guards and invariants', () => {
       expect(a.status).toBe(200)
       const b = await createTopic(port, 'uniq-2', 'shared-name', 'uniq-ch-b')
       expect(b.status).toBe(200)
-      const aBody = await a.json() as { id: string }
-      const bBody = await b.json() as { id: string }
+      const aBody = (await a.json()) as { id: string }
+      const bBody = (await b.json()) as { id: string }
       expect(aBody.id).not.toBe(bBody.id)
     })
   })
@@ -233,7 +242,7 @@ describe('Broker: isolation guards and invariants', () => {
       await registerSession(port, 'casc-a')
       await joinChannel(port, 'casc-a', 'casc-ch')
       const t = await createTopic(port, 'casc-a', 'casc-topic', 'casc-ch')
-      const { id } = await t.json() as { id: string }
+      const { id } = (await t.json()) as { id: string }
 
       await registerSession(port, 'casc-b')
       await joinChannel(port, 'casc-b', 'casc-ch')

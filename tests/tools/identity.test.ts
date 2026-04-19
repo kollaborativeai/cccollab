@@ -12,7 +12,9 @@ function createMockDeps(): IdentityToolDeps {
 }
 
 describe('Identity Tools', () => {
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
 
   describe('createIdentityTools', () => {
     it('returns 2 tool definitions', () => {
@@ -25,7 +27,9 @@ describe('Identity Tools', () => {
   describe('handleIdentityTool', () => {
     let deps: IdentityToolDeps
 
-    beforeEach(() => { deps = createMockDeps() })
+    beforeEach(() => {
+      deps = createMockDeps()
+    })
 
     it('introduce sets display name on session', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
@@ -44,7 +48,9 @@ describe('Identity Tools', () => {
     it('introduce includes objective in JSON when provided', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps))
+      const result = JSON.parse(
+        await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps),
+      )
       expect(result).toEqual({ name: 'architect', objective: 'reviewing auth module' })
     })
 

@@ -78,8 +78,12 @@ describe('Integration: end-to-end message flow', () => {
     const bus = new MessageBus(mockMcp as never)
 
     const msg: ParsedMessage = {
-      sender: 'carlos-backend', text: 'Need help with auth', ts: '500.100', channel: 'default',
-      channelName: 'default', threadTs: 'uuid-topic',
+      sender: 'carlos-backend',
+      text: 'Need help with auth',
+      ts: '500.100',
+      channel: 'default',
+      channelName: 'default',
+      threadTs: 'uuid-topic',
     }
     await bus.push(msg)
 
@@ -88,8 +92,11 @@ describe('Integration: end-to-end message flow', () => {
       params: {
         content: 'Need help with auth',
         meta: {
-          sender: 'carlos-backend', channel: 'default', channel_id: 'default',
-          ts: '500.100', thread_ts: 'uuid-topic',
+          sender: 'carlos-backend',
+          channel: 'default',
+          channel_id: 'default',
+          ts: '500.100',
+          thread_ts: 'uuid-topic',
         },
       },
     })
@@ -117,14 +124,16 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       env: { ...process.env, CCCOLLAB_PROFILE: PROFILE },
       stdio: 'ignore',
     })
-    await waitUntil(() => existsSync(RENDEZVOUS) ? true : null, 10_000)
+    await waitUntil(() => (existsSync(RENDEZVOUS) ? true : null), 10_000)
     const rendezvous = JSON.parse(readFileSync(RENDEZVOUS, 'utf-8')) as { port: number }
     brokerPort = rendezvous.port
     await waitUntil(async () => {
       try {
         const res = await fetch(`http://127.0.0.1:${brokerPort}/health`)
         return res.ok ? true : null
-      } catch { return null }
+      } catch {
+        return null
+      }
     }, 10_000)
   }, 20_000)
 
@@ -132,7 +141,11 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
     if (broker && !broker.killed) {
       broker.kill('SIGTERM')
       await new Promise<void>((r) => setTimeout(r, 200))
-      try { unlinkSync(RENDEZVOUS) } catch { /* ignore */ }
+      try {
+        unlinkSync(RENDEZVOUS)
+      } catch {
+        /* ignore */
+      }
     }
   })
 
@@ -183,11 +196,9 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       B.received.length = 0
       C.received.length = 0
 
-      const dmResult = JSON.parse(await handleTopicTool(
-        'send_message_to_session',
-        { to: 'b-project-x', text: 'ping' },
-        A.topicDeps,
-      ))
+      const dmResult = JSON.parse(
+        await handleTopicTool('send_message_to_session', { to: 'b-project-x', text: 'ping' }, A.topicDeps),
+      )
       expect(dmResult.to).toBe('b-project-x')
 
       await waitUntil(() => (B.received.length > 0 ? true : null), 3000)
@@ -198,11 +209,9 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       C.received.length = 0
 
       await handleChannelTool('leave_channel', { name: 'ai_instructions' }, A.channelDeps)
-      const dmResult2 = JSON.parse(await handleTopicTool(
-        'send_message_to_session',
-        { to: 'b-project-x', text: 'should fail' },
-        A.topicDeps,
-      ))
+      const dmResult2 = JSON.parse(
+        await handleTopicTool('send_message_to_session', { to: 'b-project-x', text: 'should fail' }, A.topicDeps),
+      )
       expect(dmResult2.error).toContain('do not share')
       expect(B.received.some((m) => m.text.includes('should fail'))).toBe(false)
     } finally {
@@ -225,7 +234,9 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       await handleTopicTool('join_topic', { topic: 'cascade-topic' }, B.topicDeps)
 
       // Sanity: broker knows B joined the topic
-      const before = await (await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=cascade-a`)).json() as {
+      const before = (await (
+        await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=cascade-a`)
+      ).json()) as {
         topic: { id: string }
       }
       expect(before.topic.id).toBe(topicId)
@@ -274,7 +285,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       // Not subscribed to the topic's channel -> 403
       const forbidden = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=gate-b`)
       expect(forbidden.status).toBe(403)
-      const body = await forbidden.json() as { error: string }
+      const body = (await forbidden.json()) as { error: string }
       expect(body.error).toContain('Not subscribed')
     } finally {
       A.listener.stop()

@@ -11,6 +11,7 @@ bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: a
 ```
 
 That command:
+
 - Adds the `read:packages` scope to your gh CLI token if missing (browser consent, one-time).
 - Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc` (idempotent).
 - Installs `@flatoutsolutions/cccollab` globally.
@@ -79,8 +80,8 @@ Messages from other sessions and humans arrive as `<channel>` tags via push.
 
 Sessions sharing a profile see the same channels, topics, and peers; sessions on different profiles stay completely separate. Useful for keeping client work, personal projects, or different accounts from bleeding into each other.
 
-| Var | Description |
-|-----|-------------|
+| Var                | Description                                                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CCCOLLAB_PROFILE` | Name of this session's collaboration space. Leave unset to use the default. Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile. |
 
 ## Pre-seeded session identity

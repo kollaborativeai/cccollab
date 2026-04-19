@@ -22,7 +22,8 @@ async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 const NO_NAME_ERROR = JSON.stringify({
-  error: 'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
+  error:
+    'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
 })
 
 export function createChannelTools() {
@@ -34,7 +35,8 @@ export function createChannelTools() {
     },
     {
       name: 'join_channel',
-      description: 'Subscribe to a channel (implicitly created). Idempotent. Returns {channel, becameActive, subscriberCount}.',
+      description:
+        'Subscribe to a channel (implicitly created). Idempotent. Returns {channel, becameActive, subscriberCount}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -67,7 +69,8 @@ export function createChannelTools() {
     },
     {
       name: 'send_message_to_channel',
-      description: 'Send a top-level broadcast to a channel (not in a topic). Defaults to active channel. Returns {channel}.',
+      description:
+        'Send a top-level broadcast to a channel (not in a topic). Defaults to active channel. Returns {channel}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -83,7 +86,9 @@ export function createChannelTools() {
 const REQUIRES_NAME = new Set(['join_channel', 'leave_channel', 'set_active_channel', 'send_message_to_channel'])
 
 export async function handleChannelTool(
-  name: string, args: Record<string, unknown>, deps: ChannelToolDeps,
+  name: string,
+  args: Record<string, unknown>,
+  deps: ChannelToolDeps,
 ): Promise<string> {
   if (REQUIRES_NAME.has(name) && !deps.session.hasName()) {
     return NO_NAME_ERROR
@@ -175,17 +180,22 @@ async function handleSetActiveChannel(deps: ChannelToolDeps, rawName: string): P
 }
 
 async function handleSendMessageToChannel(
-  deps: ChannelToolDeps, args: { text?: string; channel?: string },
+  deps: ChannelToolDeps,
+  args: { text?: string; channel?: string },
 ): Promise<string> {
   const text = args.text
   if (typeof text !== 'string' || text.trim() === '') {
-    return JSON.stringify({ error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)' })
+    return JSON.stringify({
+      error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)',
+    })
   }
 
   let target = args.channel ? normalizeChannelName(args.channel) : undefined
   if (!target) target = deps.context.getActiveChannel()
   if (!target) {
-    return JSON.stringify({ error: 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.' })
+    return JSON.stringify({
+      error: 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.',
+    })
   }
   if (!deps.context.isChannelSubscribed(target)) {
     return JSON.stringify({ error: `Not subscribed to "${target}". Use join_channel first.` })

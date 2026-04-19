@@ -11,11 +11,15 @@ export function createIdentityTools() {
   return [
     {
       name: 'introduce',
-      description: 'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Returns JSON.',
+      description:
+        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Returns JSON.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          name: { type: 'string' as const, description: 'Your display name (e.g., "architect", "frontend", "reviewer")' },
+          name: {
+            type: 'string' as const,
+            description: 'Your display name (e.g., "architect", "frontend", "reviewer")',
+          },
           objective: { type: 'string' as const, description: 'What you are currently working on (optional)' },
         },
         required: ['name'],
@@ -23,14 +27,17 @@ export function createIdentityTools() {
     },
     {
       name: 'whoami',
-      description: 'Return your session identity as JSON: {name, objective?, activeChannel?, activeTopic?: {name, channel}, subscribedChannels: [{name, source}]}.',
+      description:
+        'Return your session identity as JSON: {name, objective?, activeChannel?, activeTopic?: {name, channel}, subscribedChannels: [{name, source}]}.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
   ]
 }
 
 export async function handleIdentityTool(
-  name: string, args: Record<string, unknown>, deps: IdentityToolDeps,
+  name: string,
+  args: Record<string, unknown>,
+  deps: IdentityToolDeps,
 ): Promise<string> {
   switch (name) {
     case 'introduce': {
@@ -67,7 +74,9 @@ export async function handleIdentityTool(
         name: deps.session.displayName,
         ...(objective ? { objective } : {}),
         ...(activeChannel ? { activeChannel } : {}),
-        ...(activeTopicName ? { activeTopic: { name: activeTopicName, ...(activeTopicChannel ? { channel: activeTopicChannel } : {}) } } : {}),
+        ...(activeTopicName
+          ? { activeTopic: { name: activeTopicName, ...(activeTopicChannel ? { channel: activeTopicChannel } : {}) } }
+          : {}),
         subscribedChannels,
       })
     }

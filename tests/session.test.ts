@@ -9,7 +9,11 @@ describe('SessionManager', () => {
     })
 
     it('includes worktree suffix in project name', () => {
-      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher-TWO', worktreeName: 'TWO' })
+      const sm = new SessionManager({
+        username: 'stefan',
+        cwd: '/Users/stefan/projects/dispatcher-TWO',
+        worktreeName: 'TWO',
+      })
       expect(sm.sessionName).toBe('stefan | dispatcher-TWO')
     })
 
@@ -54,19 +58,22 @@ describe('SessionManager', () => {
   describe('parse', () => {
     it('extracts sender and text from formatted message', () => {
       expect(SessionManager.parse('*[stefan | dispatcher | architect]*: hello world')).toEqual({
-        sender: 'stefan | dispatcher | architect', text: 'hello world',
+        sender: 'stefan | dispatcher | architect',
+        text: 'hello world',
       })
     })
 
     it('handles format without name', () => {
       expect(SessionManager.parse('*[stefan | dispatcher]*: hello')).toEqual({
-        sender: 'stefan | dispatcher', text: 'hello',
+        sender: 'stefan | dispatcher',
+        text: 'hello',
       })
     })
 
     it('handles multiline messages', () => {
       expect(SessionManager.parse('*[bob | api | backend]*: line one\nline two')).toEqual({
-        sender: 'bob | api | backend', text: 'line one\nline two',
+        sender: 'bob | api | backend',
+        text: 'line one\nline two',
       })
     })
 

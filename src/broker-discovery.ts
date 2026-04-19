@@ -29,12 +29,16 @@ export async function waitForHealthyRendezvous(timeoutMs: number): Promise<Broke
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     const r = readRendezvous()
-    if (r && await probeBroker(r.port)) return r
-    await new Promise<void>(resolve => setTimeout(resolve, 250))
+    if (r && (await probeBroker(r.port))) return r
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
   }
   throw new Error(`Broker failed to start within ${timeoutMs}ms`)
 }
 
 export function removeRendezvous(): void {
-  try { unlinkSync(BROKER_RENDEZVOUS_FILE) } catch { /* ignore */ }
+  try {
+    unlinkSync(BROKER_RENDEZVOUS_FILE)
+  } catch {
+    /* ignore */
+  }
 }

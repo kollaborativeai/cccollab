@@ -18,3 +18,9 @@ node_modules
 dist/
 .env
 *.env.*
+
+# Per-project Claude Code local overrides
+test/.claude/settings.local.json
+
+# Stray codegraph init artifacts (top-level .codegraph is tracked intentionally)
+/i/

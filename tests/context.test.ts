@@ -4,15 +4,29 @@ import { ActiveContext } from '../src/context.js'
 describe('ActiveContext', () => {
   let ctx: ActiveContext
 
-  beforeEach(() => { ctx = new ActiveContext() })
+  beforeEach(() => {
+    ctx = new ActiveContext()
+  })
 
   describe('initial state', () => {
-    it('hasTopic returns false', () => { expect(ctx.hasTopic()).toBe(false) })
-    it('getThreadTs throws', () => { expect(() => ctx.getThreadTs()).toThrow('No active topic') })
-    it('getTopicName returns undefined', () => { expect(ctx.getTopicName()).toBeUndefined() })
-    it('getTopicChannel returns undefined', () => { expect(ctx.getTopicChannel()).toBeUndefined() })
-    it('getActiveChannel returns undefined', () => { expect(ctx.getActiveChannel()).toBeUndefined() })
-    it('getSubscribedChannels returns empty', () => { expect(ctx.getSubscribedChannels()).toEqual([]) })
+    it('hasTopic returns false', () => {
+      expect(ctx.hasTopic()).toBe(false)
+    })
+    it('getThreadTs throws', () => {
+      expect(() => ctx.getThreadTs()).toThrow('No active topic')
+    })
+    it('getTopicName returns undefined', () => {
+      expect(ctx.getTopicName()).toBeUndefined()
+    })
+    it('getTopicChannel returns undefined', () => {
+      expect(ctx.getTopicChannel()).toBeUndefined()
+    })
+    it('getActiveChannel returns undefined', () => {
+      expect(ctx.getActiveChannel()).toBeUndefined()
+    })
+    it('getSubscribedChannels returns empty', () => {
+      expect(ctx.getSubscribedChannels()).toEqual([])
+    })
   })
 
   describe('joinChannel', () => {

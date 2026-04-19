@@ -18,10 +18,7 @@ export const IDENTITY_FILE_NAME = '.cccollab.json'
  * or unreadable files are ignored with a warning so a bad config never
  * prevents the MCP server from starting.
  */
-export function resolveInitialIdentity(
-  cwd: string,
-  env: NodeJS.ProcessEnv = process.env,
-): InitialIdentity {
+export function resolveInitialIdentity(cwd: string, env: NodeJS.ProcessEnv = process.env): InitialIdentity {
   const envName = trimOrUndefined(env.CCCOLLAB_NAME)
   const envObjective = trimOrUndefined(env.CCCOLLAB_OBJECTIVE)
   if (envName || envObjective) {

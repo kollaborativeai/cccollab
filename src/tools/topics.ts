@@ -51,18 +51,23 @@ async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 const NO_NAME_ERROR = JSON.stringify({
-  error: 'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
+  error:
+    'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
 })
 
 export function createTopicTools() {
   return [
     {
       name: 'list_topics',
-      description: 'Return topics as JSON array: [{id, name, channel, state, messageCount, isJoined, isMyActive, creator, createdAt}]. With no channel, scopes across all subscribed channels.',
+      description:
+        'Return topics as JSON array: [{id, name, channel, state, messageCount, isJoined, isMyActive, creator, createdAt}]. With no channel, scopes across all subscribed channels.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          channel: { type: 'string' as const, description: 'Channel to scope to. Defaults to all subscribed channels.' },
+          channel: {
+            type: 'string' as const,
+            description: 'Channel to scope to. Defaults to all subscribed channels.',
+          },
           include_archived: { type: 'boolean' as const, description: 'Include archived topics (default: false)' },
         },
         required: [],
@@ -75,7 +80,10 @@ export function createTopicTools() {
         type: 'object' as const,
         properties: {
           topic: { type: 'string' as const, description: 'Topic name / title' },
-          channel: { type: 'string' as const, description: 'Channel to create the topic in. Defaults to active channel.' },
+          channel: {
+            type: 'string' as const,
+            description: 'Channel to create the topic in. Defaults to active channel.',
+          },
         },
         required: ['topic'],
       },
@@ -151,17 +159,24 @@ export function createTopicTools() {
       inputSchema: {
         type: 'object' as const,
         properties: {
-          channel: { type: 'string' as const, description: 'Channel to scope to. Defaults to all your subscribed channels.' },
+          channel: {
+            type: 'string' as const,
+            description: 'Channel to scope to. Defaults to all your subscribed channels.',
+          },
         },
       },
     },
     {
       name: 'send_message_to_session',
-      description: 'Send a private direct message to another session. Requires shared channel. Returns {to, viaChannel}.',
+      description:
+        'Send a private direct message to another session. Requires shared channel. Returns {to, viaChannel}.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          to: { type: 'string' as const, description: 'Recipient session name (must match their introduced name exactly)' },
+          to: {
+            type: 'string' as const,
+            description: 'Recipient session name (must match their introduced name exactly)',
+          },
           text: { type: 'string' as const, description: 'Message text' },
         },
         required: ['to', 'text'],
@@ -171,12 +186,21 @@ export function createTopicTools() {
 }
 
 const REQUIRES_NAME = new Set([
-  'start_topic', 'join_topic', 'leave_topic', 'set_active_topic', 'archive_topic', 'unarchive_topic',
-  'send_message_to_topic', 'list_sessions', 'send_message_to_session',
+  'start_topic',
+  'join_topic',
+  'leave_topic',
+  'set_active_topic',
+  'archive_topic',
+  'unarchive_topic',
+  'send_message_to_topic',
+  'list_sessions',
+  'send_message_to_session',
 ])
 
 export async function handleTopicTool(
-  name: string, args: Record<string, unknown>, deps: TopicToolDeps,
+  name: string,
+  args: Record<string, unknown>,
+  deps: TopicToolDeps,
 ): Promise<string> {
   if (REQUIRES_NAME.has(name) && !deps.session.hasName()) {
     return NO_NAME_ERROR
@@ -202,7 +226,9 @@ export async function handleTopicTool(
     case 'send_message_to_topic': {
       const { text, topic } = args as { text: string; topic?: string }
       if (typeof text !== 'string' || text.trim() === '') {
-        return JSON.stringify({ error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)' })
+        return JSON.stringify({
+          error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)',
+        })
       }
       if (deps.context.hasTopic() && !topic) {
         return handleSendMessage(deps, text, deps.context.getThreadTs())
@@ -214,7 +240,9 @@ export async function handleTopicTool(
         if ('error' in resolved) return JSON.stringify(resolved)
         return handleSendMessage(deps, text, resolved.id)
       }
-      return JSON.stringify({ error: 'No active topic. Use join_topic or start_topic first, or pass a `topic` argument.' })
+      return JSON.stringify({
+        error: 'No active topic. Use join_topic or start_topic first, or pass a `topic` argument.',
+      })
     }
     case 'leave_topic': {
       const { topic } = args as { topic?: string }
@@ -261,7 +289,9 @@ export async function handleTopicTool(
     case 'send_message_to_session': {
       const { to, text } = args as { to: string; text: string }
       if (typeof text !== 'string' || text.trim() === '') {
-        return JSON.stringify({ error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)' })
+        return JSON.stringify({
+          error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)',
+        })
       }
       if (typeof to !== 'string' || to.trim() === '') {
         return JSON.stringify({ error: '`to` is required and must be a non-empty string.' })
@@ -272,13 +302,13 @@ export async function handleTopicTool(
         body: JSON.stringify({ from: deps.session.displayName, to, text }),
       })
       if (res.status === 403 || res.status === 404) {
-        const body = await res.json() as { error?: string }
+        const body = (await res.json()) as { error?: string }
         return JSON.stringify({ error: body.error ?? `Could not deliver DM to ${to}.` })
       }
       if (!res.ok) {
         throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
       }
-      const body = await res.json() as { viaChannel?: string }
+      const body = (await res.json()) as { viaChannel?: string }
       return JSON.stringify({ to, ...(body.viaChannel ? { viaChannel: body.viaChannel } : {}) })
     }
     default:
@@ -286,9 +316,7 @@ export async function handleTopicTool(
   }
 }
 
-async function handleListTopics(
-  deps: TopicToolDeps, channelArg?: string, includeArchived?: boolean,
-): Promise<string> {
+async function handleListTopics(deps: TopicToolDeps, channelArg?: string, includeArchived?: boolean): Promise<string> {
   const params = new URLSearchParams()
   if (includeArchived) params.set('include_archived', 'true')
 
@@ -325,7 +353,9 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
   let channel = channelArg ? normalizeChannelName(channelArg) : undefined
   if (!channel) channel = deps.context.getActiveChannel()
   if (!channel) {
-    return JSON.stringify({ error: 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.' })
+    return JSON.stringify({
+      error: 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.',
+    })
   }
   if (!deps.context.isChannelSubscribed(channel)) {
     return JSON.stringify({ error: `Not subscribed to "${channel}". Use join_channel first.` })
@@ -337,13 +367,13 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
     body: JSON.stringify({ topic, creator: deps.session.displayName, channel }),
   })
   if (res.status === 409) {
-    const body = await res.json() as { error: string }
+    const body = (await res.json()) as { error: string }
     return JSON.stringify({ error: body.error, channel, name: topic })
   }
   if (!res.ok) {
     throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
   }
-  const data = await res.json() as BrokerTopicData
+  const data = (await res.json()) as BrokerTopicData
   deps.context.joinTopic(data.id, topic, data.channel ?? channel)
   return JSON.stringify({ id: data.id, name: topic, channel: data.channel ?? channel })
 }
@@ -510,13 +540,17 @@ async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Pro
     params.set('channel', channel)
   }
   const url = `${brokerBaseUrl(deps.brokerPort)}/sessions${params.toString() ? `?${params.toString()}` : ''}`
-  const data = await brokerFetch<{ sessions: Array<{ name: string; objective?: string; registeredAt: string; channels?: string[] }> }>(url)
+  const data = await brokerFetch<{
+    sessions: Array<{ name: string; objective?: string; registeredAt: string; channels?: string[] }>
+  }>(url)
 
   const myChannels = new Set(deps.context.getSubscribedChannels().map((c) => c.name))
-  const visible = channelArg ? data.sessions : data.sessions.filter((s) => {
-    if (!s.channels || s.channels.length === 0) return false
-    return s.channels.some((ch) => myChannels.has(ch))
-  })
+  const visible = channelArg
+    ? data.sessions
+    : data.sessions.filter((s) => {
+        if (!s.channels || s.channels.length === 0) return false
+        return s.channels.some((ch) => myChannels.has(ch))
+      })
 
   const result = visible.map((s) => ({
     name: s.name,
@@ -527,11 +561,18 @@ async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Pro
   return JSON.stringify(result)
 }
 
-interface ResolvedTopic { id: string; topicName: string }
-interface ResolveError { error: string; matches?: Array<{ id: string; name: string; channel: string }> }
+interface ResolvedTopic {
+  id: string
+  topicName: string
+}
+interface ResolveError {
+  error: string
+  matches?: Array<{ id: string; name: string; channel: string }>
+}
 
 async function resolveTopicIdInSubscribedChannels(
-  deps: TopicToolDeps, name: string,
+  deps: TopicToolDeps,
+  name: string,
 ): Promise<ResolvedTopic | ResolveError> {
   if (UUID_PATTERN.test(name)) {
     const byId = await fetchTopicById(deps.brokerPort, name, deps.session.displayName)

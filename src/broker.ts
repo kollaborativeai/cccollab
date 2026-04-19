@@ -160,7 +160,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
     })
 
     const sseRes = res as SSEResponse
@@ -310,7 +310,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         }
         let shared: string | null = null
         for (const ch of fromInfo.channels) {
-          if (toInfo.channels.has(ch)) { shared = ch; break }
+          if (toInfo.channels.has(ch)) {
+            shared = ch
+            break
+          }
         }
         if (!shared) {
           jsonResponse(res, 403, {
@@ -355,7 +358,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {
             jsonResponse(res, 409, {
               error: `A topic named "${t.topic}" already exists in ${channel}. Join it instead, or use a different name.`,
-              existing: { id: t.id, topic: t.topic, channel: t.channel, creator: t.creator, state: t.state, createdAt: t.createdAt },
+              existing: {
+                id: t.id,
+                topic: t.topic,
+                channel: t.channel,
+                creator: t.creator,
+                state: t.state,
+                createdAt: t.createdAt,
+              },
             })
             return
           }
@@ -398,11 +408,27 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       allowedChannels = info ? new Set(info.channels) : new Set()
     }
 
-    const result: Array<{ id: string; topic: string; channel: string; creator: string; state: string; createdAt: string; messageCount: number }> = []
+    const result: Array<{
+      id: string
+      topic: string
+      channel: string
+      creator: string
+      state: string
+      createdAt: string
+      messageCount: number
+    }> = []
     for (const t of topics.values()) {
       if (!includeArchived && t.state === 'archived') continue
       if (allowedChannels && !allowedChannels.has(t.channel)) continue
-      result.push({ id: t.id, topic: t.topic, channel: t.channel, creator: t.creator, state: t.state, createdAt: t.createdAt, messageCount: t.messages.length })
+      result.push({
+        id: t.id,
+        topic: t.topic,
+        channel: t.channel,
+        creator: t.creator,
+        state: t.state,
+        createdAt: t.createdAt,
+        messageCount: t.messages.length,
+      })
     }
     jsonResponse(res, 200, { topics: result })
     return
@@ -427,7 +453,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       return
     }
     jsonResponse(res, 200, {
-      topic: { id: t.id, topic: t.topic, channel: t.channel, creator: t.creator, state: t.state, createdAt: t.createdAt },
+      topic: {
+        id: t.id,
+        topic: t.topic,
+        channel: t.channel,
+        creator: t.creator,
+        state: t.state,
+        createdAt: t.createdAt,
+      },
       messages: t.messages,
     })
     return
@@ -447,7 +480,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
       try {
         const rawBody = await readBody(req)
-        const body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {}
+        const body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {}
 
         switch (action) {
           case 'messages': {

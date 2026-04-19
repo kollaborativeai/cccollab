@@ -72,7 +72,7 @@ export class BrokerEventListener {
     const url = `${this.brokerUrl}/events`
     this.log(`Connecting to broker at ${url}`)
 
-    const req = http.get(url, { headers: { 'Accept': 'text/event-stream' } }, (res) => {
+    const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
       let buffer = ''
 
       res.on('data', (chunk: Buffer) => {
@@ -122,7 +122,9 @@ export class BrokerEventListener {
   }
 
   processLocalEvent(event: BrokerLocalEvent): void {
-    this.log(`LOCAL EVENT: type=${event.type} channel=${event.channel ?? 'none'} topicId=${event.topicId ?? 'none'} sender=${event.sender ?? 'none'}`)
+    this.log(
+      `LOCAL EVENT: type=${event.type} channel=${event.channel ?? 'none'} topicId=${event.topicId ?? 'none'} sender=${event.sender ?? 'none'}`,
+    )
     this.handleLocalEvent(event).catch((err) => {
       this.log(`LOCAL HANDLE ERROR: ${err}`)
     })

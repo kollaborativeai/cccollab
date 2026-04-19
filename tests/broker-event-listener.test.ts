@@ -36,12 +36,14 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'tester',
-        text: expect.stringContaining('Auth discussion'),
-        channel: 'default',
-        channelName: 'default',
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'tester',
+          text: expect.stringContaining('Auth discussion'),
+          channel: 'default',
+          channelName: 'default',
+        }),
+      )
     })
   })
 
@@ -70,12 +72,14 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'bob',
-        text: 'Working on it',
-        channel: 'default',
-        threadTs: 'uuid-topic',
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'bob',
+          text: 'Working on it',
+          channel: 'default',
+          threadTs: 'uuid-topic',
+        }),
+      )
     })
   })
 
@@ -133,12 +137,14 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'architect',
-        text: 'Topic archived',
-        channel: 'default',
-        threadTs: 'uuid-archived',
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'architect',
+          text: 'Topic archived',
+          channel: 'default',
+          threadTs: 'uuid-archived',
+        }),
+      )
     })
   })
 
@@ -152,11 +158,13 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'system',
-        text: 'Topic unarchived',
-        channel: 'default',
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'system',
+          text: 'Topic unarchived',
+          channel: 'default',
+        }),
+      )
     })
   })
 
@@ -171,13 +179,15 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'tester',
-        text: 'Heads up everyone',
-        channel: 'default',
-        channelName: 'default',
-        threadTs: undefined,
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'tester',
+          text: 'Heads up everyone',
+          channel: 'default',
+          channelName: 'default',
+          threadTs: undefined,
+        }),
+      )
     })
   })
 
@@ -217,10 +227,12 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
-      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({
-        sender: 'reviewer',
-        text: expect.stringContaining('Got a sec?'),
-      }))
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sender: 'reviewer',
+          text: expect.stringContaining('Got a sec?'),
+        }),
+      )
     })
   })
 

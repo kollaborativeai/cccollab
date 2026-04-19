@@ -142,8 +142,14 @@ export class ActiveContext {
   }
 
   getJoinedTopics(): Array<{ threadTs: string; topicName: string; channel: string }> {
-    return [...this.joinedTopics.entries()].map(([threadTs, { topicName, channel }]) => ({ threadTs, topicName, channel }))
+    return [...this.joinedTopics.entries()].map(([threadTs, { topicName, channel }]) => ({
+      threadTs,
+      topicName,
+      channel,
+    }))
   }
 
-  hasTopic(): boolean { return this.activeThreadTs !== undefined }
+  hasTopic(): boolean {
+    return this.activeThreadTs !== undefined
+  }
 }

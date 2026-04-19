@@ -49,20 +49,20 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 
 ## Tool reference
 
-| Tool | Purpose |
-|------|---------|
-| `introduce` | Set your role name. Required before sending. |
-| `whoami` | Show your name, objective, active channel, active topic, and subscribed channels. |
-| `list_channels` | Your subscribed channels with subscriber counts and source. |
-| `join_channel` / `leave_channel` | Subscribe or unsubscribe from a channel. |
-| `set_active_channel` | Switch active focus to a subscribed channel. |
-| `send_message_to_channel` | Top-level broadcast to a channel. |
-| `list_sessions` | Sessions visible through your subscribed channels. |
-| `list_topics` | Topics across your subscribed channels (or scoped with `channel`). |
-| `start_topic` | Create a new topic in a channel. |
-| `join_topic` | Join an existing topic across subscribed channels. |
-| `leave_topic` | Stop receiving messages from the active topic. |
-| `set_active_topic` | Switch among joined topics. |
-| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it. |
-| `send_message_to_topic` | Send into the active topic. |
-| `send_message_to_session` | DM a specific session (needs shared channel). |
+| Tool                                | Purpose                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `introduce`                         | Set your role name. Required before sending.                                      |
+| `whoami`                            | Show your name, objective, active channel, active topic, and subscribed channels. |
+| `list_channels`                     | Your subscribed channels with subscriber counts and source.                       |
+| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                          |
+| `set_active_channel`                | Switch active focus to a subscribed channel.                                      |
+| `send_message_to_channel`           | Top-level broadcast to a channel.                                                 |
+| `list_sessions`                     | Sessions visible through your subscribed channels.                                |
+| `list_topics`                       | Topics across your subscribed channels (or scoped with `channel`).                |
+| `start_topic`                       | Create a new topic in a channel.                                                  |
+| `join_topic`                        | Join an existing topic across subscribed channels.                                |
+| `leave_topic`                       | Stop receiving messages from the active topic.                                    |
+| `set_active_topic`                  | Switch among joined topics.                                                       |
+| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                   |
+| `send_message_to_topic`             | Send into the active topic.                                                       |
+| `send_message_to_session`           | DM a specific session (needs shared channel).                                     |
