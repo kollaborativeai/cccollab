@@ -30,6 +30,23 @@ describe('Channel Tools', () => {
       const result = await handleChannelTool('join_channel', { name: 'x' }, noName)
       expect(result).toContain('no name set')
     })
+
+    it('allows list_channels without name', async () => {
+      const deps = createDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      depsNoName.context.joinChannel('default', 'fallback')
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ channels: [{ name: 'default', subscriberCount: 1 }] }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      const result = await handleChannelTool('list_channels', {}, depsNoName)
+      expect(result).not.toContain('no name set')
+      expect(result).toContain('#default')
+      expect(result).toContain('fallback')
+      vi.unstubAllGlobals()
+    })
   })
 
   describe('join_channel', () => {

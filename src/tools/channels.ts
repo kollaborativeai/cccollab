@@ -76,7 +76,7 @@ export function createChannelTools() {
   ]
 }
 
-const REQUIRES_NAME = new Set(['list_channels', 'join_channel', 'leave_channel', 'set_active_channel', 'send_message_to_channel'])
+const REQUIRES_NAME = new Set(['join_channel', 'leave_channel', 'set_active_channel', 'send_message_to_channel'])
 
 export async function handleChannelTool(
   name: string, args: Record<string, unknown>, deps: ChannelToolDeps,
