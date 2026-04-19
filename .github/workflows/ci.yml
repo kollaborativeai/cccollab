@@ -7,33 +7,57 @@ on:
     branches: [main]
 
 jobs:
-  verify:
+  format:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn format:check
 
-      - name: Enable Corepack
-        run: corepack enable
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn lint
 
-      - name: Install
-        run: yarn install --immutable
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn tsc --noEmit
 
-      - name: Format check
-        run: yarn format:check
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn test
 
-      - name: Lint
-        run: yarn lint
-
-      - name: Typecheck
-        run: yarn tsc --noEmit
-
-      - name: Test
-        run: yarn test
-
-      - name: Build
-        run: yarn build
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn build
