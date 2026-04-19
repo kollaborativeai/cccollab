@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
 import { SessionManager } from '../src/session.js'
-import { SubscriptionManager } from '../src/subscriptions.js'
 import { MessageBus } from '../src/message-bus.js'
 import type { ParsedMessage } from '../src/types.js'
 
@@ -10,8 +9,8 @@ describe('Integration: end-to-end message flow', () => {
     const bus = new MessageBus(mockMcp as never)
 
     const msg: ParsedMessage = {
-      sender: 'carlos-backend', text: 'Need help with auth', ts: '500.100', channel: 'C123',
-      channelName: 'team-alpha-collab', threadTs: '500.001',
+      sender: 'carlos-backend', text: 'Need help with auth', ts: '500.100', channel: 'local',
+      channelName: 'local', threadTs: 'uuid-topic',
     }
     await bus.push(msg)
 
@@ -20,39 +19,10 @@ describe('Integration: end-to-end message flow', () => {
       params: {
         content: 'Need help with auth',
         meta: {
-          sender: 'carlos-backend', channel: 'team-alpha-collab', channel_id: 'C123',
-          ts: '500.100', thread_ts: '500.001',
+          sender: 'carlos-backend', channel: 'local', channel_id: 'local',
+          ts: '500.100', thread_ts: 'uuid-topic',
         },
       },
-    })
-  })
-
-  it('full subscribe -> receive -> reply flow', async () => {
-    const mockMcp = { notification: vi.fn().mockResolvedValue(undefined) }
-    const mockWeb = {
-      conversations: {
-        join: vi.fn().mockResolvedValue({ ok: true }),
-        list: vi.fn().mockResolvedValue({ ok: true, channels: [{ id: 'C123', name: 'team-alpha-collab' }] }),
-      },
-      chat: { postMessage: vi.fn().mockResolvedValue({ ok: true, ts: '100.200' }) },
-    }
-    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-    const subs = new SubscriptionManager(mockWeb as never)
-    const bus = new MessageBus(mockMcp as never)
-
-    await subs.join('team-alpha-collab')
-    expect(subs.isSubscribed('C123')).toBe(true)
-
-    await bus.push({ sender: 'alice-frontend', text: 'Review my PR?', ts: '600.100', channel: 'C123', channelName: 'team-alpha-collab', threadTs: '600.001' })
-
-    expect(mockMcp.notification).toHaveBeenCalledWith(expect.objectContaining({
-      method: 'notifications/claude/channel',
-      params: expect.objectContaining({ content: 'Review my PR?' }),
-    }))
-
-    await mockWeb.chat.postMessage({ channel: 'C123', thread_ts: '600.001', text: session.fmt('Sure, on it') })
-    expect(mockWeb.chat.postMessage).toHaveBeenCalledWith({
-      channel: 'C123', thread_ts: '600.001', text: '*[stefan]*: Sure, on it',
     })
   })
 
@@ -64,6 +34,6 @@ describe('Integration: end-to-end message flow', () => {
   })
 
   it('human messages return null from parse', () => {
-    expect(SessionManager.parse('just a regular slack message')).toBeNull()
+    expect(SessionManager.parse('just a regular message')).toBeNull()
   })
 })

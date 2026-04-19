@@ -1,19 +1,13 @@
-export type TopicSource = 'local' | 'slack'
-
 interface JoinedTopic {
   topicName: string
-  source: TopicSource
-  channelId?: string  // which Slack channel this topic belongs to
+  source: 'local'
 }
 
 export class ActiveContext {
-  private channelId: string | undefined
-  private channelName: string | undefined
   private activeThreadTs: string | undefined
   private activeTopicName: string | undefined
-  private activeTopicSource: TopicSource | undefined
+  private activeTopicSource: 'local' | undefined
   private localJoined = false
-  private readonly joinedChannels = new Map<string, string>() // channelId -> channelName
   private readonly joinedTopics = new Map<string, JoinedTopic>() // threadTs/topicId -> { topicName, source }
 
   joinLocalChannel(): void {
@@ -24,42 +18,8 @@ export class ActiveContext {
     return this.localJoined
   }
 
-  setActiveChannel(channelId: string, channelName: string): void {
-    this.channelId = channelId
-    this.channelName = channelName
-    this.joinedChannels.set(channelId, channelName)
-  }
-
-  leaveSlackChannel(channelId: string): void {
-    this.joinedChannels.delete(channelId)
-    // Clear topics belonging to this channel
-    for (const [key, topic] of this.joinedTopics) {
-      if (topic.channelId === channelId) {
-        this.joinedTopics.delete(key)
-        if (this.activeThreadTs === key) {
-          this.activeThreadTs = undefined
-          this.activeTopicName = undefined
-          this.activeTopicSource = undefined
-        }
-      }
-    }
-    // If leaving the active channel, clear active
-    if (this.channelId === channelId) {
-      this.channelId = undefined
-      this.channelName = undefined
-    }
-  }
-
-  isChannelJoined(channelId: string): boolean {
-    return this.joinedChannels.has(channelId)
-  }
-
-  getJoinedChannels(): Array<{ channelId: string; channelName: string }> {
-    return [...this.joinedChannels.entries()].map(([channelId, channelName]) => ({ channelId, channelName }))
-  }
-
-  joinTopic(threadTs: string, topicName: string, source: TopicSource = 'slack', channelId?: string): void {
-    this.joinedTopics.set(threadTs, { topicName, source, channelId })
+  joinTopic(threadTs: string, topicName: string, source: 'local'): void {
+    this.joinedTopics.set(threadTs, { topicName, source })
     this.activeThreadTs = threadTs
     this.activeTopicName = topicName
     this.activeTopicSource = source
@@ -71,18 +31,6 @@ export class ActiveContext {
       this.activeThreadTs = undefined
       this.activeTopicName = undefined
       this.activeTopicSource = undefined
-    }
-  }
-
-  clearChannel(): void {
-    this.channelId = undefined
-    this.channelName = undefined
-    this.activeThreadTs = undefined
-    this.activeTopicName = undefined
-    this.activeTopicSource = undefined
-    // Clear Slack topics but keep local topics
-    for (const [key, topic] of this.joinedTopics) {
-      if (topic.source === 'slack') this.joinedTopics.delete(key)
     }
   }
 
@@ -99,16 +47,6 @@ export class ActiveContext {
     return this.joinedTopics.has(threadTs)
   }
 
-  getChannelId(): string {
-    if (!this.channelId) throw new Error('No active channel. Use join_channel first.')
-    return this.channelId
-  }
-
-  getChannelName(): string {
-    if (!this.channelName) throw new Error('No active channel. Use join_channel first.')
-    return this.channelName
-  }
-
   getThreadTs(): string {
     if (!this.activeThreadTs) throw new Error('No active topic. Use join_topic or start_topic first.')
     return this.activeThreadTs
@@ -118,18 +56,18 @@ export class ActiveContext {
     return this.activeTopicName
   }
 
-  getTopicSource(): TopicSource | undefined {
+  getTopicSource(): 'local' | undefined {
     return this.activeTopicSource
   }
 
-  findJoinedTopic(query: string): { threadTs: string; topicName: string; source: TopicSource } | null {
+  findJoinedTopic(query: string): { threadTs: string; topicName: string; source: 'local' } | null {
     // Exact topicId/threadTs match wins
     const direct = this.joinedTopics.get(query)
     if (direct) return { threadTs: query, topicName: direct.topicName, source: direct.source }
 
     const q = query.toLowerCase()
-    const exact: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
-    const fuzzy: Array<{ threadTs: string; topicName: string; source: TopicSource }> = []
+    const exact: Array<{ threadTs: string; topicName: string; source: 'local' }> = []
+    const fuzzy: Array<{ threadTs: string; topicName: string; source: 'local' }> = []
     for (const [threadTs, { topicName, source }] of this.joinedTopics) {
       const lower = topicName.toLowerCase()
       if (lower === q) exact.push({ threadTs, topicName, source })
@@ -140,10 +78,9 @@ export class ActiveContext {
     return null
   }
 
-  getJoinedTopics(): Array<{ threadTs: string; topicName: string; source: TopicSource }> {
+  getJoinedTopics(): Array<{ threadTs: string; topicName: string; source: 'local' }> {
     return [...this.joinedTopics.entries()].map(([threadTs, { topicName, source }]) => ({ threadTs, topicName, source }))
   }
 
-  hasChannel(): boolean { return this.channelId !== undefined }
   hasTopic(): boolean { return this.activeThreadTs !== undefined }
 }
