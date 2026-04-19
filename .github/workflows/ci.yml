@@ -5,6 +5,12 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version to release (e.g. 1.0.0). Leave empty to use commit-derived semver.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -67,9 +73,10 @@ jobs:
 
   release:
     if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      !startsWith(github.event.head_commit.message, 'chore: bump version to')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/main' &&
+       !startsWith(github.event.head_commit.message, 'chore: bump version to'))
     needs: [format, lint, typecheck, test, build]
     runs-on: ubuntu-latest
     permissions:
@@ -90,8 +97,9 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Get next version
-        id: semver
+      - name: Get next version (from commits)
+        if: github.event_name != 'workflow_dispatch' || inputs.version == ''
+        id: semver_auto
         uses: ietf-tools/semver-action@v1
         with:
           token: ${{ github.token }}
@@ -101,6 +109,26 @@ jobs:
           patchAll: true
           noVersionBumpBehavior: silent
           noNewCommitBehavior: silent
+
+      - name: Resolve release version
+        id: semver
+        env:
+          EXPLICIT_VERSION: ${{ inputs.version }}
+          AUTO_STRICT: ${{ steps.semver_auto.outputs.nextStrict }}
+          AUTO_TAG: ${{ steps.semver_auto.outputs.next }}
+        run: |
+          if [ -n "$EXPLICIT_VERSION" ]; then
+            # Validate strict semver (x.y.z) to prevent injection and bad tags.
+            if ! printf '%s' "$EXPLICIT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid version: $EXPLICIT_VERSION (expected strict semver X.Y.Z)" >&2
+              exit 1
+            fi
+            echo "nextStrict=$EXPLICIT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "next=v$EXPLICIT_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "nextStrict=$AUTO_STRICT" >> "$GITHUB_OUTPUT"
+            echo "next=$AUTO_TAG" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install
         if: steps.semver.outputs.nextStrict != ''
