@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync, statSync } from 'node:fs'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { BROKER_ID } from './constants.js'
+import { PROFILE } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager } from './session.js'
@@ -179,7 +179,7 @@ async function ensureBroker(): Promise<number> {
 
   if (existing) removeRendezvous()
 
-  const lockFile = `/tmp/cccollab-broker-${BROKER_ID}.spawn.lock`
+  const lockFile = `/tmp/cccollab-broker-${PROFILE}.spawn.lock`
   const STALE_LOCK_MS = 15_000
   let haveLock = false
   try {

@@ -10,8 +10,8 @@ import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
 import type { ParsedMessage } from '../src/types.js'
 
-const BROKER_ID = `itest-${process.pid}`
-const RENDEZVOUS = `/tmp/cccollab-broker-${BROKER_ID}.json`
+const PROFILE = `itest-${process.pid}`
+const RENDEZVOUS = `/tmp/cccollab-broker-${PROFILE}.json`
 
 async function waitUntil<T>(fn: () => T | null, timeoutMs = 5000, intervalMs = 50): Promise<T> {
   const start = Date.now()
@@ -112,7 +112,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
     const tsx = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
     const brokerPath = new URL('../src/broker.ts', import.meta.url).pathname
     broker = spawn(tsx, [brokerPath], {
-      env: { ...process.env, BROKER_ID },
+      env: { ...process.env, CCCOLLAB_PROFILE: PROFILE },
       stdio: 'ignore',
     })
     await waitUntil(() => existsSync(RENDEZVOUS) ? true : null, 10_000)

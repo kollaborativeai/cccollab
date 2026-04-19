@@ -75,16 +75,13 @@ Local topics are the default. Slack topics require `join_channel` first.
 
 Messages from other sessions and humans arrive as `<channel>` tags via push.
 
-## Multi-user / Per-project Configuration
+## Per-profile isolation
 
-Three env vars can be set in an MCP server definition:
+One env var controls broker namespacing:
 
 | Var | Description |
 |-----|-------------|
-| `CCCOLLAB_PROFILE` | Selects a credentials file: `~/.config/cccollab/credentials-<profile>.json`. |
-| `BROKER_ID` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing an id share a broker and local topics. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside production. |
-
-Credentials (`~/.config/cccollab/credentials*.json`) are never committed. Each user runs `authenticate` once per profile.
+| `CCCOLLAB_PROFILE` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing a profile share a broker and its channels/topics. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside the default. |
 
 ## Pre-seeded session identity
 

@@ -3,8 +3,7 @@
     "cccollab": {
       "command": "cccollab",
       "env": {
-        "CCCOLLAB_PROFILE": "${user_config.profile}",
-        "BROKER_ID": "${user_config.broker_id}"
+        "CCCOLLAB_PROFILE": "${user_config.profile}"
       }
     }
   }

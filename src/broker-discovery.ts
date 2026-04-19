@@ -4,7 +4,7 @@ import { BROKER_RENDEZVOUS_FILE } from './constants.js'
 export interface BrokerRendezvous {
   port: number
   pid: number
-  id: string
+  profile: string
 }
 
 export function readRendezvous(): BrokerRendezvous | null {

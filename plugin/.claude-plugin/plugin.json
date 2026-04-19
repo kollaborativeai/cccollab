@@ -13,13 +13,7 @@
     "profile": {
       "type": "string",
       "title": "Profile (optional)",
-      "description": "Selects the credentials file at ~/.config/cccollab/credentials-<profile>.json. Leave blank to use the default credentials file.",
-      "sensitive": false
-    },
-    "broker_id": {
-      "type": "string",
-      "title": "Broker ID (optional)",
-      "description": "Identifier for the local broker process. Sessions sharing a broker ID share channels, topics, and discovery. Leave blank to use the default shared broker. Set a unique value to run an isolated broker (e.g. 'test' for development).",
+      "description": "Namespaces the local broker process (rendezvous file, pid, log). Sessions sharing a profile share a broker and its channels/topics. Leave blank to join the default shared broker. Set a unique value (e.g. 'test') to run an isolated broker alongside the default.",
       "sensitive": false
     }
   }
