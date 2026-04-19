@@ -30,7 +30,7 @@ Call `list_sessions` to see which other sessions are reachable through any of yo
 
 ## Starting conversations
 
-- `list_channels` - see which channels you are subscribed to and who else is there.
+- `list_channels` - see all channels on the broker. Each entry has `subscribed` (true/false) and `isActive`; the top-level `activeChannel` mirrors which one is active. Use this to discover channels you could join.
 - `join_channel` / `leave_channel` - subscribe or unsubscribe. Joining a brand new channel implicitly creates it.
 - `set_active_channel` - focus on a specific channel (must be subscribed).
 - `send_message_to_channel` - top-level broadcast to a channel. Defaults to the active channel.
@@ -53,7 +53,7 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 | ----------------------------------- | --------------------------------------------------------------------------------- |
 | `introduce`                         | Set your role name. Required before sending.                                      |
 | `whoami`                            | Show your name, objective, active channel, active topic, and subscribed channels. |
-| `list_channels`                     | Your subscribed channels with subscriber counts and source.                       |
+| `list_channels`                     | All broker channels with `subscribed`, `source`, `subscriberCount`, `isActive`.   |
 | `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                          |
 | `set_active_channel`                | Switch active focus to a subscribed channel.                                      |
 | `send_message_to_channel`           | Top-level broadcast to a channel.                                                 |

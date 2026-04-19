@@ -46,7 +46,10 @@ describe('Channel Tools', () => {
       })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleChannelTool('list_channels', {}, depsNoName))
-      expect(result).toEqual([{ name: 'default', source: 'fallback', subscriberCount: 1, isActive: true }])
+      expect(result).toEqual({
+        activeChannel: 'default',
+        channels: [{ name: 'default', source: 'fallback', subscriberCount: 1, subscribed: true, isActive: true }],
+      })
       vi.unstubAllGlobals()
     })
   })
@@ -152,14 +155,14 @@ describe('Channel Tools', () => {
       vi.unstubAllGlobals()
     })
 
-    it('returns empty array when none subscribed', async () => {
+    it('returns empty channels array with null activeChannel when none subscribed and broker sees none', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ channels: [] }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
-      expect(result).toEqual([])
+      expect(result).toEqual({ activeChannel: null, channels: [] })
     })
 
-    it('marks the active channel and shows source', async () => {
+    it('marks the active channel, shows source, and hoists activeChannel to the top level', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () =>
@@ -174,10 +177,110 @@ describe('Channel Tools', () => {
       deps.context.joinChannel('default', 'fallback')
       deps.context.joinChannel('project_x', 'manual')
       const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
-      expect(result).toEqual([
-        { name: 'default', source: 'fallback', subscriberCount: 3, isActive: true },
-        { name: 'project_x', source: 'manual', subscriberCount: 2, isActive: false },
+      expect(result).toEqual({
+        activeChannel: 'default',
+        channels: [
+          { name: 'default', source: 'fallback', subscriberCount: 3, subscribed: true, isActive: true },
+          { name: 'project_x', source: 'manual', subscriberCount: 2, subscribed: true, isActive: false },
+        ],
+      })
+    })
+
+    it('queries the broker global view without a sessionId', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ channels: [] }) })
+      vi.stubGlobal('fetch', mockFetch)
+      await handleChannelTool('list_channels', {}, deps)
+      const url = mockFetch.mock.calls[0]![0] as string
+      expect(url).toContain('/channels')
+      expect(url).not.toContain('sessionId')
+    })
+
+    it('includes broker channels the session has not joined with subscribed:false and source:null', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            channels: [
+              { name: 'cccollab', subscriberCount: 1 },
+              { name: 'flatoutsolutions-ai', subscriberCount: 3 },
+            ],
+          }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('cccollab', 'cccollab.json')
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result).toEqual({
+        activeChannel: 'cccollab',
+        channels: [
+          { name: 'cccollab', source: 'cccollab.json', subscriberCount: 1, subscribed: true, isActive: true },
+          {
+            name: 'flatoutsolutions-ai',
+            source: null,
+            subscriberCount: 3,
+            subscribed: false,
+            isActive: false,
+          },
+        ],
+      })
+    })
+
+    it('returns null activeChannel when no active channel is set', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            channels: [{ name: 'broadcast', subscriberCount: 5 }],
+          }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result.activeChannel).toBeNull()
+      expect(result.channels).toEqual([
+        { name: 'broadcast', source: null, subscriberCount: 5, subscribed: false, isActive: false },
       ])
+    })
+
+    it('still lists a locally-subscribed channel the broker did not report (fallback subscriberCount 1)', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            channels: [{ name: 'other', subscriberCount: 4 }],
+          }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('local_only', 'manual')
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result.activeChannel).toBe('local_only')
+      expect(result.channels).toContainEqual({
+        name: 'local_only',
+        source: 'manual',
+        subscriberCount: 1,
+        subscribed: true,
+        isActive: true,
+      })
+      expect(result.channels).toContainEqual({
+        name: 'other',
+        source: null,
+        subscriberCount: 4,
+        subscribed: false,
+        isActive: false,
+      })
+    })
+
+    it('degrades gracefully when broker is unreachable and returns subscribed-only entries', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('default', 'fallback')
+      deps.context.joinChannel('project_x', 'manual')
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      expect(result).toEqual({
+        activeChannel: 'default',
+        channels: [
+          { name: 'default', source: 'fallback', subscriberCount: 1, subscribed: true, isActive: true },
+          { name: 'project_x', source: 'manual', subscriberCount: 1, subscribed: true, isActive: false },
+        ],
+      })
     })
   })
 

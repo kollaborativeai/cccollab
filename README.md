@@ -57,7 +57,7 @@ The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls bac
 ```
 introduce                 - set your role name (required before sending messages)
 whoami                    - show your current name and objective
-list_channels             - show channels the bot is a member of
+list_channels             - list all channels on the broker with subscription + active status
 join_channel              - join a Slack channel and make it active
 leave_channel             - leave current channel
 list_topics               - list active topics in the active channel (or local)
@@ -134,7 +134,9 @@ Example `.cccollab.json` with identity, profile, and default channels:
 }
 ```
 
-Because the file is committed to the repo, everyone who clones it lands in the same channels with zero configuration. `join_channel` / `leave_channel` continue to work for per-session tweaks after startup. `whoami` reports each subscribed channel with its source (`env`, `cccollab.json`, `fallback`, or `manual`).
+The **first channel** in the list becomes the session's active channel. Subsequent entries are subscribed but inactive; a later `join_channel` call never steals active. To switch active mid-session use `set_active_channel`. To pick a different active channel at startup, reorder the list (or set `CCCOLLAB_DEFAULT_CHANNELS` with the desired channel first).
+
+Because the file is committed to the repo, everyone who clones it lands in the same channels with zero configuration. `join_channel` / `leave_channel` continue to work for per-session tweaks after startup. `whoami` reports each subscribed channel with its source (`env`, `cccollab.json`, `fallback`, or `manual`). `list_channels` shows every channel the broker knows about (not just your subscriptions), so you can discover channels other sessions are using and `join_channel` into them without pre-configuring anything.
 
 ## Architecture
 
