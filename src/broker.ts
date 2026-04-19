@@ -99,6 +99,9 @@ function leaveChannel(sessionName: string, channel: string): boolean {
     members.delete(sessionName)
     if (members.size === 0) channels.delete(channel)
   }
+  for (const t of topics.values()) {
+    if (t.channel === channel) t.joinedSessions.delete(sessionName)
+  }
   return removed
 }
 
@@ -411,6 +414,16 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const t = topics.get(id)
     if (!t) {
       jsonResponse(res, 404, { error: 'topic not found' })
+      return
+    }
+    const sessionId = searchParams.get('sessionId')
+    if (!sessionId) {
+      jsonResponse(res, 400, { error: 'sessionId query parameter is required' })
+      return
+    }
+    const info = sessions.get(sessionId)
+    if (!info || !info.channels.has(t.channel)) {
+      jsonResponse(res, 403, { error: `Not subscribed to channel "${t.channel}".` })
       return
     }
     jsonResponse(res, 200, {

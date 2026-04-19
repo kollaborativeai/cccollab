@@ -350,7 +350,7 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
 
 async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchTopicById(deps.brokerPort, topic)
+    const byId = await fetchTopicById(deps.brokerPort, topic, deps.session.displayName)
     if (!byId) return JSON.stringify({ error: `No topic with id "${topic}" found.` })
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return JSON.stringify({
@@ -390,9 +390,9 @@ async function handleSetActiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: found.threadTs, name: found.topicName, channel: found.channel })
 }
 
-async function fetchTopicById(brokerPort: number, id: string): Promise<BrokerTopicData | null> {
+async function fetchTopicById(brokerPort: number, id: string, sessionId: string): Promise<BrokerTopicData | null> {
   try {
-    const url = `${brokerBaseUrl(brokerPort)}/topics/${id}`
+    const url = `${brokerBaseUrl(brokerPort)}/topics/${id}?sessionId=${encodeURIComponent(sessionId)}`
     const res = await fetch(url)
     if (!res.ok) return null
     const data = (await res.json()) as { topic: BrokerTopicData }
@@ -455,7 +455,7 @@ async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Prom
 
 async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchTopicById(deps.brokerPort, topic)
+    const byId = await fetchTopicById(deps.brokerPort, topic, deps.session.displayName)
     if (!byId || byId.state !== 'archived') return JSON.stringify({ error: `No archived topic with id "${topic}".` })
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return JSON.stringify({
@@ -534,7 +534,7 @@ async function resolveTopicIdInSubscribedChannels(
   deps: TopicToolDeps, name: string,
 ): Promise<ResolvedTopic | ResolveError> {
   if (UUID_PATTERN.test(name)) {
-    const byId = await fetchTopicById(deps.brokerPort, name)
+    const byId = await fetchTopicById(deps.brokerPort, name, deps.session.displayName)
     if (!byId) return { error: `No topic with id "${name}".` }
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return { error: `Topic "${byId.topic}" is in "${byId.channel}", which you are not subscribed to.` }

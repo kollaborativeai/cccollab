@@ -211,4 +211,74 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       C.listener.stop()
     }
   }, 15_000)
+
+  it('leave_channel cascades: broker drops session from topics in that channel', async () => {
+    const A = await makeSession('cascade-a', brokerPort)
+    const B = await makeSession('cascade-b', brokerPort)
+    try {
+      await handleChannelTool('join_channel', { name: 'cascade-ch' }, A.channelDeps)
+      await handleChannelTool('join_channel', { name: 'cascade-ch' }, B.channelDeps)
+
+      const started = JSON.parse(await handleTopicTool('start_topic', { topic: 'cascade-topic' }, A.topicDeps))
+      const topicId = started.id as string
+
+      await handleTopicTool('join_topic', { topic: 'cascade-topic' }, B.topicDeps)
+
+      // Sanity: broker knows B joined the topic
+      const before = await (await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=cascade-a`)).json() as {
+        topic: { id: string }
+      }
+      expect(before.topic.id).toBe(topicId)
+
+      await handleChannelTool('leave_channel', { name: 'cascade-ch' }, B.channelDeps)
+
+      // After leave, a fresh join on B should be refused by the broker because B is no longer subscribed
+      const rejoin = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: 'cascade-b' }),
+      })
+      expect(rejoin.status).toBe(403)
+
+      // Sending a message to the topic from B is also refused
+      const sendAttempt = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: 'cascade-b', text: 'should not send' }),
+      })
+      expect(sendAttempt.status).toBe(403)
+    } finally {
+      A.listener.stop()
+      B.listener.stop()
+    }
+  }, 15_000)
+
+  it('GET /topics/{id} requires sessionId and refuses non-subscribed callers', async () => {
+    const A = await makeSession('gate-a', brokerPort)
+    const B = await makeSession('gate-b', brokerPort)
+    try {
+      await handleChannelTool('join_channel', { name: 'gate-ch' }, A.channelDeps)
+      await handleChannelTool('join_channel', { name: 'other-ch' }, B.channelDeps)
+
+      const started = JSON.parse(await handleTopicTool('start_topic', { topic: 'gated-topic' }, A.topicDeps))
+      const topicId = started.id as string
+
+      // No sessionId -> 400
+      const noSession = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}`)
+      expect(noSession.status).toBe(400)
+
+      // Subscribed -> 200
+      const okRes = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=gate-a`)
+      expect(okRes.status).toBe(200)
+
+      // Not subscribed to the topic's channel -> 403
+      const forbidden = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=gate-b`)
+      expect(forbidden.status).toBe(403)
+      const body = await forbidden.json() as { error: string }
+      expect(body.error).toContain('Not subscribed')
+    } finally {
+      A.listener.stop()
+      B.listener.stop()
+    }
+  }, 15_000)
 })
