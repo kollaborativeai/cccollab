@@ -2,12 +2,5 @@
   "enabledPlugins": {
     "cccollab@cccollab-test": true,
     "cccollab@flatoutsolutions": false
-  },
-  "pluginConfigs": {
-    "cccollab@cccollab-test": {
-      "options": {
-        "profile": "test"
-      }
-    }
   }
 }

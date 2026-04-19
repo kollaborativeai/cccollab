@@ -80,9 +80,13 @@ Messages from other sessions and humans arrive as `<channel>` tags via push.
 
 Sessions sharing a profile see the same channels, topics, and peers; sessions on different profiles stay completely separate. Useful for keeping client work, personal projects, or different accounts from bleeding into each other.
 
-| Var                | Description                                                                                                                                                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CCCOLLAB_PROFILE` | Name of this session's collaboration space. Leave unset to use the default. Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile. |
+Precedence:
+
+1. `CCCOLLAB_PROFILE` env var - overrides the file for that session.
+2. `profile` in `.cccollab.json` at the repo root (walked up from `cwd`).
+3. Fallback: `default`.
+
+Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile.
 
 ## Pre-seeded session identity
 
@@ -119,12 +123,13 @@ Sessions auto-subscribe to one or more channels on startup. In precedence order:
 2. `default_channels` in `.cccollab.json` at the repo root (walked up from `cwd`). An empty array is treated as "explicit zero channels".
 3. Fallback: a single channel named `default`.
 
-Example `.cccollab.json` with both identity and default channels:
+Example `.cccollab.json` with identity, profile, and default channels:
 
 ```json
 {
   "name": "platform-reviewer",
   "objective": "Review PRs for the platform monorepo and enforce style",
+  "profile": "platform",
   "default_channels": ["platform", "reviews"]
 }
 ```
