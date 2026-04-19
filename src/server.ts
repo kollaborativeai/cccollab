@@ -9,14 +9,13 @@ import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager } from './session.js'
 import { resolveInitialIdentity } from './initial-identity.js'
+import { resolveInitialChannels } from './initial-channels.js'
 import { MessageBus } from './message-bus.js'
 import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
 import { createIdentityTools, handleIdentityTool } from './tools/identity.js'
 import { createTopicTools, handleTopicTool } from './tools/topics.js'
 import { createChannelTools, handleChannelTool } from './tools/channels.js'
-
-const FALLBACK_CHANNEL = 'default'
 
 async function startServer(config: Config, brokerPort: number) {
   let worktreeName: string | undefined
@@ -64,15 +63,22 @@ async function startServer(config: Config, brokerPort: number) {
   }
 
   const context = new ActiveContext()
-  context.joinChannel(FALLBACK_CHANNEL, 'fallback')
-  if (session.hasName()) {
-    fetch(`http://localhost:${brokerPort}/channels/join`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: session.displayName, channel: FALLBACK_CHANNEL }),
-    }).catch(() => {
-      /* best-effort */
-    })
+  const initialChannels = resolveInitialChannels(process.cwd())
+  console.error(
+    `[cccollab] Initial channels (source=${initialChannels.source}): ` +
+      (initialChannels.channels.length > 0 ? initialChannels.channels.join(', ') : '(none)'),
+  )
+  for (const channel of initialChannels.channels) {
+    context.joinChannel(channel, initialChannels.source)
+    if (session.hasName()) {
+      fetch(`http://localhost:${brokerPort}/channels/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.displayName, channel }),
+      }).catch(() => {
+        /* best-effort */
+      })
+    }
   }
 
   const instructionLines = [
@@ -93,17 +99,21 @@ async function startServer(config: Config, brokerPort: number) {
     : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
   const workflowSteps: string[] = []
   if (introduceStep) workflowSteps.push(introduceStep)
-  workflowSteps.push(`join_channel - subscribe to another channel; you're always in "${FALLBACK_CHANNEL}" by default`)
+  const joinChannelStep =
+    initialChannels.channels.length > 0
+      ? `join_channel - subscribe to another channel; you're already in ${initialChannels.channels.map((c) => `"${c}"`).join(', ')}`
+      : 'join_channel - subscribe to a channel; you are not auto-subscribed to any'
+  workflowSteps.push(joinChannelStep)
   workflowSteps.push('start_topic or join_topic - create or join a conversation within a channel')
   workflowSteps.push('send_message_to_topic - send to your active topic')
   workflowSteps.push('send_message_to_channel - top-level broadcast to a channel')
 
-  instructionLines.push(
-    `You are always subscribed to the "${FALLBACK_CHANNEL}" channel as a sensible default.`,
-    '',
-    'Workflow:',
-    ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),
-  )
+  const subscriptionLine =
+    initialChannels.channels.length > 0
+      ? `You are subscribed to ${initialChannels.channels.map((c) => `"${c}"`).join(', ')} (source: ${initialChannels.source}).`
+      : 'No default channels configured. Use join_channel to subscribe.'
+
+  instructionLines.push(subscriptionLine, '', 'Workflow:', ...workflowSteps.map((s, i) => `${i + 1}. ${s}`))
   instructionLines.push(
     '',
     "The server remembers your active channel and topic. You don't need to repeat them.",

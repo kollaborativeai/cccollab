@@ -111,6 +111,26 @@ Create `.cccollab.json` at the repo root:
 
 The file is found by walking up from `cwd`, so it works from any subdirectory. Env vars take precedence over the file when both are set.
 
+## Default channels
+
+Sessions auto-subscribe to one or more channels on startup. In precedence order:
+
+1. `CCCOLLAB_DEFAULT_CHANNELS` env var - CSV of channel names (e.g. `"platform,security"`). Overrides the file for that session. An empty string or whitespace-only value is treated as "explicit zero channels" (useful to suppress the fallback).
+2. `default_channels` in `.cccollab.json` at the repo root (walked up from `cwd`). An empty array is treated as "explicit zero channels".
+3. Fallback: a single channel named `default`.
+
+Example `.cccollab.json` with both identity and default channels:
+
+```json
+{
+  "name": "platform-reviewer",
+  "objective": "Review PRs for the platform monorepo and enforce style",
+  "default_channels": ["platform", "reviews"]
+}
+```
+
+Because the file is committed to the repo, everyone who clones it lands in the same channels with zero configuration. `join_channel` / `leave_channel` continue to work for per-session tweaks after startup. `whoami` reports each subscribed channel with its source (`env`, `cccollab.json`, `fallback`, or `manual`).
+
 ## Architecture
 
 - **Broker** (`src/broker.ts`) - one per machine, auto-spawned on first session start. Socket Mode connection to Slack + in-memory local topic store. SSE broadcast to all local MCP instances.

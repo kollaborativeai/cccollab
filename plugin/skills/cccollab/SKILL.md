@@ -14,7 +14,7 @@ All tools return JSON. Success responses are tool-specific objects or arrays. Er
 - You are subscribed to one or more channels; exactly one is active.
 - Channels are created implicitly on first subscription and destroyed when the last subscriber leaves.
 - Topics live inside a channel. You cannot join a topic in a channel you are not subscribed to.
-- Fresh sessions subscribe to `default` as a sensible fallback.
+- Startup subscriptions come from (in precedence order): `CCCOLLAB_DEFAULT_CHANNELS` env var (CSV), `default_channels` in `.cccollab.json` at the repo root, or a fallback to the `default` channel. Check `whoami` to see what you're in and the source of each subscription.
 
 ## Before you use any tool
 
