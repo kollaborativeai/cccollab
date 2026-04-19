@@ -1,8 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process'
+import { writeFileSync, unlinkSync, statSync } from 'node:fs'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { WebClient } from '@slack/web-api'
+import { BROKER_ID } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { getCredentialsPath } from './credentials.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
@@ -259,29 +261,63 @@ async function ensureBroker(appToken: string): Promise<number> {
   // Rendezvous is stale (dead broker) or missing. Remove and spawn fresh.
   if (existing) removeRendezvous()
 
-  const isCompiled = import.meta.url.endsWith('.js')
-  const brokerFile = isCompiled ? 'broker.js' : 'broker.ts'
-  const brokerPath = new URL(`./${brokerFile}`, import.meta.url).pathname
-
-  let command: string
-  let args: string[]
-  if (isCompiled) {
-    command = process.execPath
-    args = [brokerPath]
-  } else {
-    command = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
-    args = [brokerPath]
+  // Acquire exclusive spawn lock so concurrent sessions don't both spawn a broker.
+  const lockFile = `/tmp/cccollab-broker-${BROKER_ID}.spawn.lock`
+  const STALE_LOCK_MS = 15_000
+  let haveLock = false
+  try {
+    writeFileSync(lockFile, String(process.pid), { flag: 'wx' })
+    haveLock = true
+  } catch {
+    // Another process holds the lock. If it's stale, clear it and retry once; otherwise wait for rendezvous.
+    try {
+      const age = Date.now() - statSync(lockFile).mtimeMs
+      if (age > STALE_LOCK_MS) {
+        unlinkSync(lockFile)
+        writeFileSync(lockFile, String(process.pid), { flag: 'wx' })
+        haveLock = true
+      }
+    } catch { /* lock vanished between stat and unlink; fall through to wait */ }
   }
 
-  const child = spawn(command, args, {
-    env: { ...process.env, SLACK_APP_TOKEN: appToken },
-    detached: true,
-    stdio: 'ignore',
-  })
-  child.unref()
+  if (!haveLock) {
+    const rendezvous = await waitForHealthyRendezvous(10_000)
+    return rendezvous.port
+  }
 
-  const rendezvous = await waitForHealthyRendezvous(10_000)
-  return rendezvous.port
+  try {
+    // Double-check: another spawner may have written the rendezvous while we were racing for the lock.
+    const afterLock = readRendezvous()
+    if (afterLock && await probeBroker(afterLock.port)) {
+      return afterLock.port
+    }
+
+    const isCompiled = import.meta.url.endsWith('.js')
+    const brokerFile = isCompiled ? 'broker.js' : 'broker.ts'
+    const brokerPath = new URL(`./${brokerFile}`, import.meta.url).pathname
+
+    let command: string
+    let args: string[]
+    if (isCompiled) {
+      command = process.execPath
+      args = [brokerPath]
+    } else {
+      command = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
+      args = [brokerPath]
+    }
+
+    const child = spawn(command, args, {
+      env: { ...process.env, SLACK_APP_TOKEN: appToken },
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+
+    const rendezvous = await waitForHealthyRendezvous(10_000)
+    return rendezvous.port
+  } finally {
+    try { unlinkSync(lockFile) } catch { /* best-effort */ }
+  }
 }
 
 async function main() {

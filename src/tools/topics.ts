@@ -326,6 +326,10 @@ export async function handleTopicTool(
     case 'send_message_to_topic': {
       const { text, topic } = args as { text: string; topic?: string }
 
+      if (typeof text !== 'string' || text.trim() === '') {
+        return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
+      }
+
       // Active local topic with no topic arg
       if (deps.context.hasTopic() && deps.context.getTopicSource() === 'local' && !topic) {
         return handleLocalSendMessage(deps, text, deps.context.getThreadTs())
@@ -380,6 +384,10 @@ export async function handleTopicTool(
     }
     case 'send_broadcast': {
       const { text, channel } = args as { text: string; channel?: string }
+
+      if (typeof text !== 'string' || text.trim() === '') {
+        return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
+      }
 
       if (isLocal(channel, deps.context)) {
         return handleLocalBroadcast(deps, text)
@@ -512,6 +520,12 @@ export async function handleTopicTool(
     }
     case 'send_message_to_session': {
       const { to, text } = args as { to: string; text: string }
+      if (typeof text !== 'string' || text.trim() === '') {
+        return 'Error: `text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)'
+      }
+      if (typeof to !== 'string' || to.trim() === '') {
+        return 'Error: `to` is required and must be a non-empty string.'
+      }
       await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/local-event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
