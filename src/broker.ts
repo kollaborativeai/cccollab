@@ -1,13 +1,17 @@
 #!/usr/bin/env npx tsx
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { writeFileSync, appendFileSync } from 'node:fs'
+import { writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import crypto from 'node:crypto'
-import { PROFILE, BROKER_RENDEZVOUS_FILE } from './constants.js'
+import { PROFILE, BROKER_RENDEZVOUS_FILE, CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 
-const PID_FILE = `/tmp/cccollab-broker-${PROFILE}.pid`
-const LOG_FILE = `/tmp/cccollab-broker-${PROFILE}.log`
+mkdirSync(CCCOLLAB_RUN_DIR, { recursive: true })
+mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
+
+const PID_FILE = join(CCCOLLAB_RUN_DIR, `${PROFILE}.pid`)
+const LOG_FILE = join(CCCOLLAB_LOGS_DIR, `${PROFILE}.log`)
 
 type SSEResponse = ServerResponse & { req: IncomingMessage }
 

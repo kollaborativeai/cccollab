@@ -77,11 +77,11 @@ Messages from other sessions and humans arrive as `<channel>` tags via push.
 
 ## Per-profile isolation
 
-One env var controls broker namespacing:
+Sessions sharing a profile see the same channels, topics, and peers; sessions on different profiles stay completely separate. Useful for keeping client work, personal projects, or different accounts from bleeding into each other.
 
 | Var | Description |
 |-----|-------------|
-| `CCCOLLAB_PROFILE` | Namespaces the broker process (rendezvous file, pid, log). Sessions sharing a profile share a broker and its channels/topics. Leave unset to join the default shared broker; set a unique value (e.g. `test`) to run an isolated broker alongside the default. |
+| `CCCOLLAB_PROFILE` | Name of this session's collaboration space. Leave unset to use the default. Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile. |
 
 ## Pre-seeded session identity
 

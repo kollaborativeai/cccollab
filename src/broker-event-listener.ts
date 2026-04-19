@@ -1,12 +1,15 @@
 import http from 'node:http'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { MessageBus } from './message-bus.js'
 import type { ActiveContext } from './context.js'
 import type { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 import { normalizeChannelName } from './context.js'
+import { CCCOLLAB_LOGS_DIR } from './constants.js'
 
-const LOG_FILE = '/tmp/cccollab-debug.log'
+mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
+const LOG_FILE = join(CCCOLLAB_LOGS_DIR, 'debug.log')
 const RECONNECT_DELAY_MS = 2000
 
 interface BrokerEventListenerOptions {

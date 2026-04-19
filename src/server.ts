@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync, statSync } from 'node:fs'
+import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { PROFILE } from './constants.js'
+import { PROFILE, CCCOLLAB_RUN_DIR } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager } from './session.js'
@@ -179,7 +180,8 @@ async function ensureBroker(): Promise<number> {
 
   if (existing) removeRendezvous()
 
-  const lockFile = `/tmp/cccollab-broker-${PROFILE}.spawn.lock`
+  mkdirSync(CCCOLLAB_RUN_DIR, { recursive: true })
+  const lockFile = join(CCCOLLAB_RUN_DIR, `${PROFILE}.spawn.lock`)
   const STALE_LOCK_MS = 15_000
   let haveLock = false
   try {

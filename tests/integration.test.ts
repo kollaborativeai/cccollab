@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { SessionManager } from '../src/session.js'
 import { MessageBus } from '../src/message-bus.js'
 import { ActiveContext } from '../src/context.js'
@@ -11,7 +13,7 @@ import { handleTopicTool } from '../src/tools/topics.js'
 import type { ParsedMessage } from '../src/types.js'
 
 const PROFILE = `itest-${process.pid}`
-const RENDEZVOUS = `/tmp/cccollab-broker-${PROFILE}.json`
+const RENDEZVOUS = join(homedir(), '.cccollab', 'run', `${PROFILE}.json`)
 
 async function waitUntil<T>(fn: () => T | null, timeoutMs = 5000, intervalMs = 50): Promise<T> {
   const start = Date.now()
