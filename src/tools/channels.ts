@@ -1,5 +1,5 @@
 import type { SessionManager } from '../session.js'
-import type { ActiveContext } from '../context.js'
+import type { ActiveContext, ChannelSource } from '../context.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface ChannelToolDeps {
@@ -30,7 +30,8 @@ export function createChannelTools() {
   return [
     {
       name: 'list_channels',
-      description: 'Return subscribed channels as JSON array: [{name, source, subscriberCount, isActive}].',
+      description:
+        'Return all channels visible on the broker with subscription and active status. Returns {activeChannel, channels: [{name, subscriberCount, subscribed, source, isActive}]}. `source` is the ChannelSource for subscribed channels, null otherwise. `activeChannel` is your active channel name or null. Use this to discover channels you could join (subscribed:false) as well as those you are already in.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
     {
@@ -112,24 +113,56 @@ export async function handleChannelTool(
 
 async function handleListChannels(deps: ChannelToolDeps): Promise<string> {
   const subscribed = deps.context.getSubscribedChannels()
-  const counts = new Map<string, number>()
+  const subscribedByName = new Map(subscribed.map((c) => [c.name, c]))
+  const active = deps.context.getActiveChannel()
+
+  // Broker-global view: no sessionId param => returns ALL channels on the broker.
+  let brokerChannels: Array<{ name: string; subscriberCount: number }> = []
   try {
     const data = await brokerFetch<{ channels: Array<{ name: string; subscriberCount: number }> }>(
-      `${brokerBaseUrl(deps.brokerPort)}/channels?sessionId=${encodeURIComponent(deps.session.displayName)}`,
+      `${brokerBaseUrl(deps.brokerPort)}/channels`,
     )
-    for (const c of data.channels) counts.set(c.name, c.subscriberCount)
+    brokerChannels = data.channels
   } catch {
-    // Broker unreachable: fall back to 1 (at least this session).
+    // Broker unreachable: degrade gracefully to subscribed-only view below.
   }
 
-  const active = deps.context.getActiveChannel()
-  const result = subscribed.map((c) => ({
-    name: c.name,
-    source: c.source,
-    subscriberCount: counts.get(c.name) ?? 1,
-    isActive: c.name === active,
-  }))
-  return JSON.stringify(result)
+  const seen = new Set<string>()
+  const channels: Array<{
+    name: string
+    source: ChannelSource | null
+    subscriberCount: number
+    subscribed: boolean
+    isActive: boolean
+  }> = []
+
+  for (const c of brokerChannels) {
+    seen.add(c.name)
+    const sub = subscribedByName.get(c.name)
+    channels.push({
+      name: c.name,
+      source: sub ? sub.source : null,
+      subscriberCount: c.subscriberCount,
+      subscribed: sub !== undefined,
+      isActive: c.name === active,
+    })
+  }
+
+  // Locally-subscribed channels the broker didn't report (e.g. broker down,
+  // or a transient race): still surface them so the caller never "loses" a
+  // channel it knows it subscribed to.
+  for (const sub of subscribed) {
+    if (seen.has(sub.name)) continue
+    channels.push({
+      name: sub.name,
+      source: sub.source,
+      subscriberCount: 1,
+      subscribed: true,
+      isActive: sub.name === active,
+    })
+  }
+
+  return JSON.stringify({ activeChannel: active ?? null, channels })
 }
 
 async function handleJoinChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
