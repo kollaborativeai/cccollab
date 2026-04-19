@@ -222,7 +222,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           return
         }
         const added = joinChannel(sessionId, channel)
-        log(`CHANNEL JOIN: ${sessionId} -> #${channel}${added ? '' : ' (already)'}`)
+        log(`CHANNEL JOIN: ${sessionId} -> ${channel}${added ? '' : ' (already)'}`)
         jsonResponse(res, 200, {
           ok: true,
           channel,
@@ -246,7 +246,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           return
         }
         leaveChannel(sessionId, channel)
-        log(`CHANNEL LEAVE: ${sessionId} <- #${channel}`)
+        log(`CHANNEL LEAVE: ${sessionId} <- ${channel}`)
         jsonResponse(res, 200, { ok: true, channel })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -278,7 +278,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           ts: new Date().toISOString(),
         }
         broadcast(JSON.stringify(event))
-        log(`BROADCAST #${channel}: ${body.sender}: ${body.text}`)
+        log(`BROADCAST ${channel}: ${body.sender}: ${body.text}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -324,7 +324,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           ts: new Date().toISOString(),
         }
         broadcast(JSON.stringify(event))
-        log(`DM: ${body.from} -> ${body.to} via #${shared}`)
+        log(`DM: ${body.from} -> ${body.to} via ${shared}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -351,7 +351,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         for (const t of topics.values()) {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {
             jsonResponse(res, 409, {
-              error: `A topic named "${t.topic}" already exists in #${channel}. Join it instead, or use a different name.`,
+              error: `A topic named "${t.topic}" already exists in ${channel}. Join it instead, or use a different name.`,
               existing: { id: t.id, topic: t.topic, channel: t.channel, creator: t.creator, state: t.state, createdAt: t.createdAt },
             })
             return
@@ -373,7 +373,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         const topicData = { id, topic: body.topic, channel, creator: body.creator, state: 'active', createdAt }
         const event = { source: 'local' as const, type: 'topic_created' as const, channel, topic: topicData }
         broadcast(JSON.stringify(event))
-        log(`TOPIC CREATED #${channel}: ${id} "${body.topic}" by ${body.creator}`)
+        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${body.creator}`)
         jsonResponse(res, 200, topicData)
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -461,7 +461,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               ts,
             }
             broadcast(JSON.stringify(event))
-            log(`MESSAGE in ${id} (#${t.channel}): ${sender}: ${text}`)
+            log(`MESSAGE in ${id} (${t.channel}): ${sender}: ${text}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
@@ -477,7 +477,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               return
             }
             t.joinedSessions.add(sessionId)
-            log(`JOIN: ${sessionId} joined topic ${id} (#${t.channel})`)
+            log(`JOIN: ${sessionId} joined topic ${id} (${t.channel})`)
             jsonResponse(res, 200, { ok: true, channel: t.channel, messages: t.messages })
             return
           }

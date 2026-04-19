@@ -89,13 +89,13 @@ async function startServer(config: Config, brokerPort: number) {
     : 'introduce - set your name. This is REQUIRED before any topic/messaging tool will work. If the user has not specified a name for this session, ASK them what name to use (examples: "architect", "frontend", "reviewer").'
   const workflowSteps: string[] = []
   if (introduceStep) workflowSteps.push(introduceStep)
-  workflowSteps.push(`join_channel - subscribe to a channel if you need more than the default #${FALLBACK_CHANNEL}`)
+  workflowSteps.push(`join_channel - subscribe to another channel; you're always in "${FALLBACK_CHANNEL}" by default`)
   workflowSteps.push('start_topic or join_topic - create or join a conversation within a channel')
   workflowSteps.push('send_message_to_topic - send to your active topic')
   workflowSteps.push('send_message_to_channel - top-level broadcast to a channel')
 
   instructionLines.push(
-    `You are always subscribed to the #${FALLBACK_CHANNEL} channel as a sensible default.`,
+    `You are always subscribed to the "${FALLBACK_CHANNEL}" channel as a sensible default.`,
     '',
     'Workflow:',
     ...workflowSteps.map((s, i) => `${i + 1}. ${s}`),

@@ -62,13 +62,13 @@ export async function handleIdentityTool(
       lines.push(`Objective: ${objective ?? '(not set)'}`)
 
       const activeChannel = deps.context.getActiveChannel()
-      lines.push(`Active channel: ${activeChannel ? `#${activeChannel}` : '(none)'}`)
+      lines.push(`Active channel: ${activeChannel ? `"${activeChannel}"` : '(none)'}`)
 
       const activeTopic = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
       lines.push(
         activeTopic
-          ? `Active topic: "${activeTopic}"${activeTopicChannel ? ` in #${activeTopicChannel}` : ''}`
+          ? `Active topic: "${activeTopic}"${activeTopicChannel ? ` in "${activeTopicChannel}"` : ''}`
           : 'Active topic: (none)',
       )
 
@@ -78,7 +78,7 @@ export async function handleIdentityTool(
       } else {
         lines.push('Subscribed channels:')
         for (const c of channels) {
-          lines.push(`  #${c.name} (source: ${c.source})`)
+          lines.push(`  ${c.name} (source: ${c.source})`)
         }
       }
 

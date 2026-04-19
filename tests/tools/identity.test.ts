@@ -75,10 +75,10 @@ describe('Identity Tools', () => {
         const result = await handleIdentityTool('whoami', {}, deps)
         expect(result).toContain('Name: architect')
         expect(result).toContain('Objective: design the API')
-        expect(result).toContain('Active channel: #default')
-        expect(result).toContain('#default')
+        expect(result).toContain('Active channel: "default"')
+        expect(result).toContain('default')
         expect(result).toContain('fallback')
-        expect(result).toContain('#project_x')
+        expect(result).toContain('project_x')
         expect(result).toContain('manual')
       })
 
@@ -99,7 +99,7 @@ describe('Identity Tools', () => {
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = await handleIdentityTool('whoami', {}, deps)
         expect(result).toContain('Active topic: "Auth refactor"')
-        expect(result).toContain('#default')
+        expect(result).toContain('default')
       })
 
       it('returns guidance when no name has been set', async () => {

@@ -157,7 +157,7 @@ export class BrokerEventListener {
         }
         const msg: ParsedMessage = {
           sender: event.topic.creator,
-          text: `New topic in #${channel}: "${event.topic.topic}"`,
+          text: `New topic in "${channel}": "${event.topic.topic}"`,
           ts: event.topic.createdAt ?? new Date().toISOString(),
           channel,
           channelName: channel,

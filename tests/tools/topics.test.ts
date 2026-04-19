@@ -95,7 +95,7 @@ describe('Topic Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       const result = await handleTopicTool('list_topics', { channel: 'default' }, deps)
       expect(result).toContain('Auth design')
-      expect(result).toContain('#default')
+      expect(result).toContain('default')
       const calledUrl = mockFetch.mock.calls[0]![0] as string
       expect(calledUrl).toContain('channel=default')
     })
@@ -111,7 +111,7 @@ describe('Topic Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
 
       const result = await handleTopicTool('start_topic', { topic: 'DB migration' }, deps)
-      expect(result).toContain('Topic started in #default')
+      expect(result).toContain('Topic started in "default"')
       expect(deps.context.hasTopic()).toBe(true)
       expect(deps.context.getThreadTs()).toBe('uuid-new')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
@@ -136,7 +136,7 @@ describe('Topic Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 409,
-        json: () => Promise.resolve({ error: 'A topic named "DB migration" already exists in #default.' }),
+        json: () => Promise.resolve({ error: 'A topic named "DB migration" already exists in "default".' }),
       })
       vi.stubGlobal('fetch', mockFetch)
 
@@ -161,7 +161,7 @@ describe('Topic Tools', () => {
 
       const result = await handleTopicTool('join_topic', { topic: '11111111-2222-3333-4444-555555555555' }, deps)
       expect(result).toContain('Joined topic "Direct"')
-      expect(result).toContain('#default')
+      expect(result).toContain('default')
     })
 
     it('join_topic rejects UUID in unsubscribed channel', async () => {
@@ -189,7 +189,7 @@ describe('Topic Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       const result = await handleTopicTool('join_topic', { topic: 'auth' }, deps)
       expect(result).toContain('Multiple topics match')
-      expect(result).toContain('#default')
+      expect(result).toContain('default')
     })
 
     it('join_topic joins matching topic and shows history', async () => {
@@ -214,7 +214,7 @@ describe('Topic Tools', () => {
       const result = await handleTopicTool('join_topic', { topic: 'API' }, deps)
       expect(result).toContain('Joined topic')
       expect(result).toContain('API design')
-      expect(result).toContain('#default')
+      expect(result).toContain('default')
       expect(result).toContain('REST patterns')
       expect(deps.context.hasTopic()).toBe(true)
     })

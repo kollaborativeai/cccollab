@@ -229,7 +229,7 @@ export async function handleTopicTool(
       await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${threadTs}/leave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: deps.session.sessionName }),
+        body: JSON.stringify({ sessionId: deps.session.displayName }),
       })
       deps.context.leaveTopic(threadTs)
       return `Left topic "${topicName}".`
@@ -291,7 +291,7 @@ async function handleListTopics(
     const channel = normalizeChannelName(channelArg)
     if (!channel) return 'Error: channel name must be non-empty.'
     if (!deps.context.isChannelSubscribed(channel)) {
-      return `Not subscribed to #${channel}. Use join_channel first.`
+      return `Not subscribed to "${channel}". Use join_channel first.`
     }
     params.set('channel', channel)
   } else {
@@ -301,7 +301,7 @@ async function handleListTopics(
   const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
   const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
   if (data.topics.length === 0) {
-    return channelArg ? `No active topics in #${normalizeChannelName(channelArg)}.` : 'No active topics in your subscribed channels.'
+    return channelArg ? `No active topics in "${normalizeChannelName(channelArg)}".` : 'No active topics in your subscribed channels.'
   }
 
   const statusLabel: Record<string, string> = {
@@ -313,7 +313,7 @@ async function handleListTopics(
   for (const t of data.topics) {
     const joined = deps.context.isTopicJoined(t.id) ? ' <-- joined' : ''
     const active = t.id === activeThread ? ' (active)' : ''
-    lines.push(`  ${statusLabel[t.state] ?? `[${t.state}]`} #${t.channel} "${t.topic}" (${t.messageCount ?? 0} messages)${joined}${active}`)
+    lines.push(`  ${statusLabel[t.state] ?? `[${t.state}]`} ${t.channel} "${t.topic}" (${t.messageCount ?? 0} messages)${joined}${active}`)
   }
   return lines.join('\n')
 }
@@ -325,7 +325,7 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
     return 'No active channel. Join a channel first with join_channel, or pass a `channel` argument.'
   }
   if (!deps.context.isChannelSubscribed(channel)) {
-    return `Not subscribed to #${channel}. Use join_channel first.`
+    return `Not subscribed to "${channel}". Use join_channel first.`
   }
 
   const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/topics`, {
@@ -342,7 +342,7 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
   }
   const data = await res.json() as BrokerTopicData
   deps.context.joinTopic(data.id, topic, data.channel ?? channel)
-  return `Topic started in #${channel}: "${topic}". This is now your active topic.`
+  return `Topic started in "${channel}": "${topic}". This is now your active topic.`
 }
 
 async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
@@ -350,7 +350,7 @@ async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<stri
     const byId = await fetchTopicById(deps.brokerPort, topic)
     if (!byId) return `No topic with id "${topic}" found.`
     if (!deps.context.isChannelSubscribed(byId.channel)) {
-      return `Topic "${byId.topic}" is in channel #${byId.channel}, which you are not subscribed to. Use join_channel first.`
+      return `Topic "${byId.topic}" is in channel "${byId.channel}", which you are not subscribed to. Use join_channel first.`
     }
     return joinTopicByData(deps, byId)
   }
@@ -364,7 +364,7 @@ async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<stri
   if (!match) {
     if (ambiguous.length > 1) {
       const lines = [`Multiple topics match "${topic}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
+      for (const m of ambiguous) lines.push(`  ${m.channel} "${m.topic}"`)
       return lines.join('\n')
     }
     return `No active topic matching "${topic}" found in your subscribed channels.`
@@ -379,7 +379,7 @@ async function handleSetActiveTopic(deps: TopicToolDeps, topic: string): Promise
     return `No joined topic matching "${topic}". Use join_topic first.`
   }
   deps.context.joinTopic(found.threadTs, found.topicName, found.channel)
-  return `Active topic set to "${found.topicName}" (#${found.channel}).`
+  return `Active topic set to "${found.topicName}" ("${found.channel}").`
 }
 
 async function fetchTopicById(brokerPort: number, id: string): Promise<BrokerTopicData | null> {
@@ -399,12 +399,12 @@ async function joinTopicByData(deps: TopicToolDeps, topic: BrokerTopicData): Pro
   const joinData = await brokerFetch<BrokerJoinData>(joinUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: deps.session.sessionName }),
+    body: JSON.stringify({ sessionId: deps.session.displayName }),
   })
 
   deps.context.joinTopic(topic.id, topic.topic, topic.channel)
 
-  const lines = [`Joined topic "${topic.topic}" in #${topic.channel}. This is now your active topic.`, '', 'Topic history:']
+  const lines = [`Joined topic "${topic.topic}" in "${topic.channel}". This is now your active topic.`, '', 'Topic history:']
   for (const msg of joinData.messages) {
     lines.push(`  [${msg.sender}]: ${msg.text}`)
   }
@@ -449,7 +449,7 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
     const byId = await fetchTopicById(deps.brokerPort, topic)
     if (!byId || byId.state !== 'archived') return `No archived topic with id "${topic}".`
     if (!deps.context.isChannelSubscribed(byId.channel)) {
-      return `Topic "${byId.topic}" is in #${byId.channel}, which you are not subscribed to. Use join_channel first.`
+      return `Topic "${byId.topic}" is in "${byId.channel}", which you are not subscribed to. Use join_channel first.`
     }
     await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${byId.id}/unarchive`, {
       method: 'POST',
@@ -471,7 +471,7 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
   if (!match) {
     if (ambiguous.length > 1) {
       const lines = [`Multiple archived topics match "${topic}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
+      for (const m of ambiguous) lines.push(`  ${m.channel} "${m.topic}"`)
       return lines.join('\n')
     }
     return `No archived topic matching "${topic}" in your subscribed channels.`
@@ -491,7 +491,7 @@ async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Pro
     const channel = normalizeChannelName(channelArg)
     if (!channel) return 'Error: channel name must be non-empty.'
     if (!deps.context.isChannelSubscribed(channel)) {
-      return `Not subscribed to #${channel}. Use join_channel first.`
+      return `Not subscribed to "${channel}". Use join_channel first.`
     }
     params.set('channel', channel)
   }
@@ -508,7 +508,7 @@ async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Pro
   const lines = ['Visible sessions:']
   for (const s of visible) {
     const obj = s.objective ? ` - ${s.objective}` : ''
-    const channels = s.channels && s.channels.length > 0 ? ` (#${s.channels.join(', #')})` : ''
+    const channels = s.channels && s.channels.length > 0 ? ` (${s.channels.join(', ')})` : ''
     lines.push(`  ${s.name}${obj}${channels}`)
   }
   return lines.join('\n')
@@ -521,7 +521,7 @@ async function resolveTopicIdInSubscribedChannels(
     const byId = await fetchTopicById(deps.brokerPort, name)
     if (!byId) return { error: `No topic with id "${name}".` }
     if (!deps.context.isChannelSubscribed(byId.channel)) {
-      return { error: `Topic "${byId.topic}" is in #${byId.channel}, which you are not subscribed to.` }
+      return { error: `Topic "${byId.topic}" is in "${byId.channel}", which you are not subscribed to.` }
     }
     return { id: byId.id, topicName: byId.topic }
   }
@@ -533,7 +533,7 @@ async function resolveTopicIdInSubscribedChannels(
   if (!match) {
     if (ambiguous.length > 1) {
       const lines = [`Multiple topics match "${name}". Be more specific:`]
-      for (const m of ambiguous) lines.push(`  #${m.channel} "${m.topic}"`)
+      for (const m of ambiguous) lines.push(`  ${m.channel} "${m.topic}"`)
       return { error: lines.join('\n') }
     }
     return { error: `No active topic matching "${name}" in your subscribed channels.` }
