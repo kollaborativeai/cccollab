@@ -12,7 +12,7 @@ Real-time collaboration between Claude Code sessions via channels and threaded t
 - You are subscribed to one or more channels; exactly one is active.
 - Channels are created implicitly on first subscription and destroyed when the last subscriber leaves.
 - Topics live inside a channel. You cannot join a topic in a channel you are not subscribed to.
-- Fresh sessions subscribe to `#default` as a sensible fallback.
+- Fresh sessions subscribe to `default` as a sensible fallback.
 
 ## Before you use any tool
 
