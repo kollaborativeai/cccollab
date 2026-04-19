@@ -158,13 +158,35 @@ async function startServer(config: Config, brokerPort: number) {
     }
   })
 
-  const unregisterSession = () => {
-    if (!session.hasName()) return
-    fetch(`http://localhost:${brokerPort}/sessions/${encodeURIComponent(session.displayName)}`, { method: 'DELETE' })
-      .catch(() => { /* best-effort */ })
+  let shuttingDown = false
+  const shutdown = async (reason: string): Promise<never> => {
+    if (shuttingDown) {
+      await new Promise<void>(() => { /* let the in-flight shutdown finish */ })
+      process.exit(0)
+    }
+    shuttingDown = true
+    console.error(`[cccollab] Shutting down (${reason})...`)
+    if (session.hasName()) {
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 750)
+        await fetch(`http://localhost:${brokerPort}/sessions/${encodeURIComponent(session.displayName)}`, {
+          method: 'DELETE',
+          signal: controller.signal,
+        })
+        clearTimeout(timer)
+      } catch {
+        // Broker down or timed out - best-effort.
+      }
+    }
+    try { listener.stop() } catch { /* ignore */ }
+    process.exit(0)
   }
-  process.on('SIGTERM', () => { unregisterSession(); process.exit(0) })
-  process.on('SIGINT', () => { unregisterSession(); process.exit(0) })
+
+  process.on('SIGTERM', () => { void shutdown('SIGTERM') })
+  process.on('SIGINT', () => { void shutdown('SIGINT') })
+  process.stdin.on('end', () => { void shutdown('stdin end') })
+  process.stdin.on('close', () => { void shutdown('stdin close') })
 
   await mcp.connect(new StdioServerTransport())
   await listener.start()
@@ -241,13 +263,6 @@ async function main() {
   const config = loadConfig()
   const brokerPort = await ensureBroker()
   await startServer(config, brokerPort)
-
-  const cleanup = () => { console.error('[cccollab] Shutting down...'); process.exit(0) }
-  process.on('SIGINT', cleanup)
-  process.on('SIGTERM', cleanup)
-
-  process.stdin.on('end', cleanup)
-  process.stdin.on('close', cleanup)
 }
 
 main().catch((err) => { console.error('[cccollab] Fatal error:', err); process.exit(1) })
