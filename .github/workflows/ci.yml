@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -61,3 +64,74 @@ jobs:
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn build
+
+  release:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      !startsWith(github.event.head_commit.message, 'chore: bump version to')
+    needs: [format, lint, typecheck, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@flatoutsolutions'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Get next version
+        id: semver
+        uses: ietf-tools/semver-action@v1
+        with:
+          token: ${{ github.token }}
+          branch: main
+          minorList: feat, feature
+          patchList: fix, bugfix, perf, refactor, docs, style, test, build, ci, chore, revert
+          patchAll: true
+          noVersionBumpBehavior: silent
+          noNewCommitBehavior: silent
+
+      - name: Install
+        if: steps.semver.outputs.nextStrict != ''
+        run: yarn install --immutable
+
+      - name: Build
+        if: steps.semver.outputs.nextStrict != ''
+        run: yarn build
+
+      - name: Update version in package.json and plugin.json
+        if: steps.semver.outputs.nextStrict != ''
+        env:
+          VERSION: ${{ steps.semver.outputs.nextStrict }}
+        run: |
+          node -e "const fs=require('fs'); for (const f of ['./package.json','./plugin/.claude-plugin/plugin.json']) { const p=JSON.parse(fs.readFileSync(f,'utf8')); p.version=process.env.VERSION; fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n'); }"
+
+      - name: Publish
+        if: steps.semver.outputs.nextStrict != ''
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit, tag, and push
+        if: steps.semver.outputs.nextStrict != ''
+        env:
+          VERSION: ${{ steps.semver.outputs.nextStrict }}
+          TAG: ${{ steps.semver.outputs.next }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json plugin/.claude-plugin/plugin.json
+          git commit -m "chore: bump version to ${VERSION} [skip ci]"
+          git tag "${TAG}"
+          git push origin main --tags
