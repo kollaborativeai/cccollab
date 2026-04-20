@@ -348,34 +348,43 @@ describe('Dual transport: list_sessions merging', () => {
 // symbol transparently.
 vi.mock('../src/remote/auth.js', () => ({
   runAuthenticate: vi.fn(async () => ({
-    remoteUrl: 'https://example.convex.cloud',
-    userEmail: 'stefan@flatout.solutions',
+    locationName: 'remote',
+    url: 'https://example.convex.cloud',
   })),
 }))
 
+function makeDepsWithLocations(
+  transports: Transport[],
+  locations: Array<{ name: string; isLocal: boolean; url?: string }>,
+) {
+  const deps = makeDeps(transports)
+  return { ...deps, locations }
+}
+
 describe('authenticate tool', () => {
   beforeEach(async () => {
-    delete process.env.CCCOLLAB_REMOTE_URL
-    delete process.env.CCCOLLAB_HOSTED_URL
-    delete process.env.CCCOLLAB_AUTH_TOKEN
-    delete process.env.CCCOLLAB_AUTH_REFRESH_TOKEN
     const { runAuthenticate } = await import('../src/remote/auth.js')
     ;(runAuthenticate as unknown as ReturnType<typeof vi.fn>).mockClear()
   })
 
-  it('returns setup guidance when no remote URL is configured', async () => {
-    const deps = makeDeps([new FakeTransport('local')])
+  it('returns setup guidance when no non-local location is configured', async () => {
+    const deps = makeDepsWithLocations([new FakeTransport('local')], [{ name: 'local', isLocal: true }])
     const result = await handleIdentityTool('authenticate', {}, deps)
     expect(result).toContain('Remote mode is not configured')
-    expect(result).toContain('CCCOLLAB_REMOTE_URL')
   })
 
-  it('short-circuits when a valid token is already persisted and force is not set', async () => {
-    // Env-only "configured" state (no filesystem writes in this test).
-    process.env.CCCOLLAB_REMOTE_URL = 'https://example.convex.cloud'
-    process.env.CCCOLLAB_AUTH_TOKEN = 'existing-token'
-    process.env.CCCOLLAB_AUTH_REFRESH_TOKEN = 'existing-refresh'
-    const deps = makeDeps([new FakeTransport('local')])
+  it('short-circuits when a non-local transport is already enabled and force is not set', async () => {
+    // A remote transport is enabled in the router AND the config lists
+    // its URL. The authenticate tool should short-circuit.
+    const local = new FakeTransport('local')
+    const remote = new FakeTransport('remote')
+    const deps = makeDepsWithLocations(
+      [local, remote],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+    )
     const result = await handleIdentityTool('authenticate', {}, deps)
     expect(result).toContain('Already authenticated')
     expect(result).toContain('force')
@@ -383,15 +392,132 @@ describe('authenticate tool', () => {
     expect(runAuthenticate).not.toHaveBeenCalled()
   })
 
-  it('re-runs the OAuth flow when force: true, even with valid tokens persisted', async () => {
-    process.env.CCCOLLAB_REMOTE_URL = 'https://example.convex.cloud'
-    process.env.CCCOLLAB_AUTH_TOKEN = 'existing-token'
-    process.env.CCCOLLAB_AUTH_REFRESH_TOKEN = 'existing-refresh'
-    const deps = makeDeps([new FakeTransport('local')])
+  it('re-runs the OAuth flow when force: true, even with a live non-local transport', async () => {
+    const local = new FakeTransport('local')
+    const remote = new FakeTransport('remote')
+    const deps = makeDepsWithLocations(
+      [local, remote],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+    )
     const result = await handleIdentityTool('authenticate', { force: true }, deps)
     const { runAuthenticate } = await import('../src/remote/auth.js')
-    expect(runAuthenticate).toHaveBeenCalledWith({ remoteUrl: 'https://example.convex.cloud' })
+    expect(runAuthenticate).toHaveBeenCalledWith({
+      locationName: 'remote',
+      url: 'https://example.convex.cloud',
+    })
     expect(result).toContain('Signed in')
     expect(result).toContain('Restart your Claude Code session')
+  })
+
+  it('errors when location arg names an unknown location', async () => {
+    const local = new FakeTransport('local')
+    const deps = makeDepsWithLocations([local], [{ name: 'local', isLocal: true }])
+    const result = await handleIdentityTool('authenticate', { location: 'nope' }, deps)
+    expect(result).toContain('No non-local location named "nope" is configured')
+  })
+})
+
+/**
+ * Config-driven startup: given two locations + channels + topics in the
+ * resolved config, the server auto-subscribes to everything and applies
+ * the cascaded active state. This exercises the startup flow in
+ * `server.ts` at the unit level by simulating the auto-subscribe loop
+ * against two FakeTransports. A full end-to-end harness would spawn the
+ * broker; this keeps the test fast and deterministic.
+ */
+describe('Dual transport: config-driven startup', () => {
+  it('auto-subscribes to every channel and topic across both locations', async () => {
+    const local = new FakeTransport('local')
+    const remote = new FakeTransport('remote')
+
+    // Pre-register a topic on each side so the "joinTopic on existing"
+    // branch fires; another new topic name that doesn't exist triggers
+    // createTopic.
+    local.registerTopic({
+      id: '00000000-0000-4000-8000-000000000001',
+      topic: 'existing-local',
+      channel: 'dev',
+      creator: 'architect',
+      state: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+    })
+
+    const context = new ActiveContext()
+    const session = new SessionManager({ username: 'tester', cwd: '/tmp/proj' })
+    session.setName('architect')
+    const router = new TransportRouter([local, remote])
+
+    // Simulate resolve.ts' output.
+    const resolvedLocations = [
+      {
+        name: 'local',
+        isLocal: true,
+        channels: [
+          {
+            name: 'dev',
+            topics: [{ name: 'existing-local' }, { name: 'brand-new-local' }],
+          },
+        ],
+      },
+      {
+        name: 'remote',
+        isLocal: false,
+        url: 'https://example.convex.cloud',
+        channels: [
+          {
+            name: 'cccollab',
+            topics: [{ name: 'brand-new-remote' }],
+          },
+        ],
+      },
+    ]
+
+    // Replicate the auto-subscribe loop that server.ts runs.
+    for (const location of resolvedLocations) {
+      const transport = router.all().find((t) => t.source === location.name)
+      if (!transport || !transport.enabled) continue
+      for (const channel of location.channels) {
+        await transport.joinChannel({ sessionName: session.displayName, channel: channel.name })
+        context.joinChannel(channel.name, 'cccollab.json', location.name)
+        const existing = await transport.listTopics({
+          sessionName: session.displayName,
+          channel: channel.name,
+          includeArchived: false,
+        })
+        for (const topic of channel.topics) {
+          const found = existing.find((t) => t.topic.toLowerCase() === topic.name.toLowerCase())
+          if (found) {
+            await transport.joinTopic({ sessionName: session.displayName, topicId: found.id })
+            context.joinTopic(found.id, topic.name, channel.name, location.name)
+          } else {
+            const created = await transport.createTopic({
+              sessionName: session.displayName,
+              channel: channel.name,
+              topic: topic.name,
+            })
+            context.joinTopic(created.id, topic.name, channel.name, location.name)
+          }
+        }
+      }
+    }
+
+    // Every location's joinChannel fired once.
+    expect(local.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
+    expect(remote.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'cccollab' })
+
+    // Existing topic used joinTopic; new topic used createTopic.
+    expect(local.joinTopic).toHaveBeenCalledTimes(1)
+    expect(local.createTopic).toHaveBeenCalledTimes(1) // brand-new-local
+    expect(remote.createTopic).toHaveBeenCalledTimes(1) // brand-new-remote
+
+    // Context reflects both channel subscriptions tagged by location.
+    expect(context.isChannelSubscribed('dev', 'local')).toBe(true)
+    expect(context.isChannelSubscribed('cccollab', 'remote')).toBe(true)
+
+    // The last joined topic becomes active.
+    expect(context.hasTopic()).toBe(true)
   })
 })

@@ -5,7 +5,7 @@ import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
 import { openBrowser } from './browser.js'
-import { saveRemoteConfig, loadRemoteConfig, type RemoteConfig } from './config.js'
+import { saveLocationAuth } from '../config/save.js'
 
 // The remote mcp_server code compiles without a local reference to
 // `convex/_generated`, so we use `anyApi` (runtime-typed) for the auth
@@ -41,17 +41,23 @@ interface SignInResult {
 
 /**
  * Result of a successful `authenticate` flow. The tokens have already
- * been persisted to `~/.cccollab/config.json` with mode 0600; this
- * return is a summary so the caller can report back.
+ * been persisted to `~/.cccollab/config.json` under the named location
+ * with mode `0600`; this return is a summary so the caller can report
+ * back.
  */
 export interface AuthenticateResult {
-  remoteUrl: string
+  locationName: string
+  url: string
   userId?: string
   userEmail?: string
 }
 
 interface AuthenticateOptions {
-  remoteUrl: string
+  /** The location name the new tokens should be saved under in the
+   *  user-level config. */
+  locationName: string
+  /** Convex deployment URL for the location. */
+  url: string
   /** Called with the user-facing message printed BEFORE the browser
    *  opens. Tests inject a collector instead of stderr. */
   log?: (message: string) => void
@@ -59,35 +65,24 @@ interface AuthenticateOptions {
   openUrl?: (url: string) => Promise<void>
   /** Override the fetch used to call the Convex action; tests pass a
    *  mock client. Production path uses a freshly constructed
-   *  `ConvexHttpClient` against `remoteUrl`. */
+   *  `ConvexHttpClient` against `url`. */
   httpClient?: Pick<ConvexHttpClient, 'action'>
   /** Hard cap on how long we wait for the browser redirect. */
   timeoutMs?: number
 }
 
 /**
- * Run the Convex Auth "Google" OAuth flow from this Node process.
- *
- * Flow:
- * 1. Start an ephemeral HTTP listener on `127.0.0.1:<random>` that waits
- *    for `GET /cccollab-oauth-callback?code=<code>`.
- * 2. Call `api.auth.signIn({ provider: 'google', params: { redirectTo } })`
- *    on the remote deployment. This returns `{ redirect, verifier }` -
- *    the URL Google will show the user and a PKCE verifier we hold.
- * 3. Open the user's browser to `redirect`. Google handles the consent
- *    screen, Google posts back to Convex's callback, Convex redirects
- *    the user's browser to our loopback URL with `?code=...`.
- * 4. Exchange the code plus the verifier via a second `signIn` call;
- *    receive `{ tokens: { token, refreshToken } }`.
- * 5. Persist to `~/.cccollab/config.json` (mode 0600) and return.
- *
- * The flow aborts cleanly on timeout, user cancel (listener gets a
- * different path), or any auth error.
+ * Run the Convex Auth "Google" OAuth flow from this Node process
+ * against a single named location. See the module-level JSDoc of the
+ * prior single-location variant for protocol details; the only
+ * difference from that version is that tokens are persisted via
+ * `saveLocationAuth(locationName, ...)` so one user-level file can
+ * hold credentials for multiple locations side by side.
  */
 export async function runAuthenticate(options: AuthenticateOptions): Promise<AuthenticateResult> {
   const log = options.log ?? ((m) => process.stderr.write(`[cccollab] ${m}\n`))
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000
-  const client = options.httpClient ?? new ConvexHttpClient(options.remoteUrl)
+  const client = options.httpClient ?? new ConvexHttpClient(options.url)
   const openUrl = options.openUrl ?? openBrowser
 
   const listener = await startLoopbackListener(timeoutMs)
@@ -140,22 +135,17 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
     throw new Error('Convex signIn did not return tokens')
   }
 
-  const existing = loadRemoteConfig()
-  const cfg: RemoteConfig = {
-    remoteUrl: options.remoteUrl,
+  saveLocationAuth(options.locationName, {
+    url: options.url,
     accessToken: second.tokens.token,
     refreshToken: second.tokens.refreshToken,
-    userEmail: existing?.userEmail,
-    userId: existing?.userId,
     updatedAt: Date.now(),
-  }
-  saveRemoteConfig(cfg)
+  })
 
-  log(`Signed in. Remote transport is now available.`)
+  log(`Signed in. Remote transport for "${options.locationName}" is now available.`)
   return {
-    remoteUrl: cfg.remoteUrl,
-    userEmail: cfg.userEmail,
-    userId: cfg.userId,
+    locationName: options.locationName,
+    url: options.url,
   }
 }
 

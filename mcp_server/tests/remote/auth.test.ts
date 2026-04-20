@@ -1,35 +1,40 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // Redirect HOME before importing the modules so config writes land in
-// a tmp directory. See tests/remote/config.test.ts for the rationale.
+// a tmp directory.
 const TMP_HOME = mkdtempSync(join(tmpdir(), 'cccollab-auth-test-'))
 process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
 const { runAuthenticate } = await import('../../src/remote/auth.js')
-const { loadRemoteConfig, clearRemoteConfig } = await import('../../src/remote/config.js')
+const { clearUserConfig } = await import('../../src/config/save.js')
+const { CCCOLLAB_CONFIG_FILE } = await import('../../src/constants.js')
+
+function loadPersistedLocation(name: string): { accessToken?: string; refreshToken?: string; url?: string } | null {
+  if (!existsSync(CCCOLLAB_CONFIG_FILE)) return null
+  const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
+  return content?.locations?.[name] ?? null
+}
 
 describe('runAuthenticate', () => {
   beforeEach(() => {
-    clearRemoteConfig()
+    clearUserConfig()
     delete process.env.CCCOLLAB_REMOTE_URL
-    delete process.env.CCCOLLAB_HOSTED_URL
     delete process.env.CCCOLLAB_AUTH_TOKEN
-    delete process.env.CCCOLLAB_AUTH_REFRESH_TOKEN
   })
 
   afterEach(() => {
-    clearRemoteConfig()
+    clearUserConfig()
   })
 
   afterAll(() => {
     rmSync(TMP_HOME, { recursive: true, force: true })
   })
 
-  it('completes the two-step flow and persists tokens', async () => {
+  it('completes the two-step flow and persists tokens under the given location name', async () => {
     const action = vi
       .fn()
       .mockImplementationOnce(async () => ({
@@ -55,20 +60,23 @@ describe('runAuthenticate', () => {
 
     const log: string[] = []
     const result = await runAuthenticate({
-      remoteUrl: 'https://wonderful-narwhal-409.convex.cloud',
+      locationName: 'flatout',
+      url: 'https://wonderful-narwhal-409.convex.cloud',
       httpClient: { action } as never,
       openUrl,
       log: (m) => log.push(m),
       timeoutMs: 5_000,
     })
 
-    expect(result.remoteUrl).toBe('https://wonderful-narwhal-409.convex.cloud')
+    expect(result.locationName).toBe('flatout')
+    expect(result.url).toBe('https://wonderful-narwhal-409.convex.cloud')
     expect(action).toHaveBeenCalledTimes(2)
 
-    const persisted = loadRemoteConfig()
+    const persisted = loadPersistedLocation('flatout')
     expect(persisted).not.toBeNull()
     expect(persisted!.accessToken).toBe('new-access')
     expect(persisted!.refreshToken).toBe('new-refresh')
+    expect(persisted!.url).toBe('https://wonderful-narwhal-409.convex.cloud')
     // Log must not leak tokens
     expect(log.join('\n')).not.toContain('new-access')
     expect(log.join('\n')).not.toContain('new-refresh')
@@ -87,14 +95,15 @@ describe('runAuthenticate', () => {
 
     await expect(
       runAuthenticate({
-        remoteUrl: 'https://example.convex.cloud',
+        locationName: 'flatout',
+        url: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},
         timeoutMs: 5_000,
       }),
     ).rejects.toThrow(/did not return tokens/)
-    expect(loadRemoteConfig()).toBeNull()
+    expect(loadPersistedLocation('flatout')).toBeNull()
   })
 
   it('rejects when the first signIn call fails', async () => {
@@ -104,7 +113,8 @@ describe('runAuthenticate', () => {
     })
     await expect(
       runAuthenticate({
-        remoteUrl: 'https://example.convex.cloud',
+        locationName: 'flatout',
+        url: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},
@@ -122,7 +132,8 @@ describe('runAuthenticate', () => {
 
     await expect(
       runAuthenticate({
-        remoteUrl: 'https://example.convex.cloud',
+        locationName: 'flatout',
+        url: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},

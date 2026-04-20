@@ -1,91 +1,99 @@
-import type { ChannelLocation, Transport } from './index.js'
+import { LOCAL_LOCATION, type ChannelLocation, type Transport } from './index.js'
 
 /**
  * Per-call routing of tool operations across the set of enabled
- * transports.
+ * transports. The router owns a `Map<locationName, Transport>` - the
+ * set of names is whatever the resolved config declared under
+ * `locations`, plus the always-present `"local"`.
  *
- * Every tool handler that used to receive a single `Transport` now
- * receives a `TransportRouter`. Rules:
+ * Every tool handler that used to pick a single transport now picks
+ * by location name via `get(name)` or by topic id via `getByTopicId`.
+ * List tools iterate `enabled()` and union the results, tagging each
+ * row with its source location name.
  *
- * - Channel-addressed ops (`join_channel`, `leave_channel`,
- *   `send_message_to_channel`, `set_active_channel`, `list_topics`
- *   scoped to a channel, `start_topic`) pick a transport via
- *   `getByLocation(args.location ?? 'local')`. Default is `'local'`.
- *
- * - Topic-addressed ops (`join_topic` by id, `leave_topic`,
- *   `archive_topic`, `unarchive_topic`, `send_message_to_topic`) pick a
- *   transport by asking each enabled transport `hasTopic(topicId)` and
- *   dispatching to the one that owns it.
- *
- * - List ops (`list_channels`, `list_sessions`, `list_topics` without a
- *   channel) iterate across every enabled transport via `enabled()`
- *   and the tool layer merges the results, tagging each row with its
- *   `location`.
- *
- * - Session-addressed ops (`send_message_to_session`) prefer the local
- *   transport when both know the recipient; see
- *   `src/tools/topics.ts` for the exact routing.
- *
- * The router is a thin wrapper over an array of transports. It does
- * NOT own any transport lifecycle state - the array is constructed
- * once at startup in `server.ts` and passed into the tool layer. A
- * transport that has flipped `enabled = false` via graceful
- * degradation is still in the array but will be skipped by
- * `enabled()` and refused by `getByLocation` / `getByTopicId` with a
- * structured error.
+ * The router is a thin façade over the map. It does NOT own any
+ * transport lifecycle state - the map is constructed once at startup
+ * in `server.ts`. A transport that has flipped `enabled = false` via
+ * graceful degradation is still in the map but will be skipped by
+ * `enabled()` and refused by `get` / `getByTopicId` with a structured
+ * error.
  */
 export class TransportRouter {
-  private readonly transports: Transport[]
+  private readonly transports: Map<string, Transport>
 
-  constructor(transports: Transport[]) {
-    this.transports = transports
+  constructor(transports: Iterable<Transport> | Map<string, Transport>) {
+    if (transports instanceof Map) {
+      this.transports = new Map(transports)
+    } else {
+      this.transports = new Map()
+      for (const t of transports) {
+        if (this.transports.has(t.source)) {
+          throw new Error(`TransportRouter: duplicate location name "${t.source}".`)
+        }
+        this.transports.set(t.source, t)
+      }
+    }
   }
 
-  /** Every enabled transport, in construction order. */
+  /** Every enabled transport, in map insertion order. */
   enabled(): Transport[] {
-    return this.transports.filter((t) => t.enabled)
+    return [...this.transports.values()].filter((t) => t.enabled)
   }
 
-  /** The full list, including disabled transports. Used rarely: e.g.
-   *  for shutdown hooks that must still call `deregisterSession` on
-   *  transports that self-disabled. */
+  /** The full list, including disabled transports. Used for shutdown
+   *  hooks that must still call `deregisterSession` on transports that
+   *  self-disabled. */
   all(): Transport[] {
-    return [...this.transports]
+    return [...this.transports.values()]
   }
 
-  /** Is the remote transport configured and currently enabled? Used by
-   *  `whoami` to surface the "remote sync is off" status when graceful
-   *  degradation has tripped. */
+  /** Is a location with the given name configured? Enabled state does
+   *  not affect this - a degraded transport still counts as configured. */
+  has(name: string): boolean {
+    return this.transports.has(name)
+  }
+
+  /** All configured location names, in insertion order. */
+  names(): string[] {
+    return [...this.transports.keys()]
+  }
+
+  /** Is any non-local transport enabled? Used by `server.ts` to decide
+   *  whether to add the "remote mode is active" line to the MCP
+   *  instructions block. */
   hasRemote(): boolean {
-    return this.transports.some((t) => t.source === 'remote' && t.enabled)
+    for (const t of this.transports.values()) {
+      if (t.source !== LOCAL_LOCATION && t.enabled) return true
+    }
+    return false
   }
 
-  /** Is the remote transport configured at all (regardless of enabled
-   *  state)? `true` when the session started with remote credentials,
-   *  even if the transport has since self-disabled. */
+  /** Is any non-local transport configured (regardless of enabled
+   *  state)? Mirrors `hasRemote` but for `whoami`-style reporting that
+   *  should still surface a configured-but-degraded state. */
   hasRemoteConfigured(): boolean {
-    return this.transports.some((t) => t.source === 'remote')
+    for (const t of this.transports.values()) {
+      if (t.source !== LOCAL_LOCATION) return true
+    }
+    return false
   }
 
   /**
-   * Return the transport for the given channel location, or throw a
-   * user-facing error if that transport isn't available. Called by
-   * every channel-addressed tool.
+   * Return the transport for the given location name, or throw a
+   * user-facing error. Disabled transports surface a distinct message
+   * so the caller can distinguish "never configured" from "degraded".
    */
-  getByLocation(location: ChannelLocation): Transport {
-    const match = this.transports.find((t) => t.source === location)
+  get(location: ChannelLocation): Transport {
+    const match = this.transports.get(location)
     if (match === undefined) {
-      throw new Error(
-        location === 'remote'
-          ? 'Remote mode is not configured. Call the `authenticate` tool to sign in, or set CCCOLLAB_REMOTE_URL.'
-          : 'Local broker is not available.',
-      )
+      const known = this.names().join(', ')
+      throw new Error(`Location "${location}" is not configured. Configured locations: ${known}.`)
     }
     if (!match.enabled) {
       throw new Error(
-        location === 'remote'
-          ? 'Remote sync is degraded for this session. Restart your Claude Code session (or re-authenticate) to restore it.'
-          : 'Local transport is disabled.',
+        match.source === LOCAL_LOCATION
+          ? 'Local transport is disabled.'
+          : `Location "${location}" is degraded for this session. Restart your Claude Code session (or re-authenticate) to restore it.`,
       )
     }
     return match
@@ -96,19 +104,17 @@ export class TransportRouter {
    * enabled transport `hasTopic`. Throws if none claim ownership - the
    * tool layer surfaces that as a "topic not found" error to the caller.
    *
-   * When both transports claim the id (can't happen in practice given
-   * disjoint id spaces, but the interface permits it) we prefer
-   * `'local'` to match the dedup-friendly routing used for DMs.
+   * When multiple transports claim the id (can't happen in practice
+   * given disjoint id spaces, but the interface permits it) prefer
+   * the first enabled one in insertion order. The router's caller
+   * constructs transports in a deterministic order so the tie-break
+   * is stable across runs.
    */
   getByTopicId(topicId: string): Transport {
     const enabled = this.enabled()
     const owners = enabled.filter((t) => t.hasTopic(topicId))
     if (owners.length === 0) {
       throw new Error(`No transport owns topic id "${topicId}".`)
-    }
-    if (owners.length > 1) {
-      const local = owners.find((t) => t.source === 'local')
-      if (local) return local
     }
     return owners[0]!
   }

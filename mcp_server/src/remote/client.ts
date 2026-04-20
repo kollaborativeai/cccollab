@@ -2,16 +2,33 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import { loadRemoteConfig, saveRemoteConfig, type RemoteConfig } from './config.js'
+import { saveLocationAuth } from '../config/save.js'
 
 /** See `remote/auth.ts` for rationale on runtime-typed action references. */
 const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as FunctionReference<'action'>
 
+export interface RemoteClientInit {
+  /** Location name (the key under `locations` in the resolved config).
+   *  Used when persisting refreshed tokens via `saveLocationAuth`. */
+  locationName: string
+  /** Convex deployment URL for this location. */
+  url: string
+  /** Current access token (JWT). May be empty on first use; callers
+   *  that see an empty string should not construct a client. */
+  accessToken: string
+  /** Current refresh token (single-use per Convex Auth docs). */
+  refreshToken: string
+  /** Optional extra fields preserved through refresh roundtrips so the
+   *  persisted config retains a coherent identity. */
+  userEmail?: string
+  userId?: string
+}
+
 /**
- * Create a `ConvexClient` for the remote transport, wired with an
- * `AuthTokenFetcher` that refreshes the access token via the Convex
- * Auth `signIn({ refreshToken })` path when Convex signals the token
- * has expired.
+ * Construct a `ConvexClient` for a single remote location, wired with
+ * an `AuthTokenFetcher` that refreshes the access token via the Convex
+ * Auth `signIn({ refreshToken })` path when the server signals the
+ * token has expired.
  *
  * Critical invariant for token refresh (per Convex Auth docs): the
  * refresh token is SINGLE-USE. After a successful refresh we MUST
@@ -19,12 +36,14 @@ const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as F
  * reusing an old refresh token invalidates the entire session on the
  * server side. This factory serialises refresh calls through a single
  * pending promise so we never issue two refreshes for the same stored
- * refresh token.
+ * refresh token. The persisted update goes through `saveLocationAuth`
+ * so the user-level file's other locations and top-level fields are
+ * preserved.
  */
-export function createRemoteClient(initialConfig: RemoteConfig): ConvexClient {
-  const client = new ConvexClient(initialConfig.remoteUrl)
-  let currentAccessToken = initialConfig.accessToken
-  let currentRefreshToken = initialConfig.refreshToken
+export function createRemoteClient(init: RemoteClientInit): ConvexClient {
+  const client = new ConvexClient(init.url)
+  let currentAccessToken = init.accessToken
+  let currentRefreshToken = init.refreshToken
   let refreshInFlight: Promise<string | null> | null = null
 
   client.setAuth(async ({ forceRefreshToken }) => {
@@ -34,7 +53,7 @@ export function createRemoteClient(initialConfig: RemoteConfig): ConvexClient {
     if (refreshInFlight !== null) return await refreshInFlight
     refreshInFlight = (async () => {
       try {
-        const next = await refreshTokens(initialConfig.remoteUrl, currentRefreshToken)
+        const next = await refreshTokens(init.url, currentRefreshToken)
         if (next === null) {
           // Refresh failed: clear in-memory tokens and surface null so
           // Convex flips to unauthenticated. The caller (remote
@@ -45,10 +64,12 @@ export function createRemoteClient(initialConfig: RemoteConfig): ConvexClient {
         }
         currentAccessToken = next.accessToken
         currentRefreshToken = next.refreshToken
-        saveRemoteConfig({
-          ...initialConfig,
+        saveLocationAuth(init.locationName, {
+          url: init.url,
           accessToken: next.accessToken,
           refreshToken: next.refreshToken,
+          userEmail: init.userEmail,
+          userId: init.userId,
           updatedAt: Date.now(),
         })
         return next.accessToken
@@ -85,17 +106,4 @@ async function refreshTokens(remoteUrl: string, refreshToken: string): Promise<R
     // ConvexHttpClient holds no connection state; nothing to close.
     void http
   }
-}
-
-/**
- * Rewrite of `createRemoteClient` that sources its initial state from
- * disk via `loadRemoteConfig()`. Returns `null` when remote mode is
- * not configured (no URL, or no tokens). Used by `server.ts` at
- * startup.
- */
-export function createRemoteClientIfConfigured(): ConvexClient | null {
-  const cfg = loadRemoteConfig()
-  if (cfg === null) return null
-  if (cfg.accessToken === '' || cfg.refreshToken === '') return null
-  return createRemoteClient(cfg)
 }

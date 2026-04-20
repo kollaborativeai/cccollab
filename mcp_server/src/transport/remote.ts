@@ -76,7 +76,7 @@ const DEGRADATION_THRESHOLD = 3
  * restart or successful `authenticate` is required.
  */
 export class RemoteTransport implements Transport {
-  readonly source = 'remote' as const
+  readonly source: string
   enabled = true
 
   private readonly client: ConvexClient
@@ -92,9 +92,10 @@ export class RemoteTransport implements Transport {
    *  source of truth lives server-side. */
   private readonly knownTopicIds = new Set<string>()
 
-  constructor(opts: { client: ConvexClient; log?: (m: string) => void }) {
+  constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
-    this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.remote] ${m}\n`))
+    this.source = opts.source ?? 'remote'
+    this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.${this.source}] ${m}\n`))
   }
 
   /** Human-readable reason the transport self-disabled, or null. */
@@ -594,8 +595,24 @@ function isFunctionNotFoundError(err: unknown): boolean {
   return name === 'FunctionNotFoundError' || /Could not find.*function/i.test(msg) || /function not found/i.test(msg)
 }
 
+/**
+ * Detect whether an error thrown by the Convex client reflects an
+ * authentication failure. Prefer structured signals; fall back to
+ * message parsing only as a last resort.
+ *
+ * Our Convex backend throws `ConvexError({code: 'UNAUTHENTICATED', ...})`
+ * via the `authenticatedQuery` / `authenticatedMutation` wrappers
+ * (`convex/utils/auth.ts`), which serialises to the client as
+ * `err.data.code === 'UNAUTHENTICATED'`. That is the stable signal.
+ * Some Convex Auth paths surface an `UnauthenticatedError` name on the
+ * Error object - check that too. The string pattern is kept as a third
+ * safety net for auth failures that escape via raw messages.
+ */
 function isAuthError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false
-  const msg = err.message
-  return /unauthenticated|not signed in|invalid token|expired/i.test(msg)
+  if (extractConvexErrorCode(err) === 'UNAUTHENTICATED') return true
+  if (err instanceof Error && err.name === 'UnauthenticatedError') return true
+  if (err instanceof Error && /unauthenticated|not signed in|invalid token|expired/i.test(err.message)) {
+    return true
+  }
+  return false
 }

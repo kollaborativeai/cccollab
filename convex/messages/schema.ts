@@ -9,7 +9,7 @@ import { v } from 'convex/values'
  * - `kind: "topic"` - a message inside a topic. `topicId` and `channelId`
  *   are both set. `channelId` is denormalised from the parent topic to
  *   keep the `by_channel_and_ts` index useful for a channel-wide feed
- *   (needed by the hosted transport's per-channel subscription). The
+ *   (needed by the remote transport's per-channel subscription). The
  *   mutation that inserts a topic message is responsible for keeping
  *   `channelId` consistent with `topicId`'s `channelId`; readers can and
  *   should assume the invariant holds.
@@ -27,7 +27,7 @@ import { v } from 'convex/values'
  *   reactive subscription).
  * - `by_channel_and_ts` - per-channel chronological feed for channel-wide
  *   views. Topic messages surface here via their denormalised `channelId`.
- * - `by_toSessionId_and_ts` - the recipient's DM inbox. The hosted
+ * - `by_toSessionId_and_ts` - the recipient's DM inbox. The remote
  *   transport subscribes to this index to push DMs reactively without
  *   scanning the whole messages table.
  *

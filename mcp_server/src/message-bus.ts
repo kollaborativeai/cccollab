@@ -4,10 +4,13 @@ import type { ParsedMessage } from './types.js'
 
 /**
  * Source tag attached to inbound events as they flow through the bus.
- * Local = from the in-process broker's SSE stream; remote = from a
- * Convex reactive subscription.
+ * `"local"` marks events from the in-process broker's SSE stream;
+ * other values are location names from the resolved config for events
+ * arriving via remote transports' Convex subscriptions. Any name the
+ * user configured under `locations` is valid here, not just a fixed
+ * pair.
  */
-export type MessageSource = 'local' | 'remote'
+export type MessageSource = string
 
 /**
  * Window in which two events with the same dedup key are considered

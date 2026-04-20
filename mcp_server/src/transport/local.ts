@@ -21,7 +21,7 @@ import {
  * commit A; commit B folds it under this abstraction.
  */
 export class LocalTransport implements Transport {
-  readonly source = 'local' as const
+  readonly source = 'local'
   enabled = true
 
   constructor(private readonly brokerPort: number) {}

@@ -87,4 +87,52 @@ describe('RemoteTransport graceful degradation', () => {
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/3 failures/)
   })
+
+  it('trips immediately on a ConvexError with code UNAUTHENTICATED (structured auth signal)', async () => {
+    // Our convex/utils/auth.ts throws `ConvexError({code: "UNAUTHENTICATED", ...})`
+    // via authenticatedQuery/authenticatedMutation. The serialised error
+    // surfaces on the client as `err.data = {code, message}`. The auth-
+    // error detector must prefer this structured signal over any text
+    // pattern.
+    class ConvexAuthError extends Error {
+      readonly data = { code: 'UNAUTHENTICATED', message: 'Sign-in required.' }
+      constructor() {
+        super('Convex error: Sign-in required.')
+      }
+    }
+    const { client } = makeStubClient(async () => {
+      throw new ConvexAuthError()
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/authentication failed/i)
+  })
+
+  it('trips immediately on an Error named UnauthenticatedError', async () => {
+    class UnauthenticatedError extends Error {
+      constructor() {
+        super('Some opaque message')
+        this.name = 'UnauthenticatedError'
+      }
+    }
+    const { client } = makeStubClient(async () => {
+      throw new UnauthenticatedError()
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/authentication failed/i)
+  })
+
+  it('falls back to message regex for bare auth errors that lack structured fields', async () => {
+    const { client } = makeStubClient(async () => {
+      throw new Error('Token has expired, please re-authenticate.')
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/authentication failed/i)
+  })
 })

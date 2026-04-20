@@ -34,7 +34,7 @@ export const listAll = authenticatedQuery({
 /**
  * Channels the caller has subscribed to (user-level, across sessions).
  *
- * This is the hosted equivalent of the caller's "my channels" list -
+ * This is the remote equivalent of the caller's "my channels" list -
  * reactive, so a join on one session surfaces instantly in another.
  */
 export const listForUser = authenticatedQuery({

@@ -1,55 +1,18 @@
 import type { ActiveContext } from '../context.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
+import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
-import { loadRemoteConfig } from '../remote/config.js'
 import { runAuthenticate } from '../remote/auth.js'
 
 export interface IdentityToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
-}
-
-export function createIdentityTools() {
-  return [
-    {
-      name: 'introduce',
-      description:
-        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers your identity on every enabled transport. Returns JSON.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          name: {
-            type: 'string' as const,
-            description: 'Your display name (e.g., "architect", "frontend", "reviewer")',
-          },
-          objective: { type: 'string' as const, description: 'What you are currently working on (optional)' },
-        },
-        required: ['name'],
-      },
-    },
-    {
-      name: 'whoami',
-      description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], remote?: {configured, enabled, degradation?}}.',
-      inputSchema: { type: 'object' as const, properties: {} },
-    },
-    {
-      name: 'authenticate',
-      description:
-        'Start or refresh the Google OAuth flow against a configured remote cccollab deployment. Writes tokens to ~/.cccollab/config.json and requires a Claude Code session restart to take effect for this session. Returns a human-readable confirmation or setup guidance if no CCCOLLAB_REMOTE_URL is set.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          force: {
-            type: 'boolean' as const,
-            description: 'Force a fresh sign-in even if a valid token is already persisted. Defaults to false.',
-          },
-        },
-      },
-    },
-  ]
+  /** Optional view of the resolved config used by `authenticate` to
+   *  find a URL for a given location name. When omitted, `authenticate`
+   *  falls back to reading the transport URL from the router. */
+  locations?: Array<{ name: string; isLocal: boolean; url?: string }>
 }
 
 export async function handleIdentityTool(
@@ -77,10 +40,10 @@ export async function handleIdentityTool(
       }
 
       // Channel joins go per-location: each subscribed channel has its
-      // own transport and the router picks the matching one.
+      // own transport and the router picks the matching one by name.
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
-          const transport = deps.router.getByLocation(ch.location)
+          const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
         } catch {
           // Non-fatal.
@@ -126,8 +89,8 @@ export async function handleIdentityTool(
       })
     }
     case 'authenticate': {
-      const { force } = args as { force?: boolean }
-      return handleAuthenticate(deps, force === true)
+      const { location, force } = args as { location?: string; force?: boolean }
+      return handleAuthenticate(deps, location, force === true)
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)
@@ -136,41 +99,70 @@ export async function handleIdentityTool(
 
 function buildRemoteState(router: TransportRouter): Record<string, unknown> | null {
   if (!router.hasRemoteConfigured()) return null
-  const remote = router.all().find((t) => t.source === 'remote') as RemoteTransport | undefined
+  // Report the first non-local transport's state. In the multi-location
+  // world a richer shape (per-location status map) makes sense; keep
+  // the single-flag shape today so `whoami` stays readable.
+  const remote = router.all().find((t) => t.source !== LOCAL_LOCATION) as RemoteTransport | undefined
   if (!remote) return { configured: false, enabled: false }
   return {
     configured: true,
+    location: remote.source,
     enabled: remote.enabled,
     ...(remote.degradation ? { degradation: remote.degradation } : {}),
   }
 }
 
-async function handleAuthenticate(deps: IdentityToolDeps, force: boolean): Promise<string> {
-  // Resolve the remote URL from the canonical config (which already
-  // reads CCCOLLAB_REMOTE_URL env var with backwards-compat for the
-  // legacy CCCOLLAB_HOSTED_URL var, plus the persisted file).
-  const cfg = loadRemoteConfig()
-  const remoteUrl = cfg?.remoteUrl
+async function handleAuthenticate(
+  deps: IdentityToolDeps,
+  locationArg: string | undefined,
+  force: boolean,
+): Promise<string> {
+  // Resolve the target location name:
+  //   1. explicit arg -> must match a known non-local location
+  //   2. else the single non-local location configured -> use it
+  //   3. else the first enabled non-local transport -> use it
+  //   4. else setup guidance
+  const nonLocalLocations = (deps.locations ?? []).filter((l) => !l.isLocal)
+  let targetName: string | undefined
+  if (locationArg !== undefined && locationArg !== '') {
+    const match = nonLocalLocations.find((l) => l.name === locationArg)
+    if (!match) {
+      const known = nonLocalLocations.map((l) => l.name).join(', ') || '(none)'
+      return `No non-local location named "${locationArg}" is configured. Known non-local locations: ${known}.`
+    }
+    targetName = match.name
+  } else if (nonLocalLocations.length === 1) {
+    targetName = nonLocalLocations[0]!.name
+  } else if (nonLocalLocations.length > 1) {
+    const enabled = deps.router.all().find((t) => t.source !== LOCAL_LOCATION && t.enabled)
+    if (enabled) targetName = enabled.source
+  }
 
-  if (!remoteUrl) {
+  if (!targetName) {
     return (
       'Remote mode is not configured.\n\n' +
-      "Set CCCOLLAB_REMOTE_URL to your cccollab deployment's Convex URL " +
-      '(e.g. https://wonderful-narwhal-409.convex.cloud) and call this ' +
-      'tool again to sign in.'
+      'Set CCCOLLAB_REMOTE_URL to a Convex deployment URL ' +
+      '(e.g. https://wonderful-narwhal-409.convex.cloud) or add a location with a `url` ' +
+      'under `locations` in ~/.cccollab/config.json, then call this tool again.'
     )
   }
 
-  if (!force && cfg && cfg.accessToken !== '' && cfg.refreshToken !== '') {
-    const who = cfg.userEmail ? ` as ${cfg.userEmail}` : ''
-    return `Already authenticated${who}. Pass force: true to re-authenticate. (Restart your Claude Code session if the remote transport isn't active yet.)`
+  const locationInfo = nonLocalLocations.find((l) => l.name === targetName)
+  const url = locationInfo?.url
+  if (!url) {
+    return `Location "${targetName}" has no URL. Add a \`url\` under \`locations.${targetName}\` in ~/.cccollab/config.json.`
+  }
+
+  // If we're not forcing a re-auth and a transport exists and is
+  // enabled, short-circuit: tokens are already live.
+  const existingTransport: Transport | undefined = deps.router.all().find((t) => t.source === targetName)
+  if (!force && existingTransport?.enabled === true) {
+    return `Already authenticated to "${targetName}". Pass force: true to re-authenticate. (Restart your Claude Code session if needed.)`
   }
 
   try {
-    const result = await runAuthenticate({ remoteUrl })
-    const who = result.userEmail ? ` as ${result.userEmail}` : ''
-    void deps // deps unused in the happy path; kept to preserve the tool's handler shape
-    return `Signed in${who}. Restart your Claude Code session for the remote transport to take effect.`
+    const result = await runAuthenticate({ locationName: targetName, url })
+    return `Signed in to "${result.locationName}". Restart your Claude Code session for the remote transport to take effect.`
   } catch (err) {
     return `Authentication failed: ${err instanceof Error ? err.message : String(err)}`
   }

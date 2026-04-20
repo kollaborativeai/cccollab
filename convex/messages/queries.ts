@@ -4,9 +4,9 @@ import { authenticatedQuery } from '../utils/auth'
 import { assertCallerSubscribedToChannel, requireTopic } from '../topics/helpers'
 
 /**
- * Reactive per-topic feed. Subscribed to by the hosted transport in
- * `mcp_server/src/transport/hosted.ts` (Phase 4) so that new messages push
- * to Claude Code via the Channel protocol without polling.
+ * Reactive per-topic feed. Subscribed to by the remote transport in
+ * `mcp_server/src/transport/remote.ts` so that new messages push to Claude
+ * Code via the Channel protocol without polling.
  *
  * The `sinceTs` argument is a client-side windowing hint: when set, the
  * query only returns messages newer than the given epoch ms. Useful on
@@ -36,7 +36,7 @@ export const listByTopic = authenticatedQuery({
 
 /**
  * Reactive per-channel feed: DMs AND broadcasts AND topic messages in this
- * channel, chronological. Exposed so the hosted transport can subscribe to
+ * channel, chronological. Exposed so the remote transport can subscribe to
  * a channel-wide feed (e.g. for the `list_channels` UI showing activity),
  * but most production reads happen through `listByTopic`.
  */

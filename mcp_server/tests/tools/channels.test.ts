@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createChannelTools, handleChannelTool, type ChannelToolDeps } from '../../src/tools/channels.js'
+import { handleChannelTool, type ChannelToolDeps } from '../../src/tools/channels.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
@@ -17,21 +17,6 @@ function createDeps(): ChannelToolDeps {
 }
 
 describe('Channel Tools', () => {
-  describe('createChannelTools', () => {
-    it('returns 5 tool definitions', () => {
-      expect(createChannelTools()).toHaveLength(5)
-    })
-    it('has the correct names', () => {
-      expect(createChannelTools().map((t) => t.name)).toEqual([
-        'list_channels',
-        'join_channel',
-        'leave_channel',
-        'set_active_channel',
-        'send_message_to_channel',
-      ])
-    })
-  })
-
   describe('requires name', () => {
     it('rejects when session has no name', async () => {
       const deps = createDeps()

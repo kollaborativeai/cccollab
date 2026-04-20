@@ -65,7 +65,7 @@ export const getById = authenticatedQuery({
 
 /**
  * Topic IDs the caller's signed-in sessions have joined, grouped
- * conceptually as "topics I'm currently in". Used by the hosted transport
+ * conceptually as "topics I'm currently in". Used by the remote transport
  * to bootstrap its subscription list when the MCP server starts up.
  */
 export const listJoinedForUser = authenticatedQuery({

@@ -1,22 +1,31 @@
 /**
  * Transport abstraction for cccollab's local stdio MCP server.
  *
- * The local stdio MCP server always spawns a local broker and subscribes
- * to its SSE stream. CCC-3 adds an optional remote-mode path that also
- * talks to a shared Convex backend. Channels and the topics they
- * contain are typed by `location` ('local' or 'remote') and live in
- * disjoint namespaces - a "dev" channel at the local broker and a "dev"
- * channel at a Convex deployment are two distinct channels. Each
- * channel-addressed or topic-addressed tool call routes to the single
- * transport that owns that channel / topic; list ops query all enabled
- * transports and union the results tagged by `location`.
+ * The local stdio MCP server always spawns a local broker transport at
+ * the reserved location name `"local"`. CCC-3 adds an arbitrary number
+ * of named non-local locations, each wrapping its own Convex deployment
+ * (e.g. `"flatout"`, `"kollaborative"`). Channels and the topics they
+ * contain are namespaced by their location: a "dev" channel at one
+ * location and a "dev" channel at another location are two distinct
+ * channels. Each channel-addressed or topic-addressed tool call routes
+ * to the single transport that owns that channel / topic; list ops
+ * query all enabled transports and union the results tagged by
+ * `location`.
+ *
+ * `ChannelLocation` is a free-form string - the set of valid names is
+ * whatever the resolved config lists under `locations`. The only
+ * reserved name is `"local"`, which is always available even when the
+ * config doesn't mention it.
  */
 
-export type ChannelLocation = 'local' | 'remote'
+export type ChannelLocation = string
 
 /** Provenance tag carried on inbound events. Same values as the
  *  user-facing `location` on channels/topics/sessions. */
 export type TransportSource = ChannelLocation
+
+/** Reserved name for the in-process broker location. */
+export const LOCAL_LOCATION: ChannelLocation = 'local'
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {

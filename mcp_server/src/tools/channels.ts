@@ -15,95 +15,6 @@ const NO_NAME_ERROR = JSON.stringify({
     'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
 })
 
-export function createChannelTools() {
-  return [
-    {
-      name: 'list_channels',
-      description:
-        'Return all channels visible across all enabled transports with subscription and active status. Returns {activeChannel, channels: [{name, location, subscriberCount, subscribed, source, isActive}]}. `location` is "local" or "remote". `source` is the ChannelSource for subscribed channels, null otherwise. `activeChannel` is {name, location} or null. Optional `location` arg restricts the view to one transport.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Restrict to a single location. Omit to list across all enabled locations.',
-          },
-        },
-      },
-    },
-    {
-      name: 'join_channel',
-      description:
-        'Subscribe to a channel (implicitly created). Idempotent. `location` selects the transport ("local" = in-process broker, "remote" = Convex deployment). Returns {channel, location, becameActive, subscriberCount}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          name: { type: 'string' as const, description: 'Channel name (case-insensitive, non-empty).' },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Transport location. Defaults to "local".',
-          },
-        },
-        required: ['name'],
-      },
-    },
-    {
-      name: 'leave_channel',
-      description:
-        'Unsubscribe from a channel at the given location. Returns {channel, location, removed, newActiveChannel}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          name: { type: 'string' as const, description: 'Channel name to leave.' },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Transport location. Defaults to "local".',
-          },
-        },
-        required: ['name'],
-      },
-    },
-    {
-      name: 'set_active_channel',
-      description: 'Set your active channel. Returns {activeChannel: {name, location}}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          name: { type: 'string' as const, description: 'Channel name (must be subscribed).' },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Transport location. Defaults to "local".',
-          },
-        },
-        required: ['name'],
-      },
-    },
-    {
-      name: 'send_message_to_channel',
-      description:
-        'Send a top-level broadcast to a channel (not in a topic). Defaults to active channel. Returns {channel, location}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          text: { type: 'string' as const, description: 'Message text' },
-          channel: { type: 'string' as const, description: 'Channel name. Defaults to the active channel.' },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description:
-              'Transport location of the target channel. Defaults to the active channel\'s location, or "local".',
-          },
-        },
-        required: ['text'],
-      },
-    },
-  ]
-}
-
 const REQUIRES_NAME = new Set(['join_channel', 'leave_channel', 'set_active_channel', 'send_message_to_channel'])
 
 export async function handleChannelTool(
@@ -210,7 +121,7 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
 
   let transport
   try {
-    transport = deps.router.getByLocation(location)
+    transport = deps.router.get(location)
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
@@ -232,7 +143,7 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, locati
 
   let transport
   try {
-    transport = deps.router.getByLocation(location)
+    transport = deps.router.get(location)
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
@@ -304,7 +215,7 @@ async function handleSendMessageToChannel(
 
   let transport
   try {
-    transport = deps.router.getByLocation(targetLocation)
+    transport = deps.router.get(targetLocation)
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }

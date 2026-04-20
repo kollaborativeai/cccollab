@@ -1,0 +1,105 @@
+import { LOCAL_LOCATION, type CccollabConfig, type LocationConfig } from './schema.js'
+
+/**
+ * Environment-variable overrides for the unified cccollab config.
+ *
+ * These are applied AFTER the user-level + project-level files have
+ * been merged, so they win over anything on disk. Recognised env vars:
+ *
+ *   CCCOLLAB_NAME
+ *     Overrides the top-level `name` (the session's display name). Used
+ *     by the local test harness (`test/start.sh`) to pre-seed per-
+ *     invocation identity without having to write a temporary config
+ *     file.
+ *
+ *   CCCOLLAB_OBJECTIVE
+ *     Overrides the top-level `objective`. Same motivation as
+ *     CCCOLLAB_NAME.
+ *
+ *   CCCOLLAB_REMOTE_URL
+ *     Register (or update) a location named `remote` with this URL and
+ *     mark it as the active location. Any other location's `active`
+ *     flag is cleared so "exactly one active location" holds in the
+ *     final resolved config. The `remote` name is conventional only -
+ *     it's the label used by the env var, not a reserved key (the only
+ *     reserved name is `local`).
+ *
+ *   CCCOLLAB_AUTH_TOKEN
+ *     Assign this value as `accessToken` on the active non-local
+ *     location. Precedence: the env-registered `remote` from
+ *     CCCOLLAB_REMOTE_URL wins; otherwise the first existing non-local
+ *     location whose `active: true` flag is set. If no target exists,
+ *     this is a no-op (an `active`-cascade error later in the pipeline
+ *     will surface any misconfiguration).
+ */
+const REMOTE_ENV_LOCATION = 'remote'
+
+export function applyEnvOverrides(config: CccollabConfig, env: NodeJS.ProcessEnv): CccollabConfig {
+  // Structured clone so the caller's object is never mutated. Env
+  // overrides are last-writer-wins, and the cascade resolver works off
+  // the returned shape.
+  const next = structuredClone(config) as CccollabConfig
+
+  const envName = stringOrUndefined(env.CCCOLLAB_NAME)
+  const envObjective = stringOrUndefined(env.CCCOLLAB_OBJECTIVE)
+  if (envName !== undefined) next.name = envName.trim()
+  if (envObjective !== undefined) next.objective = envObjective.trim()
+
+  const envUrl = stringOrUndefined(env.CCCOLLAB_REMOTE_URL)
+  const envToken = stringOrUndefined(env.CCCOLLAB_AUTH_TOKEN)
+
+  if (envUrl !== undefined) {
+    next.locations = next.locations ?? {}
+    // Clear every existing location's active flag so only the
+    // env-registered one is active after this pass.
+    for (const [, location] of Object.entries(next.locations)) {
+      if (location) {
+        delete (location as { active?: boolean }).active
+      }
+    }
+    const existing = (next.locations[REMOTE_ENV_LOCATION] as LocationConfig | undefined) ?? {}
+    next.locations[REMOTE_ENV_LOCATION] = {
+      ...existing,
+      url: envUrl,
+      active: true,
+    }
+  }
+
+  if (envToken !== undefined) {
+    const target = pickAuthTarget(next)
+    if (target !== null) {
+      target.accessToken = envToken
+    }
+  }
+
+  return next
+}
+
+function stringOrUndefined(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return value.trim() === '' ? undefined : value
+}
+
+/**
+ * Pick the location the env-provided auth token should attach to.
+ * Strategy:
+ *
+ *  1. If an env-registered `remote` location exists (it will whenever
+ *     CCCOLLAB_REMOTE_URL was set this pass), use it.
+ *  2. Otherwise scan all non-local locations for the one with
+ *     `active: true`.
+ *  3. Otherwise null - the token has nowhere to land.
+ *
+ * Returns a mutable reference into `config.locations` so the caller
+ * can assign `accessToken` directly.
+ */
+function pickAuthTarget(config: CccollabConfig): LocationConfig | null {
+  if (!config.locations) return null
+  const remote = config.locations[REMOTE_ENV_LOCATION]
+  if (remote) return remote
+  for (const [name, location] of Object.entries(config.locations)) {
+    if (name === LOCAL_LOCATION) continue
+    if (location?.active === true) return location
+  }
+  return null
+}

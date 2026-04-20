@@ -40,154 +40,6 @@ const NO_NAME_ERROR = JSON.stringify({
     'No name set. Call introduce first (e.g. "architect", "frontend"). If the user has not specified a name, ASK THE USER what name this session should use before proceeding.',
 })
 
-export function createTopicTools() {
-  return [
-    {
-      name: 'list_topics',
-      description:
-        'Return topics as JSON array: [{id, name, channel, location, state, messageCount, isJoined, isMyActive, creator, createdAt}]. With no channel, scopes across all subscribed channels on every enabled transport. Optional `location` restricts to one transport.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          channel: {
-            type: 'string' as const,
-            description: 'Channel to scope to. Defaults to all subscribed channels.',
-          },
-          include_archived: { type: 'boolean' as const, description: 'Include archived topics (default: false)' },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Transport location. Omit to query all enabled locations.',
-          },
-        },
-        required: [],
-      },
-    },
-    {
-      name: 'start_topic',
-      description:
-        'Create a topic in a channel (defaults to the active channel). `location` selects the transport (defaults to the active channel\'s location, or "local"). Returns {id, name, channel, location}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name / title' },
-          channel: {
-            type: 'string' as const,
-            description: 'Channel to create the topic in. Defaults to active channel.',
-          },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: "Transport location of the target channel. Defaults to the active channel's location.",
-          },
-        },
-        required: ['topic'],
-      },
-    },
-    {
-      name: 'join_topic',
-      description:
-        'Join a topic by name (fuzzy match) or id. Topic id format routes to the owning transport automatically. Returns {id, name, channel, location, history}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match) or id' },
-        },
-        required: ['topic'],
-      },
-    },
-    {
-      name: 'leave_topic',
-      description: 'Leave the active topic (or a named topic). Returns {id, name}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to the active topic.' },
-        },
-      },
-    },
-    {
-      name: 'set_active_topic',
-      description: 'Set the active topic among joined topics. Returns {id, name, channel, location}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name or id of a joined topic.' },
-        },
-        required: ['topic'],
-      },
-    },
-    {
-      name: 'archive_topic',
-      description: 'Archive a topic. Returns {id, name}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to the active topic.' },
-        },
-      },
-    },
-    {
-      name: 'unarchive_topic',
-      description: 'Unarchive a previously archived topic. Returns {id, name, channel, location}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match).' },
-        },
-        required: ['topic'],
-      },
-    },
-    {
-      name: 'send_message_to_topic',
-      description: 'Send a message to a topic. Defaults to the active topic. Returns {topicId}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          text: { type: 'string' as const, description: 'Message text' },
-          topic: { type: 'string' as const, description: 'Topic name (fuzzy match). Defaults to active topic.' },
-        },
-        required: ['text'],
-      },
-    },
-    {
-      name: 'list_sessions',
-      description:
-        'Return visible sessions as JSON array: [{name, objective?, channels: [{name, location}], registeredAt}]. Unions across every enabled transport. Duplicate sessions (same name on both) are merged.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          channel: {
-            type: 'string' as const,
-            description: 'Channel to scope to. Defaults to all your subscribed channels.',
-          },
-          location: {
-            type: 'string' as const,
-            enum: ['local', 'remote'],
-            description: 'Transport location. Omit to query all enabled locations.',
-          },
-        },
-      },
-    },
-    {
-      name: 'send_message_to_session',
-      description:
-        'Send a private direct message to another session. Routes by recipient presence: prefers local when both know them. Returns {to, viaChannel?}.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          to: {
-            type: 'string' as const,
-            description: 'Recipient session name (must match their introduced name exactly)',
-          },
-          text: { type: 'string' as const, description: 'Message text' },
-        },
-        required: ['to', 'text'],
-      },
-    },
-  ]
-}
-
 const REQUIRES_NAME = new Set([
   'start_topic',
   'join_topic',
@@ -404,7 +256,7 @@ async function handleStartTopic(
 
   let transport
   try {
-    transport = deps.router.getByLocation(location)
+    transport = deps.router.get(location)
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
@@ -465,7 +317,7 @@ async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<stri
     return JSON.stringify({ error: `No active topic matching "${topic}" found in your subscribed channels.` })
   }
 
-  const transport = deps.router.getByLocation(match.location)
+  const transport = deps.router.get(match.location)
   return joinTopicByData(deps, match, transport)
 }
 
@@ -525,7 +377,7 @@ async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise
 async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Promise<string> {
   const resolved = await resolveTopicIdInSubscribedChannels(deps, name)
   if ('error' in resolved) return JSON.stringify(resolved)
-  const transport = deps.router.getByLocation(resolved.location)
+  const transport = deps.router.get(resolved.location)
   await transport.archiveTopic({ sessionName: deps.session.displayName, topicId: resolved.id })
   deps.context.leaveTopic(resolved.id)
   return JSON.stringify({ id: resolved.id, name: resolved.topicName })
@@ -546,7 +398,7 @@ async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Prom
 function resolveTopicTransport(deps: TopicToolDeps, topicId: string): Transport {
   const storedLocation = deps.context.getJoinedTopicLocation(topicId)
   if (storedLocation !== undefined) {
-    return deps.router.getByLocation(storedLocation)
+    return deps.router.get(storedLocation)
   }
   return deps.router.getByTopicId(topicId)
 }
@@ -599,7 +451,7 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
     return JSON.stringify({ error: `No archived topic matching "${topic}" in your subscribed channels.` })
   }
 
-  const transport = deps.router.getByLocation(match.location)
+  const transport = deps.router.get(match.location)
   try {
     await transport.unarchiveTopic({ sessionName: deps.session.displayName, topicId: match.id })
   } catch (err) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createTopicTools, handleTopicTool, type TopicToolDeps } from '../../src/tools/topics.js'
+import { handleTopicTool, type TopicToolDeps } from '../../src/tools/topics.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
@@ -15,33 +15,6 @@ function createMockDeps(): TopicToolDeps {
 }
 
 describe('Topic Tools', () => {
-  describe('createTopicTools', () => {
-    it('returns 10 tool definitions', () => {
-      expect(createTopicTools()).toHaveLength(10)
-    })
-
-    it('has correct tool names', () => {
-      const names = createTopicTools().map((t) => t.name)
-      expect(names).toEqual([
-        'list_topics',
-        'start_topic',
-        'join_topic',
-        'leave_topic',
-        'set_active_topic',
-        'archive_topic',
-        'unarchive_topic',
-        'send_message_to_topic',
-        'list_sessions',
-        'send_message_to_session',
-      ])
-    })
-
-    it('does not include send_broadcast', () => {
-      const names = createTopicTools().map((t) => t.name)
-      expect(names).not.toContain('send_broadcast')
-    })
-  })
-
   describe('requires name', () => {
     it('returns error when session has no name and tries to start_topic', async () => {
       const deps = createMockDeps()

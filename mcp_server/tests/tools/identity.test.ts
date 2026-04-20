@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { createIdentityTools, handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
+import { handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
@@ -17,14 +17,6 @@ function createMockDeps(): IdentityToolDeps {
 describe('Identity Tools', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
-  })
-
-  describe('createIdentityTools', () => {
-    it('returns 3 tool definitions', () => {
-      const tools = createIdentityTools()
-      expect(tools).toHaveLength(3)
-      expect(tools.map((t) => t.name)).toEqual(['introduce', 'whoami', 'authenticate'])
-    })
   })
 
   describe('handleIdentityTool', () => {
@@ -117,9 +109,10 @@ describe('Identity Tools', () => {
     })
 
     describe('authenticate', () => {
-      it('returns setup guidance when no remote URL configured', async () => {
-        delete process.env.CCCOLLAB_REMOTE_URL
-        delete process.env.CCCOLLAB_HOSTED_URL
+      it('returns setup guidance when no non-local location is configured', async () => {
+        // `deps` has no `locations` prop; authenticate should surface
+        // setup guidance rather than spawning an OAuth flow against a
+        // phantom URL.
         const result = await handleIdentityTool('authenticate', {}, deps)
         expect(result).toContain('Remote mode is not configured')
         expect(result).toContain('CCCOLLAB_REMOTE_URL')
