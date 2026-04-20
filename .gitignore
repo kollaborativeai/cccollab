@@ -18,6 +18,7 @@ node_modules
 dist/
 .env
 *.env.*
+!.env.example
 
 # Per-project Claude Code local overrides
 test/.claude/settings.local.json
@@ -26,3 +27,6 @@ test/.claude/settings.local.json
 /i/
 
 .env.local
+
+# Convex codegen output (regenerated on every `npx convex dev` / `convex deploy`)
+convex/_generated
