@@ -16,10 +16,9 @@ import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
 import { resolveTsx } from './resolve-tsx.js'
 import { LocalTransport } from './transport/local.js'
-import { RemoteTransport } from './transport/remote.js'
 import { LOCAL_LOCATION, type Transport } from './transport/index.js'
 import { TransportRouter } from './transport/router.js'
-import { createRemoteClient } from './remote/client.js'
+import { attachLocation } from './transport/attach.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
@@ -57,50 +56,13 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   if (resolved.config.name) session.setName(resolved.config.name)
   if (resolved.config.objective) session.setObjective(resolved.config.objective)
 
-  // Build one transport per configured location, keyed by location name.
-  const transports = new Map<string, Transport>()
-  const remoteTransports = new Map<string, RemoteTransport>()
-
-  for (const location of resolved.locations) {
-    if (location.isLocal) {
-      transports.set(LOCAL_LOCATION, new LocalTransport(brokerPort))
-      continue
-    }
-    // Non-local: must have url (validated by resolveActive). Construct
-    // a client only when we also have working tokens; otherwise log
-    // a one-liner telling the user to authenticate, and skip.
-    if (!location.url) {
-      console.error(`[cccollab] Location "${location.name}" has no URL; skipping.`)
-      continue
-    }
-    if (!location.accessToken || !location.refreshToken) {
-      console.error(
-        `[cccollab] Location "${location.name}" is configured but has no tokens. ` +
-          `Call authenticate({location: "${location.name}"}) to sign in.`,
-      )
-      continue
-    }
-    try {
-      const client = createRemoteClient({
-        locationName: location.name,
-        url: location.url,
-        accessToken: location.accessToken,
-        refreshToken: location.refreshToken,
-        userEmail: location.userEmail,
-        userId: location.userId,
-      })
-      const transport = new RemoteTransport({ client, source: location.name })
-      transports.set(location.name, transport)
-      remoteTransports.set(location.name, transport)
-      console.error(`[cccollab] Transport "${location.name}" active (url: ${location.url})`)
-    } catch (err) {
-      console.error(
-        `[cccollab] Could not start transport "${location.name}", continuing: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-  }
-
-  const router = new TransportRouter(transports)
+  // Build the router with only the local transport up front. Non-local
+  // locations are attached via `attachLocation` below, which is the
+  // same code path the `authenticate` tool hits for hot-attach. Going
+  // through one shared function keeps startup behaviour and hot-attach
+  // behaviour in lock-step.
+  const localTransport: Transport = new LocalTransport(brokerPort)
+  const router = new TransportRouter([localTransport])
   const context = new ActiveContext()
 
   // Compose instructions BEFORE calling introduce() so the user-facing
@@ -126,45 +88,67 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
   })
 
+  // Shared unsubscribe list. Every hot-attached transport pushes its DM
+  // subscription cleanup here, and the shutdown handler drains it
+  // alongside the ones wired at startup.
   const remoteUnsubscribes: Array<() => void> = []
 
-  // Fire introduce() on every enabled transport and WAIT before wiring
-  // the DM inbox subscription. The prior implementation ran a
-  // setTimeout(250ms) heuristic; on a cold deployment or a slow link
-  // the DM inbox could get wired before introduce had committed the
-  // session row, and the subscription silently dropped. Awaiting
-  // introduce() per transport makes the order deterministic.
+  // Introduce on the local transport up front so the session row
+  // exists when list_sessions / DM routing queries it. Non-local
+  // locations run introduce inside their own attachLocation call.
   if (session.hasName()) {
-    const displayName = session.displayName
-    const objective = session.getObjective()
-    const introducePromises: Array<Promise<void>> = []
-    for (const transport of router.enabled()) {
-      introducePromises.push(
-        transport.introduce({ sessionName: displayName, objective }).catch(() => {
-          /* best-effort */
-        }),
-      )
-    }
-    await Promise.all(introducePromises)
-
-    // After every transport has been introduced, wire remote DM
-    // subscriptions so they register against the just-created session.
-    for (const [, remoteTransport] of remoteTransports) {
-      if (!remoteTransport.enabled) continue
-      const unsubscribe = remoteTransport.subscribeDirectMessages((msg) => {
-        void messageBus.push(msg, remoteTransport.source)
-      })
-      remoteUnsubscribes.push(unsubscribe)
+    try {
+      await localTransport.introduce({ sessionName: session.displayName, objective: session.getObjective() })
+    } catch {
+      /* best-effort */
     }
   }
 
-  // Auto-subscribe to configured channels and topics. For each
-  // channel in the config, call joinChannel; for each topic, try
-  // joinTopic by name. If the topic doesn't exist at the backend,
-  // start it instead. To avoid spurious "topic not found" log spew
-  // we pre-fetch the topic list per channel once and look up our
-  // target names in-memory.
+  // Attach every non-local location that has tokens. Configured-but-
+  // token-less locations log a hint and get skipped; the user runs
+  // `authenticate({location: ...})` to finish the setup, which hot-
+  // attaches via the same function path.
   for (const location of resolved.locations) {
+    if (location.isLocal) continue
+    if (!location.url) {
+      console.error(`[cccollab] Location "${location.name}" has no URL; skipping.`)
+      continue
+    }
+    if (!location.accessToken || !location.refreshToken) {
+      console.error(
+        `[cccollab] Location "${location.name}" is configured but has no tokens. ` +
+          `Call authenticate({location: "${location.name}"}) to sign in.`,
+      )
+      continue
+    }
+    const result = await attachLocation(location.name, {
+      cwd: process.cwd(),
+      env: process.env,
+      session,
+      context,
+      router,
+      messageBus,
+      remoteUnsubscribes,
+      resolved: {
+        locations: resolved.locations,
+        activeLocation: resolved.active.activeLocation,
+        activeChannel: resolved.active.activeChannel,
+        activeTopic: resolved.active.activeTopic,
+      },
+    })
+    if (result.ok) {
+      console.error(`[cccollab] Transport "${location.name}" active (url: ${location.url})`)
+    } else {
+      console.error(`[cccollab] Could not attach transport "${location.name}": ${result.reason}`)
+    }
+  }
+
+  // Local-location auto-subscribe to channels/topics. attachLocation
+  // handles non-local locations; the local broker path stays inline
+  // because it doesn't need the transport-factory / introduce-first
+  // dance. Logic is intentionally identical to the pre-refactor loop.
+  for (const location of resolved.locations) {
+    if (!location.isLocal) continue
     const transport = router.all().find((t) => t.source === location.name)
     if (!transport || !transport.enabled) continue
     for (const channel of location.channels) {
@@ -231,7 +215,16 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // specific topic we don't need to re-set it because joinTopic
   // already put it in the active slot.
 
-  registerTools(mcp, { session, context, router, locations: resolved.locations })
+  registerTools(mcp, {
+    session,
+    context,
+    router,
+    locations: resolved.locations,
+    messageBus,
+    remoteUnsubscribes,
+    cwd: process.cwd(),
+    env: process.env,
+  })
 
   let shuttingDown = false
   const shutdown = async (reason: string): Promise<never> => {
@@ -291,6 +284,10 @@ interface ToolDeps {
   context: ActiveContext
   router: TransportRouter
   locations: ResolvedLocation[]
+  messageBus: MessageBus
+  remoteUnsubscribes: Array<() => void>
+  cwd: string
+  env: NodeJS.ProcessEnv
 }
 
 function buildInstructions(session: SessionManager, resolved: ResolvedConfig, router: TransportRouter): string {
@@ -419,7 +416,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'authenticate',
     {
       description:
-        'Start the Google OAuth sign-in flow against a configured non-local location. Writes tokens to ~/.cccollab/config.json at mode 0600. The transport attaches on the NEXT session start; restart your Claude Code session after a successful sign-in. When no non-local location is configured, returns setup guidance instead of failing.',
+        'Start the Google OAuth sign-in flow against a configured non-local location. Writes tokens to ~/.cccollab/config.json at mode 0600 and hot-attaches the remote transport to the running session on success (no restart required). When the hot-attach itself fails after tokens are saved, returns the reason and falls back to "restart to activate". When no non-local location is configured, returns setup guidance instead of failing.',
       inputSchema: {
         location: z
           .string()

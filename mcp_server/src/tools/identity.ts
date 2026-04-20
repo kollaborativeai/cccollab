@@ -1,18 +1,45 @@
 import type { ActiveContext } from '../context.js'
+import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runAuthenticate } from '../remote/auth.js'
+import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
 export interface IdentityToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
-  /** Optional view of the resolved config used by `authenticate` to
-   *  find a URL for a given location name. When omitted, `authenticate`
-   *  falls back to reading the transport URL from the router. */
-  locations?: Array<{ name: string; isLocal: boolean; url?: string }>
+  /** Mutable view of the resolved-config locations. The `authenticate`
+   *  tool MUTATES this in place when it hot-attaches a location that
+   *  was not previously in the config (e.g. the env-var-only first
+   *  sign-in case) so the next tool call sees the new name. */
+  locations?: ResolvedLocation[]
+  /** The MessageBus the hot-attach path hands to `attachLocation` so
+   *  the new transport's DM inbox subscription feeds inbound messages
+   *  back into the session. Optional so existing unit tests that don't
+   *  exercise the hot-attach path can continue to construct deps
+   *  without a bus. */
+  messageBus?: MessageBus
+  /** Shared list of unsubscribe callbacks. The hot-attach path pushes
+   *  the new transport's DM unsubscribe onto this array so `server.ts`'s
+   *  shutdown hook runs it alongside the ones wired at startup. */
+  remoteUnsubscribes?: Array<() => void>
+  /** cwd used when re-resolving config on a hot-attach. Defaults to
+   *  `process.cwd()` but injectable for tests. */
+  cwd?: string
+  /** Env used when re-resolving config on a hot-attach. Defaults to
+   *  `process.env`. */
+  env?: NodeJS.ProcessEnv
+  /** Optional override for the transport factory used on hot-attach.
+   *  Threads through to `AttachCtx.transportFactory`; production leaves
+   *  this undefined so the default factory (which builds a real
+   *  `RemoteTransport` wrapping a `ConvexClient`) is used. Unit tests
+   *  that exercise the hot-attach wiring without network pass a fake
+   *  here. */
+  transportFactory?: AttachCtx['transportFactory']
 }
 
 export async function handleIdentityTool(
@@ -157,13 +184,83 @@ async function handleAuthenticate(
   // enabled, short-circuit: tokens are already live.
   const existingTransport: Transport | undefined = deps.router.all().find((t) => t.source === targetName)
   if (!force && existingTransport?.enabled === true) {
-    return `Already authenticated to "${targetName}". Pass force: true to re-authenticate. (Restart your Claude Code session if needed.)`
+    return `Already authenticated to "${targetName}". Pass force: true to re-authenticate.`
   }
 
+  let authResult: { locationName: string; url: string; userEmail?: string }
   try {
-    const result = await runAuthenticate({ locationName: targetName, url })
-    return `Signed in to "${result.locationName}". Restart your Claude Code session for the remote transport to take effect.`
+    authResult = await runAuthenticate({ locationName: targetName, url })
   } catch (err) {
     return `Authentication failed: ${err instanceof Error ? err.message : String(err)}`
   }
+
+  // Tokens are persisted. Try to hot-attach; on failure keep the tokens
+  // and fall back to the old "restart to activate" guidance so the user
+  // still gets a working session next time. We never silently swallow
+  // - the fallback message reports the underlying reason for debugging.
+  const cwd = deps.cwd ?? process.cwd()
+  const env = deps.env ?? process.env
+  const messageBus = deps.messageBus
+  const remoteUnsubscribes = deps.remoteUnsubscribes
+  if (!messageBus || !remoteUnsubscribes) {
+    // The process-level wiring didn't thread in the MessageBus /
+    // unsubscribe list. Unit tests that skip server.ts construction
+    // land here - report the sign-in and rely on restart to pick up
+    // the persisted tokens.
+    return `Signed in to "${authResult.locationName}". Restart your Claude Code session for the remote transport to take effect.`
+  }
+
+  const refreshed = resolveConfig(cwd, env)
+  // Find the just-authenticated location in the fresh config. On the
+  // first-ever sign-in against an env-only URL, this will be present
+  // because `saveLocationAuth` wrote tokens under the named key and
+  // `loadUserConfig` now sees them.
+  const fresh = refreshed.locations.find((l) => l.name === authResult.locationName)
+  if (!fresh || !fresh.url || !fresh.accessToken || !fresh.refreshToken) {
+    return (
+      `Signed in to "${authResult.locationName}" but could not locate the freshly-saved tokens ` +
+      `in the resolved config. Restart your Claude Code session for the remote transport to take effect.`
+    )
+  }
+
+  // Mirror the freshly-resolved non-local location into the deps'
+  // in-memory snapshot so subsequent tool calls (list_channels,
+  // authenticate with no location arg, etc) see the new name without
+  // needing a restart. When the location was already in deps.locations,
+  // replace the entry in place; otherwise append.
+  if (deps.locations) {
+    const idx = deps.locations.findIndex((l) => l.name === fresh.name)
+    if (idx >= 0) deps.locations[idx] = fresh
+    else deps.locations.push(fresh)
+  }
+
+  const ctx: AttachCtx = {
+    cwd,
+    env,
+    session: deps.session,
+    context: deps.context,
+    router: deps.router,
+    messageBus,
+    remoteUnsubscribes,
+    resolved: {
+      locations: refreshed.locations,
+      activeLocation: refreshed.active.activeLocation,
+      activeChannel: refreshed.active.activeChannel,
+      activeTopic: refreshed.active.activeTopic,
+    },
+    transportFactory: deps.transportFactory,
+  }
+
+  const result = await attachLocation(authResult.locationName, ctx)
+  if (result.ok) {
+    const who = fresh.userEmail ? ` as ${fresh.userEmail}` : ''
+    return `Signed in${who}. Remote location "${authResult.locationName}" is now active.`
+  }
+  // Hot-attach failed after tokens were saved. Log the underlying
+  // reason, keep the tokens on disk, and fall back to the old guidance.
+  process.stderr.write(`[cccollab] Hot-attach failed for "${authResult.locationName}": ${result.reason}\n`)
+  return (
+    `Signed in to "${authResult.locationName}", but the remote transport could not attach to this running session ` +
+    `(${result.reason}). Restart your Claude Code session for the remote transport to take effect.`
+  )
 }

@@ -5,7 +5,8 @@ import { SessionManager } from '../src/session.js'
 import { TransportRouter } from '../src/transport/router.js'
 import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
-import { handleIdentityTool } from '../src/tools/identity.js'
+import { handleIdentityTool, type IdentityToolDeps } from '../src/tools/identity.js'
+import type { ResolvedLocation } from '../src/config/resolve.js'
 import {
   type Transport,
   type TransportChannel,
@@ -353,18 +354,111 @@ vi.mock('../src/remote/auth.js', () => ({
   })),
 }))
 
+// The hot-attach path re-resolves the config (via resolveConfig). Mock
+// it so we can surface exactly the shape the test wants without
+// writing to ~/.cccollab/config.json. The mock defaults to "no remote
+// config" and individual tests override it with a more specific
+// spyOn-style implementation where needed.
+vi.mock('../src/config/resolve.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/config/resolve.js')>('../src/config/resolve.js')
+  return {
+    ...actual,
+    resolveConfig: vi.fn((cwd: string, _env: NodeJS.ProcessEnv) => {
+      void cwd
+      return {
+        config: { locations: { local: {} } },
+        active: {},
+        projectFilePath: null,
+        locations: [{ name: 'local', isLocal: true, channels: [] }],
+      }
+    }),
+  }
+})
+
+/**
+ * Build a hot-attach-ready deps bundle. Tests that exercise the
+ * post-sign-in attach path pass their own `messageBus` and
+ * `remoteUnsubscribes`; tests that only care about the setup guidance
+ * branch can skip them.
+ */
 function makeDepsWithLocations(
   transports: Transport[],
-  locations: Array<{ name: string; isLocal: boolean; url?: string }>,
-) {
+  locations: Array<{
+    name: string
+    isLocal: boolean
+    url?: string
+    channels?: Array<{ name: string; topics: Array<{ name: string }> }>
+  }>,
+  extras: {
+    messageBus?: IdentityToolDeps['messageBus']
+    remoteUnsubscribes?: IdentityToolDeps['remoteUnsubscribes']
+    cwd?: string
+    env?: NodeJS.ProcessEnv
+  } = {},
+): IdentityToolDeps {
   const deps = makeDeps(transports)
-  return { ...deps, locations }
+  const resolvedLocations: ResolvedLocation[] = locations.map((l) => ({
+    name: l.name,
+    isLocal: l.isLocal,
+    url: l.url,
+    channels: l.channels ?? [],
+  }))
+  return {
+    ...deps,
+    locations: resolvedLocations,
+    messageBus: extras.messageBus,
+    remoteUnsubscribes: extras.remoteUnsubscribes,
+    cwd: extras.cwd ?? '/tmp/test',
+    env: extras.env ?? {},
+  }
+}
+
+/**
+ * A remote transport fake that supports `subscribeDirectMessages` so
+ * the hot-attach path can wire it into MessageBus. The base
+ * FakeTransport class has no DM subscription hook because most of the
+ * legacy dual-transport tests don't need one; we subclass rather than
+ * bloat the base.
+ */
+class HotAttachRemote extends FakeTransport {
+  subscribedDms: Array<(msg: import('../src/types.js').ParsedMessage) => void> = []
+  dmUnsubscribed = false
+  constructor(source: string) {
+    super(source as 'local' | 'remote')
+  }
+  subscribeDirectMessages(onEvent: (msg: import('../src/types.js').ParsedMessage) => void): () => void {
+    this.subscribedDms.push(onEvent)
+    return () => {
+      this.dmUnsubscribed = true
+    }
+  }
+}
+
+async function mockFreshResolve(
+  locations: ResolvedLocation[],
+  active: { activeLocation?: string; activeChannel?: { name: string; location: string } } = {},
+): Promise<void> {
+  const resolved = await import('../src/config/resolve.js')
+  ;(resolved.resolveConfig as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+    config: { locations: {} },
+    active,
+    projectFilePath: null,
+    locations,
+  }))
 }
 
 describe('authenticate tool', () => {
   beforeEach(async () => {
     const { runAuthenticate } = await import('../src/remote/auth.js')
     ;(runAuthenticate as unknown as ReturnType<typeof vi.fn>).mockClear()
+    // Reset resolveConfig mock to its default "nothing configured" value.
+    const resolved = await import('../src/config/resolve.js')
+    ;(resolved.resolveConfig as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      config: { locations: { local: {} } },
+      active: {},
+      projectFilePath: null,
+      locations: [{ name: 'local', isLocal: true, channels: [] }],
+    }))
   })
 
   it('returns setup guidance when no non-local location is configured', async () => {
@@ -392,16 +486,40 @@ describe('authenticate tool', () => {
     expect(runAuthenticate).not.toHaveBeenCalled()
   })
 
-  it('re-runs the OAuth flow when force: true, even with a live non-local transport', async () => {
+  it('hot-attaches a new remote transport after force: true, replacing the old one', async () => {
     const local = new FakeTransport('local')
-    const remote = new FakeTransport('remote')
+    const oldRemote = new HotAttachRemote('remote')
+    const remoteUnsubscribes: Array<() => void> = []
+    const bus = {
+      push: vi.fn(async () => {}),
+    } as unknown as IdentityToolDeps['messageBus']
+
+    const newRemote = new HotAttachRemote('remote')
+    const factory = vi.fn(() => newRemote) as IdentityToolDeps['transportFactory']
+
     const deps = makeDepsWithLocations(
-      [local, remote],
+      [local, oldRemote],
       [
         { name: 'local', isLocal: true },
         { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
       ],
+      { messageBus: bus, remoteUnsubscribes },
     )
+    deps.transportFactory = factory
+
+    await mockFreshResolve([
+      { name: 'local', isLocal: true, channels: [] },
+      {
+        name: 'remote',
+        isLocal: false,
+        url: 'https://example.convex.cloud',
+        accessToken: 'jwt',
+        refreshToken: 'refresh',
+        userEmail: 'alice@example.com',
+        channels: [],
+      },
+    ])
+
     const result = await handleIdentityTool('authenticate', { force: true }, deps)
     const { runAuthenticate } = await import('../src/remote/auth.js')
     expect(runAuthenticate).toHaveBeenCalledWith({
@@ -409,7 +527,64 @@ describe('authenticate tool', () => {
       url: 'https://example.convex.cloud',
     })
     expect(result).toContain('Signed in')
+    expect(result).toContain('is now active')
+    expect(result).toContain('alice@example.com')
+
+    // The old transport got torn down, the new one is live.
+    expect(oldRemote.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
+    const live = deps.router.all().find((t) => t.source === 'remote')
+    expect(live).toBe(newRemote)
+    // DM subscription wired; unsubscribe is tracked for shutdown.
+    expect(newRemote.subscribedDms.length).toBe(1)
+    expect(remoteUnsubscribes.length).toBe(1)
+  })
+
+  it('hot-attach failure after sign-in keeps tokens persisted and returns restart guidance', async () => {
+    const local = new FakeTransport('local')
+    const remoteUnsubscribes: Array<() => void> = []
+    const bus = {
+      push: vi.fn(async () => {}),
+    } as unknown as IdentityToolDeps['messageBus']
+
+    const failingRemote = new HotAttachRemote('remote')
+    failingRemote.introduce = vi.fn(async () => {
+      throw new Error('backend rejected introduce')
+    })
+    const factory = vi.fn(() => failingRemote) as IdentityToolDeps['transportFactory']
+
+    const deps = makeDepsWithLocations(
+      [local],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+      { messageBus: bus, remoteUnsubscribes },
+    )
+    deps.transportFactory = factory
+
+    await mockFreshResolve([
+      { name: 'local', isLocal: true, channels: [] },
+      {
+        name: 'remote',
+        isLocal: false,
+        url: 'https://example.convex.cloud',
+        accessToken: 'jwt',
+        refreshToken: 'refresh',
+        channels: [],
+      },
+    ])
+
+    const result = await handleIdentityTool('authenticate', { location: 'remote' }, deps)
+
+    // Sign-in succeeded; hot-attach did not. The user is told to
+    // restart; the reason is surfaced so the failure isn't silent.
+    expect(result).toContain('Signed in to "remote"')
+    expect(result).toContain('could not attach')
     expect(result).toContain('Restart your Claude Code session')
+    // The router must NOT contain the broken transport.
+    expect(deps.router.has('remote')).toBe(false)
+    // No orphan DM subscription was left behind.
+    expect(remoteUnsubscribes.length).toBe(0)
   })
 
   it('errors when location arg names an unknown location', async () => {
@@ -417,6 +592,53 @@ describe('authenticate tool', () => {
     const deps = makeDepsWithLocations([local], [{ name: 'local', isLocal: true }])
     const result = await handleIdentityTool('authenticate', { location: 'nope' }, deps)
     expect(result).toContain('No non-local location named "nope" is configured')
+  })
+
+  it('falls back to the restart message when hot-attach context is not provided', async () => {
+    // No messageBus / remoteUnsubscribes passed -> identity.ts cannot
+    // call attachLocation; it must surface the legacy "restart" message
+    // instead of failing silently.
+    const local = new FakeTransport('local')
+    const deps = makeDepsWithLocations(
+      [local],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+    )
+    const result = await handleIdentityTool('authenticate', { location: 'remote' }, deps)
+    expect(result).toContain('Signed in')
+    expect(result).toContain('Restart your Claude Code session')
+  })
+
+  it('returns a "could not locate saved tokens" message when the fresh resolve has no tokens', async () => {
+    // Tokens are saved by runAuthenticate, but the mocked resolveConfig
+    // doesn't surface them - simulates an edge case where the mkdir /
+    // file write race or a malformed home dir puts saveLocationAuth's
+    // write out of sight. The tool must not crash; it must keep the
+    // tokens persisted and tell the user to restart.
+    const local = new FakeTransport('local')
+    const remoteUnsubscribes: Array<() => void> = []
+    const bus = {
+      push: vi.fn(async () => {}),
+    } as unknown as IdentityToolDeps['messageBus']
+    const deps = makeDepsWithLocations(
+      [local],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+      { messageBus: bus, remoteUnsubscribes },
+    )
+    // mockFreshResolve leaves token fields undefined
+    await mockFreshResolve([
+      { name: 'local', isLocal: true, channels: [] },
+      { name: 'remote', isLocal: false, url: 'https://example.convex.cloud', channels: [] },
+    ])
+
+    const result = await handleIdentityTool('authenticate', { location: 'remote' }, deps)
+    expect(result).toContain('could not locate the freshly-saved tokens')
+    expect(result).toContain('Restart your Claude Code session')
   })
 })
 

@@ -12,8 +12,11 @@ import { LOCAL_LOCATION, type ChannelLocation, type Transport } from './index.js
  * row with its source location name.
  *
  * The router is a thin façade over the map. It does NOT own any
- * transport lifecycle state - the map is constructed once at startup
- * in `server.ts`. A transport that has flipped `enabled = false` via
+ * transport lifecycle state - the map is populated at startup in
+ * `server.ts` and mutated by `attachLocation` on a hot-attach (the
+ * `authenticate` tool calls into `attachLocation` after persisting
+ * tokens to install / replace a non-local transport without a session
+ * restart). A transport that has flipped `enabled = false` via
  * graceful degradation is still in the map but will be skipped by
  * `enabled()` and refused by `get` / `getByTopicId` with a structured
  * error.
@@ -33,6 +36,42 @@ export class TransportRouter {
         this.transports.set(t.source, t)
       }
     }
+  }
+
+  /**
+   * Install (or replace) a transport under its own source name. Used by
+   * `attachLocation` on hot-attach after `authenticate` succeeds so the
+   * running session can start routing to the freshly-signed-in remote
+   * without a restart.
+   *
+   * By default this refuses to overwrite an existing transport for the
+   * same name; pass `{ replace: true }` to replace in place (the
+   * caller is then responsible for any deregistration / unsubscribe
+   * cleanup on the old transport). Returns the prior transport for the
+   * caller to tear down when replacing.
+   */
+  register(transport: Transport, opts: { replace?: boolean } = {}): Transport | undefined {
+    const prior = this.transports.get(transport.source)
+    if (prior && !opts.replace) {
+      throw new Error(
+        `TransportRouter: a transport for location "${transport.source}" already exists. Pass { replace: true } to swap it in place.`,
+      )
+    }
+    this.transports.set(transport.source, transport)
+    return prior
+  }
+
+  /**
+   * Remove a transport from the map and return it so the caller can run
+   * any lifecycle teardown (`deregisterSession`, unsubscribing reactive
+   * feeds, etc). Returns `undefined` when no transport was registered
+   * for that name. Used by `attachLocation` for replace-in-place on a
+   * `force: true` re-authentication.
+   */
+  unregister(name: string): Transport | undefined {
+    const prior = this.transports.get(name)
+    this.transports.delete(name)
+    return prior
   }
 
   /** Every enabled transport, in map insertion order. */
