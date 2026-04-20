@@ -22,14 +22,17 @@
     "typecheck": "tsc --noEmit && yarn workspaces foreach -A --no-private run typecheck",
     "prepare": "husky"
   },
-  "devDependencies": {
+  "dependencies": {
     "@auth/core": "^0.37.0",
     "@convex-dev/auth": "^0.0.91",
+    "convex": "^1.35.1",
+    "convex-helpers": "^0.1.114"
+  },
+  "devDependencies": {
     "@convex-dev/eslint-plugin": "^2.0.0",
     "@edge-runtime/vm": "^5.0.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "convex": "^1.35.1",
     "convex-test": "^0.0.49",
     "dotenv": "^17.4.2",
     "eslint": "^10.2.1",

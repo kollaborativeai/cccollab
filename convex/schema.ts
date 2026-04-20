@@ -1,9 +1,18 @@
 /**
  * Convex schema for the cccollab backend.
  *
- * This composes the Convex Auth tables with cccollab's own domain tables.
- * Phase 2 scaffolds the auth/users layer only - the cccollab broker tables
- * (channels, sessions, topics, messages, ...) arrive in Phase 3.
+ * Composes Convex Auth's managed tables (users, auth accounts, sessions,
+ * verification codes) with cccollab's domain tables. The domain tables
+ * mirror the local broker's in-memory model
+ * (`mcp_server/src/broker.ts`) but are a superset of it:
+ *
+ * - The broker has only "sessions"; Convex separates user-level standing
+ *   subscriptions (`channelMembers`) from session-level presence
+ *   (`sessionChannels`), so a subscription survives MCP server restarts
+ *   across machines.
+ * - The broker's "sessionName" is a globally unique string; Convex scopes
+ *   uniqueness to the user (two people can both call a session
+ *   "architect") and keys all foreign references by `Id<'sessions'>`.
  *
  * See `docs/architecture/mcp-servers.md` for the additive-only backend
  * discipline that governs any future changes to this schema.
@@ -11,9 +20,25 @@
 import { authTables } from '@convex-dev/auth/server'
 import { defineSchema } from 'convex/server'
 
+import { channelMembersTable } from './channelMembers/schema'
+import { channelsTable } from './channels/schema'
+import { messagesTable } from './messages/schema'
+import { sessionChannelsTable } from './sessionChannels/schema'
+import { sessionsTable } from './sessions/schema'
+import { topicMembersTable } from './topicMembers/schema'
+import { topicsTable } from './topics/schema'
 import { usersTable } from './users/schema'
 
 export default defineSchema({
   ...authTables,
   users: usersTable,
+
+  // cccollab domain tables
+  channels: channelsTable,
+  channelMembers: channelMembersTable,
+  sessions: sessionsTable,
+  sessionChannels: sessionChannelsTable,
+  topics: topicsTable,
+  topicMembers: topicMembersTable,
+  messages: messagesTable,
 })
