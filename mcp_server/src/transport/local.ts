@@ -1,4 +1,5 @@
 import {
+  BROKER_UUID_PATTERN,
   DmDeliveryError,
   TopicNameConflictError,
   type Transport,
@@ -24,6 +25,11 @@ export class LocalTransport implements Transport {
   enabled = true
 
   constructor(private readonly brokerPort: number) {}
+
+  /** Local broker emits topic ids as RFC 4122 UUIDs. */
+  hasTopic(topicId: string): boolean {
+    return BROKER_UUID_PATTERN.test(topicId)
+  }
 
   // ─── Identity ─────────────────────────────────────────────────────────
   async introduce(args: { sessionName: string; objective?: string }): Promise<void> {

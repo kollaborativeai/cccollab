@@ -1,20 +1,22 @@
 /**
- * Transport abstraction for cccollab's MCP server.
+ * Transport abstraction for cccollab's local stdio MCP server.
  *
- * The local stdio MCP server spawns a local broker and subscribes to its
- * SSE stream. CCC-3 adds an optional hosted-mode path that also talks to a
- * shared Convex backend. Both paths implement the same write surface so
- * the tool implementations in `src/tools/*.ts` stay uniform and don't
- * carry conditionals for "local vs hosted".
- *
- * Scope today (commit A): writes only. The inbound event subscription for
- * both transports continues to flow through `BrokerEventListener` →
- * `MessageBus` unchanged, so behaviour is identical to pre-refactor.
- * Commit B adds a subscription surface to this interface alongside the
- * hosted transport and a deduplication layer.
+ * The local stdio MCP server always spawns a local broker and subscribes
+ * to its SSE stream. CCC-3 adds an optional remote-mode path that also
+ * talks to a shared Convex backend. Channels and the topics they
+ * contain are typed by `location` ('local' or 'remote') and live in
+ * disjoint namespaces - a "dev" channel at the local broker and a "dev"
+ * channel at a Convex deployment are two distinct channels. Each
+ * channel-addressed or topic-addressed tool call routes to the single
+ * transport that owns that channel / topic; list ops query all enabled
+ * transports and union the results tagged by `location`.
  */
 
-export type TransportSource = 'local' | 'hosted'
+export type ChannelLocation = 'local' | 'remote'
+
+/** Provenance tag carried on inbound events. Same values as the
+ *  user-facing `location` on channels/topics/sessions. */
+export type TransportSource = ChannelLocation
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
@@ -50,19 +52,30 @@ export interface TransportTopicMessage {
 }
 
 /**
- * A transport is the outbound face of one broker path (local HTTP broker
- * today; hosted Convex deployment in commit B).
+ * A transport is the outbound face of one broker path: the in-process
+ * local broker today, plus an optional remote Convex deployment.
  *
  * Transports are stateless above the wire level: they do NOT track which
  * channels the caller is subscribed to or which topics they've joined.
  * That state lives in `ActiveContext` and is the tool layer's business.
  */
 export interface Transport {
-  /** Provenance tag used by the inbound layer to attribute events. */
+  /** Provenance tag used by the inbound layer to attribute events and
+   *  by the router in `server.ts` to dispatch channel/topic-addressed
+   *  operations. */
   readonly source: TransportSource
 
   /** False when the transport has self-disabled (graceful degradation). */
   enabled: boolean
+
+  /**
+   * Does this transport's id-space contain the given topic id? Used by
+   * the router to dispatch `join_topic`, `archive_topic`, etc. based on
+   * the id format: broker-issued topic ids are RFC 4122 UUIDs; Convex
+   * `Id<'topics'>` are base32-ish and never match the UUID pattern.
+   * Each implementation returns `true` for ids it owns.
+   */
+  hasTopic(topicId: string): boolean
 
   // ─── Identity ─────────────────────────────────────────────────────────
   introduce(args: { sessionName: string; objective?: string }): Promise<void>
@@ -98,6 +111,9 @@ export interface Transport {
   /** Best-effort teardown on shutdown. Must not throw. */
   deregisterSession(args: { sessionName: string }): Promise<void>
 }
+
+/** UUID v4 pattern as emitted by the local broker. */
+export const BROKER_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
  * Raised by transports when the backend rejects a new active topic

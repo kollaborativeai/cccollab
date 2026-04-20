@@ -108,6 +108,7 @@ describe('Integration: end-to-end message flow', () => {
           channel_id: 'default',
           ts: '500.100',
           thread_ts: 'uuid-topic',
+          source: 'local',
         },
       },
     })

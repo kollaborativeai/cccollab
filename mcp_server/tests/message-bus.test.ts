@@ -10,7 +10,7 @@ function createMessage(overrides: Partial<ParsedMessage> = {}): ParsedMessage {
   return {
     sender: 'stefan | dispatcher',
     text: 'hello world',
-    ts: '1234567890.123456',
+    ts: '2026-04-19T05:00:00.000Z',
     channel: 'C123',
     channelName: undefined,
     threadTs: undefined,
@@ -28,13 +28,19 @@ describe('MessageBus', () => {
   })
 
   describe('push', () => {
-    it('pushes channel notification to Claude', async () => {
+    it('pushes channel notification to Claude with source tag', async () => {
       await bus.push(createMessage())
       expect(mockMcp.notification).toHaveBeenCalledWith({
         method: 'notifications/claude/channel',
         params: {
           content: 'hello world',
-          meta: { sender: 'stefan | dispatcher', channel: 'C123', channel_id: 'C123', ts: '1234567890.123456' },
+          meta: {
+            sender: 'stefan | dispatcher',
+            channel: 'C123',
+            channel_id: 'C123',
+            ts: '2026-04-19T05:00:00.000Z',
+            source: 'local',
+          },
         },
       })
     })
@@ -49,7 +55,8 @@ describe('MessageBus', () => {
             sender: 'stefan | dispatcher',
             channel: 'team-alpha-collab',
             channel_id: 'C123',
-            ts: '1234567890.123456',
+            ts: '2026-04-19T05:00:00.000Z',
+            source: 'local',
           },
         },
       })
@@ -65,11 +72,23 @@ describe('MessageBus', () => {
             sender: 'stefan | dispatcher',
             channel: 'C123',
             channel_id: 'C123',
-            ts: '1234567890.123456',
+            ts: '2026-04-19T05:00:00.000Z',
             thread_ts: '1234567890.000001',
+            source: 'local',
           },
         },
       })
+    })
+
+    it('tags hosted source when passed', async () => {
+      await bus.push(createMessage(), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          params: expect.objectContaining({
+            meta: expect.objectContaining({ source: 'hosted' }),
+          }),
+        }),
+      )
     })
 
     it('emits on channel key', async () => {
@@ -95,6 +114,52 @@ describe('MessageBus', () => {
       bus.on('thread:undefined', threadListener)
       await bus.push(createMessage({ threadTs: undefined }))
       expect(threadListener).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('dedup cache', () => {
+    it('drops a second identical message from either source within the dedup window', async () => {
+      const dropped = vi.fn()
+      bus.on('dedup:dropped', dropped)
+      await bus.push(createMessage(), 'local')
+      await bus.push(createMessage(), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(1)
+      expect(dropped).toHaveBeenCalledTimes(1)
+    })
+
+    it('treats messages in different seconds as distinct', async () => {
+      await bus.push(createMessage({ ts: '2026-04-19T05:00:00.000Z' }), 'local')
+      await bus.push(createMessage({ ts: '2026-04-19T05:00:02.500Z' }), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+    })
+
+    it('treats messages with different text as distinct', async () => {
+      await bus.push(createMessage({ text: 'ok' }), 'local')
+      await bus.push(createMessage({ text: 'ok?' }), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+    })
+
+    it('treats messages with different senders as distinct', async () => {
+      await bus.push(createMessage({ sender: 'alice' }), 'local')
+      await bus.push(createMessage({ sender: 'bob' }), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+    })
+
+    it('treats messages in different topics as distinct even if text and sender match', async () => {
+      await bus.push(createMessage({ threadTs: 't1' }), 'local')
+      await bus.push(createMessage({ threadTs: 't2' }), 'hosted')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('notify failures', () => {
+    it('swallows notification errors and emits notify:error', async () => {
+      const failingMcp = { notification: vi.fn().mockRejectedValue(new Error('disconnected')) }
+      const failingBus = new MessageBus(failingMcp as never)
+      const onError = vi.fn()
+      failingBus.on('notify:error', onError)
+      await expect(failingBus.push(createMessage())).resolves.toBeUndefined()
+      expect(onError).toHaveBeenCalledTimes(1)
     })
   })
 })

@@ -3,20 +3,22 @@ import { convexAuth } from '@convex-dev/auth/server'
 import { ConvexError } from 'convex/values'
 
 import { isAllowedEmail } from './allowlist'
+import { isAllowedRedirect } from './redirect'
 
 /**
  * Convex Auth entry point.
  *
- * Phase 2 wires a Google OAuth provider plus a `createOrUpdateUser` callback
- * that enforces the `@flatout.solutions` domain allow-list at profile time.
- * Sign-ins from any other domain throw a `ConvexError`, which Convex Auth
- * surfaces to the OAuth callback handler as a failed sign-in. No user row is
- * created for rejected emails.
+ * Phase 2 wired a Google OAuth provider plus a `createOrUpdateUser`
+ * callback that enforces the `@flatout.solutions` domain allow-list at
+ * profile time. Sign-ins from any other domain throw a `ConvexError`,
+ * which Convex Auth surfaces to the OAuth callback handler as a failed
+ * sign-in. No user row is created for rejected emails.
  *
- * Phase 4 will add the `redirect` callback that constrains the post-login
- * destination to the local MCP server's callback URL; until then,
- * `SITE_URL` governs the default redirect and OAuth will fail closed if it
- * isn't set.
+ * Phase 4 (this file) adds the `redirect` callback that constrains the
+ * post-login destination to loopback URLs on the `cccollab-oauth-callback`
+ * path - the local MCP server's ephemeral listener. See
+ * `convex/redirect.ts` for the narrow allow rule (http loopback,
+ * specific path, no query / hash, IPv6 excluded).
  */
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [Google],
@@ -46,6 +48,16 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         email,
         image: typeof args.profile.image === 'string' ? args.profile.image : undefined,
       })
+    },
+
+    async redirect({ redirectTo }) {
+      if (!isAllowedRedirect(redirectTo)) {
+        throw new ConvexError({
+          code: 'INVALID_REDIRECT',
+          message: `Redirect to "${redirectTo}" is not permitted.`,
+        })
+      }
+      return redirectTo
     },
   },
 })
