@@ -2,12 +2,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createChannelTools, handleChannelTool, type ChannelToolDeps } from '../../src/tools/channels.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
+import { LocalTransport } from '../../src/transport/local.js'
 
 function createDeps(): ChannelToolDeps {
   const context = new ActiveContext()
   const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
   session.setName('architect')
-  return { session, context, brokerPort: 7850 }
+  // Wraps `fetch(http://127.0.0.1:7850/...)`. The tests mock `global.fetch`
+  // and assert URLs and bodies; behaviour is identical to the pre-refactor
+  // path that constructed those URLs inline.
+  const transport = new LocalTransport(7850)
+  return { session, context, transport }
 }
 
 describe('Channel Tools', () => {

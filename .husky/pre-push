@@ -1,1 +1,1 @@
-yarn workspace @flatoutsolutions/cccollab build
+yarn build

@@ -1,10 +1,11 @@
-import type { SessionManager } from '../session.js'
 import type { ActiveContext } from '../context.js'
+import type { SessionManager } from '../session.js'
+import type { Transport } from '../transport/index.js'
 
 export interface IdentityToolDeps {
   session: SessionManager
   context: ActiveContext
-  brokerPort: number
+  transport: Transport
 }
 
 export function createIdentityTools() {
@@ -44,15 +45,17 @@ export async function handleIdentityTool(
       const { name: displayName, objective } = args as { name: string; objective?: string }
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
-      await registerSession(deps.brokerPort, displayName, objective)
+      try {
+        await deps.transport.introduce({ sessionName: displayName, objective })
+      } catch {
+        // Non-fatal: the transport may be transiently unreachable. A
+        // subsequent introduce or tool call will rehydrate the session
+        // registration server-side.
+      }
 
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
-          await fetch(`http://localhost:${deps.brokerPort}/channels/join`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: displayName, channel: ch.name }),
-          })
+          await deps.transport.joinChannel({ sessionName: displayName, channel: ch.name })
         } catch {
           // Non-fatal: channel listing may be stale until re-introduce.
         }
@@ -82,17 +85,5 @@ export async function handleIdentityTool(
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)
-  }
-}
-
-async function registerSession(brokerPort: number, name: string, objective?: string): Promise<void> {
-  try {
-    await fetch(`http://localhost:${brokerPort}/sessions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, objective }),
-    })
-  } catch {
-    // Non-fatal - broker may not be up yet, session just won't appear in list_sessions
   }
 }

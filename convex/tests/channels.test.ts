@@ -49,7 +49,7 @@ describe('channels.join', () => {
     const userId = await seedUser(t, 'stefan@flatout.solutions')
     const asStefan = t.withIdentity(identityFor(userId))
     const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
-    await expect(asStefan.mutation(api.channels.mutations.join, { sessionId, channel: '  ' })).rejects.toThrowError(
+    await expect(asStefan.mutation(api.channels.mutations.join, { sessionId, channel: '  ' })).rejects.toThrow(
       /INVALID_CHANNEL_NAME/,
     )
   })
@@ -62,9 +62,7 @@ describe('channels.join', () => {
     const sessionId = await t
       .withIdentity(identityFor(userId))
       .mutation(api.sessions.mutations.introduce, { sessionName: 's' })
-    await expect(t.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })).rejects.toThrowError(
-      ConvexError,
-    )
+    await expect(t.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })).rejects.toThrow(ConvexError)
   })
 })
 

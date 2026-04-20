@@ -60,7 +60,7 @@ describe('sessions.introduce', () => {
 
   it('rejects unauthenticated callers with UNAUTHENTICATED', async () => {
     const t = convexTest(schema, modules)
-    await expect(t.mutation(api.sessions.mutations.introduce, { sessionName: 'architect' })).rejects.toThrowError(
+    await expect(t.mutation(api.sessions.mutations.introduce, { sessionName: 'architect' })).rejects.toThrow(
       ConvexError,
     )
   })
@@ -70,7 +70,7 @@ describe('sessions.introduce', () => {
     const userId = await seedUser(t, 'stefan@flatout.solutions')
     await expect(
       t.withIdentity(identityFor(userId)).mutation(api.sessions.mutations.introduce, { sessionName: '  ' }),
-    ).rejects.toThrowError(/INVALID_SESSION_NAME|non-empty/i)
+    ).rejects.toThrow(/INVALID_SESSION_NAME|non-empty/i)
   })
 })
 
@@ -96,7 +96,7 @@ describe('sessions.updateLastSeen', () => {
       .mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
     await expect(
       t.withIdentity(identityFor(bob)).mutation(api.sessions.mutations.updateLastSeen, { sessionId: aliceSession }),
-    ).rejects.toThrowError(/NOT_OWNER/)
+    ).rejects.toThrow(/NOT_OWNER/)
   })
 })
 
@@ -141,7 +141,7 @@ describe('sessions.whoami', () => {
 
   it('rejects unauthenticated callers', async () => {
     const t = convexTest(schema, modules)
-    await expect(t.query(api.sessions.queries.whoami, {})).rejects.toThrowError(ConvexError)
+    await expect(t.query(api.sessions.queries.whoami, {})).rejects.toThrow(ConvexError)
   })
 })
 

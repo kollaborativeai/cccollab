@@ -2,12 +2,13 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { createIdentityTools, handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
+import { LocalTransport } from '../../src/transport/local.js'
 
 function createMockDeps(): IdentityToolDeps {
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
-    brokerPort: 7850,
+    transport: new LocalTransport(7850),
   }
 }
 

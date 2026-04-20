@@ -1,11 +1,12 @@
-import type { SessionManager } from '../session.js'
 import type { ActiveContext } from '../context.js'
+import type { SessionManager } from '../session.js'
+import { DmDeliveryError, TopicNameConflictError, type Transport, type TransportTopic } from '../transport/index.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface TopicToolDeps {
   session: SessionManager
   context: ActiveContext
-  brokerPort: number
+  transport: Transport
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -19,35 +20,6 @@ function pickMatch<T extends { topic: string }>(candidates: T[], query: string):
   if (fuzzy.length === 1) return { match: fuzzy[0]!, ambiguous: [] }
   if (fuzzy.length > 1) return { match: null, ambiguous: fuzzy }
   return { match: null, ambiguous: [] }
-}
-
-function brokerBaseUrl(port: number): string {
-  return `http://localhost:${port}`
-}
-
-interface BrokerTopicData {
-  id: string
-  topic: string
-  channel: string
-  creator: string
-  state: string
-  createdAt: string
-  messageCount?: number
-}
-
-interface BrokerJoinData {
-  ok: boolean
-  channel?: string
-  messages: Array<{ sender: string; text: string; ts: string }>
-}
-
-async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(url, options)
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Broker request failed (${res.status}): ${body}`)
-  }
-  return res.json() as Promise<T>
 }
 
 const NO_NAME_ERROR = JSON.stringify({
@@ -258,11 +230,7 @@ export async function handleTopicTool(
         threadTs = deps.context.getThreadTs()
         topicName = deps.context.getTopicName() ?? 'topic'
       }
-      await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${threadTs}/leave`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: deps.session.displayName }),
-      })
+      await deps.transport.leaveTopic({ sessionName: deps.session.displayName, topicId: threadTs })
       deps.context.leaveTopic(threadTs)
       return JSON.stringify({ id: threadTs, name: topicName })
     }
@@ -296,20 +264,19 @@ export async function handleTopicTool(
       if (typeof to !== 'string' || to.trim() === '') {
         return JSON.stringify({ error: '`to` is required and must be a non-empty string.' })
       }
-      const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/direct-message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: deps.session.displayName, to, text }),
-      })
-      if (res.status === 403 || res.status === 404) {
-        const body = (await res.json()) as { error?: string }
-        return JSON.stringify({ error: body.error ?? `Could not deliver DM to ${to}.` })
+      try {
+        const { viaChannel } = await deps.transport.sendDirectMessage({
+          fromSessionName: deps.session.displayName,
+          toSessionName: to,
+          text,
+        })
+        return JSON.stringify({ to, ...(viaChannel ? { viaChannel } : {}) })
+      } catch (err) {
+        if (err instanceof DmDeliveryError) {
+          return JSON.stringify({ error: err.message })
+        }
+        throw err
       }
-      if (!res.ok) {
-        throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
-      }
-      const body = (await res.json()) as { viaChannel?: string }
-      return JSON.stringify({ to, ...(body.viaChannel ? { viaChannel: body.viaChannel } : {}) })
     }
     default:
       throw new Error(`Unknown topic tool: ${name}`)
@@ -317,25 +284,20 @@ export async function handleTopicTool(
 }
 
 async function handleListTopics(deps: TopicToolDeps, channelArg?: string, includeArchived?: boolean): Promise<string> {
-  const params = new URLSearchParams()
-  if (includeArchived) params.set('include_archived', 'true')
-
+  let topics: TransportTopic[]
   if (channelArg) {
     const channel = normalizeChannelName(channelArg)
     if (!channel) return JSON.stringify({ error: 'Channel name must be non-empty.' })
     if (!deps.context.isChannelSubscribed(channel)) {
       return JSON.stringify({ error: `Not subscribed to "${channel}". Use join_channel first.` })
     }
-    params.set('channel', channel)
+    topics = await deps.transport.listTopics({ channel, includeArchived })
   } else {
-    params.set('sessionId', deps.session.displayName)
+    topics = await deps.transport.listTopics({ sessionName: deps.session.displayName, includeArchived })
   }
 
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
-  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
-
   const activeThread = deps.context.hasTopic() ? deps.context.getThreadTs() : null
-  const result = data.topics.map((t) => ({
+  const result = topics.map((t) => ({
     id: t.id,
     name: t.topic,
     channel: t.channel,
@@ -361,26 +323,25 @@ async function handleStartTopic(deps: TopicToolDeps, topic: string, channelArg?:
     return JSON.stringify({ error: `Not subscribed to "${channel}". Use join_channel first.` })
   }
 
-  const res = await fetch(`${brokerBaseUrl(deps.brokerPort)}/topics`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, creator: deps.session.displayName, channel }),
-  })
-  if (res.status === 409) {
-    const body = (await res.json()) as { error: string }
-    return JSON.stringify({ error: body.error, channel, name: topic })
+  try {
+    const data = await deps.transport.createTopic({
+      sessionName: deps.session.displayName,
+      channel,
+      topic,
+    })
+    deps.context.joinTopic(data.id, topic, data.channel ?? channel)
+    return JSON.stringify({ id: data.id, name: topic, channel: data.channel ?? channel })
+  } catch (err) {
+    if (err instanceof TopicNameConflictError) {
+      return JSON.stringify({ error: err.message, channel, name: topic })
+    }
+    throw err
   }
-  if (!res.ok) {
-    throw new Error(`Broker request failed (${res.status}): ${await res.text()}`)
-  }
-  const data = (await res.json()) as BrokerTopicData
-  deps.context.joinTopic(data.id, topic, data.channel ?? channel)
-  return JSON.stringify({ id: data.id, name: topic, channel: data.channel ?? channel })
 }
 
 async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchTopicById(deps.brokerPort, topic, deps.session.displayName)
+    const byId = await deps.transport.getTopicById({ sessionName: deps.session.displayName, topicId: topic })
     if (!byId) return JSON.stringify({ error: `No topic with id "${topic}" found.` })
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return JSON.stringify({
@@ -392,11 +353,8 @@ async function handleJoinTopic(deps: TopicToolDeps, topic: string): Promise<stri
     return joinTopicByData(deps, byId)
   }
 
-  const params = new URLSearchParams()
-  params.set('sessionId', deps.session.displayName)
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
-  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
-  const { match, ambiguous } = pickMatch(data.topics, topic)
+  const topics = await deps.transport.listTopics({ sessionName: deps.session.displayName })
+  const { match, ambiguous } = pickMatch(topics, topic)
 
   if (!match) {
     if (ambiguous.length > 1) {
@@ -420,53 +378,28 @@ async function handleSetActiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: found.threadTs, name: found.topicName, channel: found.channel })
 }
 
-async function fetchTopicById(brokerPort: number, id: string, sessionId: string): Promise<BrokerTopicData | null> {
-  try {
-    const url = `${brokerBaseUrl(brokerPort)}/topics/${id}?sessionId=${encodeURIComponent(sessionId)}`
-    const res = await fetch(url)
-    if (!res.ok) return null
-    const data = (await res.json()) as { topic: BrokerTopicData }
-    return data.topic
-  } catch {
-    return null
-  }
-}
-
-async function joinTopicByData(deps: TopicToolDeps, topic: BrokerTopicData): Promise<string> {
-  const joinUrl = `${brokerBaseUrl(deps.brokerPort)}/topics/${topic.id}/join`
-  const joinData = await brokerFetch<BrokerJoinData>(joinUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: deps.session.displayName }),
+async function joinTopicByData(deps: TopicToolDeps, topic: TransportTopic): Promise<string> {
+  const { history } = await deps.transport.joinTopic({
+    sessionName: deps.session.displayName,
+    topicId: topic.id,
   })
-
   deps.context.joinTopic(topic.id, topic.topic, topic.channel)
-
   return JSON.stringify({
     id: topic.id,
     name: topic.topic,
     channel: topic.channel,
-    history: joinData.messages,
+    history,
   })
 }
 
 async function handleSendMessage(deps: TopicToolDeps, text: string, topicId: string): Promise<string> {
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/messages`
-  await brokerFetch<{ ok: boolean }>(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, sender: deps.session.displayName }),
-  })
+  await deps.transport.sendTopicMessage({ sessionName: deps.session.displayName, topicId, text })
   return JSON.stringify({ topicId })
 }
 
 async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise<string> {
   const topicName = deps.context.getTopicName() ?? 'topic'
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${topicId}/archive`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ archivedBy: deps.session.displayName }),
-  })
+  await deps.transport.archiveTopic({ sessionName: deps.session.displayName, topicId })
   deps.context.leaveTopic(topicId)
   return JSON.stringify({ id: topicId, name: topicName })
 }
@@ -474,18 +407,14 @@ async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise
 async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Promise<string> {
   const resolved = await resolveTopicIdInSubscribedChannels(deps, name)
   if ('error' in resolved) return JSON.stringify(resolved)
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${resolved.id}/archive`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ archivedBy: deps.session.displayName }),
-  })
+  await deps.transport.archiveTopic({ sessionName: deps.session.displayName, topicId: resolved.id })
   deps.context.leaveTopic(resolved.id)
   return JSON.stringify({ id: resolved.id, name: resolved.topicName })
 }
 
 async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise<string> {
   if (UUID_PATTERN.test(topic)) {
-    const byId = await fetchTopicById(deps.brokerPort, topic, deps.session.displayName)
+    const byId = await deps.transport.getTopicById({ sessionName: deps.session.displayName, topicId: topic })
     if (!byId || byId.state !== 'archived') return JSON.stringify({ error: `No archived topic with id "${topic}".` })
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return JSON.stringify({
@@ -494,21 +423,15 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
         name: byId.topic,
       })
     }
-    await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${byId.id}/unarchive`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
+    await deps.transport.unarchiveTopic({ sessionName: deps.session.displayName, topicId: byId.id })
     return JSON.stringify({ id: byId.id, name: byId.topic, channel: byId.channel })
   }
 
-  const params = new URLSearchParams()
-  params.set('include_archived', 'true')
-  params.set('sessionId', deps.session.displayName)
-  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(
-    `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`,
-  )
-  const archived = data.topics.filter((t) => t.state === 'archived')
+  const topics = await deps.transport.listTopics({
+    sessionName: deps.session.displayName,
+    includeArchived: true,
+  })
+  const archived = topics.filter((t) => t.state === 'archived')
   const { match, ambiguous } = pickMatch(archived, topic)
 
   if (!match) {
@@ -521,33 +444,27 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
     return JSON.stringify({ error: `No archived topic matching "${topic}" in your subscribed channels.` })
   }
 
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/topics/${match.id}/unarchive`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  })
+  await deps.transport.unarchiveTopic({ sessionName: deps.session.displayName, topicId: match.id })
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel })
 }
 
 async function handleListSessions(deps: TopicToolDeps, channelArg?: string): Promise<string> {
-  const params = new URLSearchParams()
+  let sessions
   if (channelArg) {
     const channel = normalizeChannelName(channelArg)
     if (!channel) return JSON.stringify({ error: 'Channel name must be non-empty.' })
     if (!deps.context.isChannelSubscribed(channel)) {
       return JSON.stringify({ error: `Not subscribed to "${channel}". Use join_channel first.` })
     }
-    params.set('channel', channel)
+    sessions = await deps.transport.listSessions({ channel })
+  } else {
+    sessions = await deps.transport.listSessions({})
   }
-  const url = `${brokerBaseUrl(deps.brokerPort)}/sessions${params.toString() ? `?${params.toString()}` : ''}`
-  const data = await brokerFetch<{
-    sessions: Array<{ name: string; objective?: string; registeredAt: string; channels?: string[] }>
-  }>(url)
 
   const myChannels = new Set(deps.context.getSubscribedChannels().map((c) => c.name))
   const visible = channelArg
-    ? data.sessions
-    : data.sessions.filter((s) => {
+    ? sessions
+    : sessions.filter((s) => {
         if (!s.channels || s.channels.length === 0) return false
         return s.channels.some((ch) => myChannels.has(ch))
       })
@@ -575,18 +492,15 @@ async function resolveTopicIdInSubscribedChannels(
   name: string,
 ): Promise<ResolvedTopic | ResolveError> {
   if (UUID_PATTERN.test(name)) {
-    const byId = await fetchTopicById(deps.brokerPort, name, deps.session.displayName)
+    const byId = await deps.transport.getTopicById({ sessionName: deps.session.displayName, topicId: name })
     if (!byId) return { error: `No topic with id "${name}".` }
     if (!deps.context.isChannelSubscribed(byId.channel)) {
       return { error: `Topic "${byId.topic}" is in "${byId.channel}", which you are not subscribed to.` }
     }
     return { id: byId.id, topicName: byId.topic }
   }
-  const params = new URLSearchParams()
-  params.set('sessionId', deps.session.displayName)
-  const url = `${brokerBaseUrl(deps.brokerPort)}/topics?${params.toString()}`
-  const data = await brokerFetch<{ topics: BrokerTopicData[] }>(url)
-  const { match, ambiguous } = pickMatch(data.topics, name)
+  const topics = await deps.transport.listTopics({ sessionName: deps.session.displayName })
+  const { match, ambiguous } = pickMatch(topics, name)
   if (!match) {
     if (ambiguous.length > 1) {
       return {

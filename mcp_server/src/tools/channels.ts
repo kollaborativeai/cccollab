@@ -1,24 +1,12 @@
-import type { SessionManager } from '../session.js'
 import type { ActiveContext, ChannelSource } from '../context.js'
+import type { SessionManager } from '../session.js'
+import type { Transport } from '../transport/index.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface ChannelToolDeps {
   session: SessionManager
   context: ActiveContext
-  brokerPort: number
-}
-
-function brokerBaseUrl(port: number): string {
-  return `http://localhost:${port}`
-}
-
-async function brokerFetch<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(url, options)
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Broker request failed (${res.status}): ${body}`)
-  }
-  return res.json() as Promise<T>
+  transport: Transport
 }
 
 const NO_NAME_ERROR = JSON.stringify({
@@ -116,13 +104,10 @@ async function handleListChannels(deps: ChannelToolDeps): Promise<string> {
   const subscribedByName = new Map(subscribed.map((c) => [c.name, c]))
   const active = deps.context.getActiveChannel()
 
-  // Broker-global view: no sessionId param => returns ALL channels on the broker.
+  // Broker-global view: no sessionId filter => returns ALL channels.
   let brokerChannels: Array<{ name: string; subscriberCount: number }> = []
   try {
-    const data = await brokerFetch<{ channels: Array<{ name: string; subscriberCount: number }> }>(
-      `${brokerBaseUrl(deps.brokerPort)}/channels`,
-    )
-    brokerChannels = data.channels
+    brokerChannels = await deps.transport.listChannels({})
   } catch {
     // Broker unreachable: degrade gracefully to subscribed-only view below.
   }
@@ -169,17 +154,12 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string): Promis
   const normalized = normalizeChannelName(rawName)
   if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
 
-  const data = await brokerFetch<{ subscriberCount?: number }>(`${brokerBaseUrl(deps.brokerPort)}/channels/join`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: deps.session.displayName, channel: normalized }),
+  const { subscriberCount } = await deps.transport.joinChannel({
+    sessionName: deps.session.displayName,
+    channel: normalized,
   })
   const { becameActive } = deps.context.joinChannel(normalized, 'manual')
-  return JSON.stringify({
-    channel: normalized,
-    becameActive,
-    subscriberCount: data.subscriberCount ?? 1,
-  })
+  return JSON.stringify({ channel: normalized, becameActive, subscriberCount })
 }
 
 async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
@@ -189,17 +169,9 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string): Promi
     return JSON.stringify({ error: `Not subscribed to "${normalized}".` })
   }
 
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/channels/leave`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: deps.session.displayName, channel: normalized }),
-  })
+  await deps.transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
   const { removed, newActive } = deps.context.leaveChannel(normalized)
-  return JSON.stringify({
-    channel: normalized,
-    removed,
-    newActiveChannel: newActive ?? null,
-  })
+  return JSON.stringify({ channel: normalized, removed, newActiveChannel: newActive ?? null })
 }
 
 async function handleSetActiveChannel(deps: ChannelToolDeps, rawName: string): Promise<string> {
@@ -234,10 +206,6 @@ async function handleSendMessageToChannel(
     return JSON.stringify({ error: `Not subscribed to "${target}". Use join_channel first.` })
   }
 
-  await brokerFetch<{ ok: boolean }>(`${brokerBaseUrl(deps.brokerPort)}/broadcast`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, sender: deps.session.displayName, channel: target }),
-  })
+  await deps.transport.broadcast({ sessionName: deps.session.displayName, channel: target, text })
   return JSON.stringify({ channel: target })
 }

@@ -44,7 +44,7 @@ describe('messages.sendToTopic', () => {
     // Bob is subscribed to eng but has not joined the topic.
     await expect(
       asBob.mutation(api.messages.mutations.sendToTopic, { sessionId: bobSession, topicId, text: 'hi' }),
-    ).rejects.toThrowError(/NOT_IN_TOPIC/)
+    ).rejects.toThrow(/NOT_IN_TOPIC/)
   })
 })
 
@@ -106,7 +106,7 @@ describe('messages.sendToSession (DM)', () => {
         toSessionId: bobSession,
         text: 'hi',
       }),
-    ).rejects.toThrowError(/DM_NO_SHARED_CHANNEL/)
+    ).rejects.toThrow(/DM_NO_SHARED_CHANNEL/)
   })
 
   it('errors DM_RECIPIENT_AMBIGUOUS when more than one matching session shares a channel', async () => {
@@ -132,7 +132,7 @@ describe('messages.sendToSession (DM)', () => {
         toSessionName: 'architect',
         text: 'hi',
       }),
-    ).rejects.toThrowError(/DM_RECIPIENT_AMBIGUOUS/)
+    ).rejects.toThrow(/DM_RECIPIENT_AMBIGUOUS/)
   })
 })
 

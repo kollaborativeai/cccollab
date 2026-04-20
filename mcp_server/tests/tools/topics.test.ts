@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createTopicTools, handleTopicTool, type TopicToolDeps } from '../../src/tools/topics.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
+import { LocalTransport } from '../../src/transport/local.js'
 
 function createMockDeps(): TopicToolDeps {
   const context = new ActiveContext()
   context.joinChannel('default', 'fallback')
   const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
   session.setName('architect')
-  return { session, context, brokerPort: 7850 }
+  return { session, context, transport: new LocalTransport(7850) }
 }
 
 describe('Topic Tools', () => {
@@ -204,7 +205,7 @@ describe('Topic Tools', () => {
       const context = new ActiveContext()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       session.setName('architect')
-      const deps2 = { session, context, brokerPort: 7850 }
+      const deps2 = { session, context, transport: new LocalTransport(7850) }
       const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'x' }, deps2))
       expect(result.error).toContain('No active channel')
     })

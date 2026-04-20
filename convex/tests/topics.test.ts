@@ -50,7 +50,7 @@ describe('topics.start', () => {
         channel: 'eng',
         topic: 'build pipeline',
       }),
-    ).rejects.toThrowError(/TOPIC_NAME_CONFLICT/)
+    ).rejects.toThrow(/TOPIC_NAME_CONFLICT/)
   })
 
   it('tolerates an archived topic with the same name', async () => {
@@ -80,7 +80,7 @@ describe('topics.start', () => {
     const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
     await expect(
       asStefan.mutation(api.topics.mutations.start, { sessionId, channel: 'eng', topic: 't' }),
-    ).rejects.toThrowError(/CHANNEL_NOT_FOUND/)
+    ).rejects.toThrow(/CHANNEL_NOT_FOUND/)
   })
 })
 
@@ -98,9 +98,9 @@ describe('topics.unarchive', () => {
     })
     await asStefan.mutation(api.topics.mutations.archive, { sessionId, topicId: archivedId })
     await asStefan.mutation(api.topics.mutations.start, { sessionId, channel: 'eng', topic: 'foo' })
-    await expect(
-      asStefan.mutation(api.topics.mutations.unarchive, { sessionId, topicId: archivedId }),
-    ).rejects.toThrowError(/TOPIC_NAME_CONFLICT/)
+    await expect(asStefan.mutation(api.topics.mutations.unarchive, { sessionId, topicId: archivedId })).rejects.toThrow(
+      /TOPIC_NAME_CONFLICT/,
+    )
   })
 })
 
