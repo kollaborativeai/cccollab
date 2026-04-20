@@ -80,12 +80,12 @@ describe('MessageBus', () => {
       })
     })
 
-    it('tags hosted source when passed', async () => {
-      await bus.push(createMessage(), 'hosted')
+    it('tags remote source when passed', async () => {
+      await bus.push(createMessage(), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledWith(
         expect.objectContaining({
           params: expect.objectContaining({
-            meta: expect.objectContaining({ source: 'hosted' }),
+            meta: expect.objectContaining({ source: 'remote' }),
           }),
         }),
       )
@@ -122,32 +122,32 @@ describe('MessageBus', () => {
       const dropped = vi.fn()
       bus.on('dedup:dropped', dropped)
       await bus.push(createMessage(), 'local')
-      await bus.push(createMessage(), 'hosted')
+      await bus.push(createMessage(), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(1)
       expect(dropped).toHaveBeenCalledTimes(1)
     })
 
     it('treats messages in different seconds as distinct', async () => {
       await bus.push(createMessage({ ts: '2026-04-19T05:00:00.000Z' }), 'local')
-      await bus.push(createMessage({ ts: '2026-04-19T05:00:02.500Z' }), 'hosted')
+      await bus.push(createMessage({ ts: '2026-04-19T05:00:02.500Z' }), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(2)
     })
 
     it('treats messages with different text as distinct', async () => {
       await bus.push(createMessage({ text: 'ok' }), 'local')
-      await bus.push(createMessage({ text: 'ok?' }), 'hosted')
+      await bus.push(createMessage({ text: 'ok?' }), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(2)
     })
 
     it('treats messages with different senders as distinct', async () => {
       await bus.push(createMessage({ sender: 'alice' }), 'local')
-      await bus.push(createMessage({ sender: 'bob' }), 'hosted')
+      await bus.push(createMessage({ sender: 'bob' }), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(2)
     })
 
     it('treats messages in different topics as distinct even if text and sender match', async () => {
       await bus.push(createMessage({ threadTs: 't1' }), 'local')
-      await bus.push(createMessage({ threadTs: 't2' }), 'hosted')
+      await bus.push(createMessage({ threadTs: 't2' }), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(2)
     })
   })

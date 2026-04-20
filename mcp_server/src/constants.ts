@@ -9,7 +9,7 @@ export const CCCOLLAB_LOGS_DIR = join(CCCOLLAB_HOME, 'logs')
 export const BROKER_RENDEZVOUS_FILE = join(CCCOLLAB_RUN_DIR, `${PROFILE}.json`)
 
 /**
- * Persistent config for hosted mode. Contains the hosted URL and the
+ * Persistent config for remote mode. Contains the remote URL and the
  * OAuth tokens. Chmod 600 on write - tokens must not be world-readable.
  */
 export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')

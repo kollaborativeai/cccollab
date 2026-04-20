@@ -18,7 +18,11 @@ import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
 import { resolveTsx } from './resolve-tsx.js'
 import { LocalTransport } from './transport/local.js'
+import { RemoteTransport } from './transport/remote.js'
 import type { Transport } from './transport/index.js'
+import { TransportRouter } from './transport/router.js'
+import { createRemoteClientIfConfigured } from './remote/client.js'
+import { loadRemoteConfig } from './remote/config.js'
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
@@ -48,7 +52,37 @@ async function startServer(config: Config, brokerPort: number) {
   }
 
   const session = new SessionManager({ username: config.username, cwd: process.cwd(), worktreeName })
-  const transport: Transport = new LocalTransport(brokerPort)
+
+  // Local transport is always built; remote is conditional on a valid
+  // config (URL + tokens present, or URL + env-var auth token).
+  const localTransport = new LocalTransport(brokerPort)
+  const transports: Transport[] = [localTransport]
+
+  let remoteTransport: RemoteTransport | null = null
+  const remoteCfg = loadRemoteConfig()
+  if (remoteCfg && remoteCfg.accessToken !== '' && remoteCfg.refreshToken !== '') {
+    try {
+      const convexClient = createRemoteClientIfConfigured()
+      if (convexClient) {
+        remoteTransport = new RemoteTransport({ client: convexClient })
+        transports.push(remoteTransport)
+        console.error(`[cccollab] Remote transport active (deployment: ${remoteCfg.remoteUrl})`)
+      }
+    } catch (err) {
+      // Graceful degradation: if the remote client fails to construct
+      // for any reason, keep running with local-only. The user sees
+      // the warning in stderr; `authenticate` can re-try later.
+      console.error(
+        `[cccollab] Could not start remote transport, continuing local-only: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  } else if (remoteCfg) {
+    console.error(
+      `[cccollab] Remote URL configured (${remoteCfg.remoteUrl}) but no valid tokens. Call the \`authenticate\` tool to sign in.`,
+    )
+  }
+
+  const router = new TransportRouter(transports)
 
   const initial = resolveInitialIdentity(process.cwd())
   if (initial.name) session.setName(initial.name)
@@ -59,9 +93,14 @@ async function startServer(config: Config, brokerPort: number) {
         `name=${initial.name ?? '(unset)'} objective=${initial.objective ?? '(unset)'}`,
     )
     if (initial.name) {
-      transport.introduce({ sessionName: initial.name, objective: initial.objective }).catch(() => {
-        /* best-effort */
-      })
+      // Identity goes to every enabled transport so both ends can
+      // attribute our messages. Best-effort per transport: one
+      // transport's registration failing does not block the other.
+      for (const transport of router.enabled()) {
+        transport.introduce({ sessionName: initial.name, objective: initial.objective }).catch(() => {
+          /* best-effort */
+        })
+      }
     }
   }
 
@@ -71,10 +110,12 @@ async function startServer(config: Config, brokerPort: number) {
     `[cccollab] Initial channels (source=${initialChannels.source}): ` +
       (initialChannels.channels.length > 0 ? initialChannels.channels.join(', ') : '(none)'),
   )
+  // Initial channels are LOCAL by default. Remote channels are always
+  // opt-in: the session must explicitly `join_channel({location: 'remote'})`.
   for (const channel of initialChannels.channels) {
-    context.joinChannel(channel, initialChannels.source)
+    context.joinChannel(channel, initialChannels.source, 'local')
     if (session.hasName()) {
-      transport.joinChannel({ sessionName: session.displayName, channel }).catch(() => {
+      localTransport.joinChannel({ sessionName: session.displayName, channel }).catch(() => {
         /* best-effort */
       })
     }
@@ -113,6 +154,12 @@ async function startServer(config: Config, brokerPort: number) {
       : 'No default channels configured. Use join_channel to subscribe.'
 
   instructionLines.push(subscriptionLine, '', 'Workflow:', ...workflowSteps.map((s, i) => `${i + 1}. ${s}`))
+  if (router.hasRemote()) {
+    instructionLines.push(
+      '',
+      'Remote mode is active. Channels at location="remote" are shared across machines; location="local" is this machine only.',
+    )
+  }
   instructionLines.push(
     '',
     "The server remembers your active channel and topic. You don't need to repeat them.",
@@ -140,7 +187,29 @@ async function startServer(config: Config, brokerPort: number) {
     context,
   })
 
-  registerTools(mcp, { session, context, transport })
+  // Remote inbound subscriptions. Scope: DM inbox only in this commit.
+  // Channel / topic reactive subscriptions land in a follow-up (the
+  // join/leave lifecycle wiring is non-trivial and not blocking for
+  // round-trip tool tests). See commit message.
+  const remoteUnsubscribes: Array<() => void> = []
+  if (remoteTransport && session.hasName()) {
+    // Kick off a one-shot subscribe after `introduce` has had time to
+    // register the session server-side. The remote transport's
+    // `introduce()` call above is a promise; we fire-and-forget it
+    // from the loop, so we retry-subscribe with a delay. Simpler
+    // alternative that ships now: subscribe after the MCP connect
+    // handshake, which forces `introduce` to flush through.
+    const tryWireDmInbox = () => {
+      const unsubscribe = remoteTransport!.subscribeDirectMessages((msg) => {
+        void messageBus.push(msg, 'remote')
+      })
+      remoteUnsubscribes.push(unsubscribe)
+    }
+    // Defer to ensure introduce() completed; any delay > 0 works.
+    setTimeout(tryWireDmInbox, 250).unref?.()
+  }
+
+  registerTools(mcp, { session, context, router })
 
   let shuttingDown = false
   const shutdown = async (reason: string): Promise<never> => {
@@ -152,11 +221,20 @@ async function startServer(config: Config, brokerPort: number) {
     }
     shuttingDown = true
     console.error(`[cccollab] Shutting down (${reason})...`)
-    if (session.hasName()) {
+    for (const unsubscribe of remoteUnsubscribes) {
       try {
-        await transport.deregisterSession({ sessionName: session.displayName })
+        unsubscribe()
       } catch {
-        // best-effort
+        /* ignore */
+      }
+    }
+    if (session.hasName()) {
+      for (const transport of router.all()) {
+        try {
+          await transport.deregisterSession({ sessionName: session.displayName })
+        } catch {
+          // best-effort
+        }
       }
     }
     try {
@@ -189,20 +267,20 @@ async function startServer(config: Config, brokerPort: number) {
 interface ToolDeps {
   session: SessionManager
   context: ActiveContext
-  transport: Transport
+  router: TransportRouter
 }
 
 /**
  * Register every cccollab tool against the `McpServer` instance.
  *
- * We moved off the deprecated `Server` + `setRequestHandler` style onto
- * the current `registerTool` API (see `@modelcontextprotocol/sdk`'s
- * migration docs). Each tool declares its input shape as a Zod object -
- * validation is now enforced by the SDK before our handler runs, and the
- * tool descriptions / annotations surface to Claude Code's UI.
+ * The dual-transport wiring added in CCC-3 means every channel- or
+ * topic-addressed tool carries a `location` arg (default `"local"`)
+ * that picks which transport handles the call. List ops accept an
+ * optional `location` filter; omit it to union across every enabled
+ * transport.
  *
- * The business logic in the `handleXxxTool` functions is unchanged; this
- * wrapper is purely the MCP-SDK-facing glue.
+ * Business logic lives in `handleXxxTool`; this function is only the
+ * MCP-SDK-facing glue (Zod schemas + CallToolResult shaping).
  */
 function registerTools(mcp: McpServer, deps: ToolDeps): void {
   const text = (s: string): CallToolResult => ({ content: [{ type: 'text' as const, text: s }] })
@@ -216,7 +294,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'introduce',
     {
       description:
-        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Returns JSON.',
+        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers on every enabled transport. Returns JSON.',
       inputSchema: {
         name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
@@ -235,7 +313,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?, activeTopic?: {name, channel}, subscribedChannels: [{name, source}]}.',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], remote?: {configured, enabled, degradation?}}.',
       inputSchema: {},
     },
     async () => {
@@ -247,17 +325,43 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     },
   )
 
+  mcp.registerTool(
+    'authenticate',
+    {
+      description:
+        'Start the Google OAuth sign-in flow against the configured remote cccollab deployment (CCCOLLAB_REMOTE_URL or persisted config). Writes tokens to ~/.cccollab/config.json at mode 0600. Remote transport attaches on the NEXT session start; restart your Claude Code session after a successful sign-in. When no remote URL is configured, returns setup guidance instead of failing.',
+      inputSchema: {
+        force: z
+          .boolean()
+          .optional()
+          .describe('Force a fresh sign-in even if a valid token is already persisted. Defaults to false.'),
+      },
+    },
+    async (args) => {
+      try {
+        return text(await handleIdentityTool('authenticate', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
   // ─── Channels ─────────────────────────────────────────────────────────
   mcp.registerTool(
     'list_channels',
     {
       description:
-        'Return all channels visible on the broker with subscription and active status. Returns {activeChannel, channels: [{name, subscriberCount, subscribed, source, isActive}]}. `source` is the ChannelSource for subscribed channels, null otherwise. `activeChannel` is your active channel name or null. Use this to discover channels you could join (subscribed:false) as well as those you are already in.',
-      inputSchema: {},
+        'Return channels across enabled transports with subscription and active status. Returns {activeChannel: {name, location} | null, channels: [{name, location, subscriberCount, subscribed, source, isActive}]}. Optional `location` restricts to one transport.',
+      inputSchema: {
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .describe('Restrict to a single location. Omit to list across all enabled locations.'),
+      },
     },
-    async () => {
+    async (args) => {
       try {
-        return text(await handleChannelTool('list_channels', {}, deps))
+        return text(await handleChannelTool('list_channels', args as Record<string, unknown>, deps))
       } catch (err) {
         return error(err)
       }
@@ -268,9 +372,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'join_channel',
     {
       description:
-        'Subscribe to a channel (implicitly created). Idempotent. Returns {channel, becameActive, subscriberCount}.',
+        'Subscribe to a channel (implicitly created) at the given location. Idempotent. Returns {channel, location, becameActive, subscriberCount}.',
       inputSchema: {
         name: z.string().describe('Channel name (case-insensitive, non-empty).'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .default('local')
+          .describe('Transport location. "local" = in-process broker, "remote" = Convex deployment.'),
       },
     },
     async (args) => {
@@ -285,9 +394,15 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'leave_channel',
     {
-      description: 'Unsubscribe from a channel. Returns {channel, removed, newActiveChannel}.',
+      description:
+        'Unsubscribe from a channel at the given location. Returns {channel, location, removed, newActiveChannel}.',
       inputSchema: {
         name: z.string().describe('Channel name to leave.'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .default('local')
+          .describe('Transport location. Defaults to "local".'),
       },
     },
     async (args) => {
@@ -302,9 +417,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'set_active_channel',
     {
-      description: 'Set your active channel. Returns {activeChannel}.',
+      description: 'Set your active channel (among subscribed). Returns {activeChannel: {name, location}}.',
       inputSchema: {
         name: z.string().describe('Channel name (must be subscribed).'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .default('local')
+          .describe('Transport location. Defaults to "local".'),
       },
     },
     async (args) => {
@@ -320,10 +440,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'send_message_to_channel',
     {
       description:
-        'Send a top-level broadcast to a channel (not in a topic). Defaults to active channel. Returns {channel}.',
+        'Send a top-level broadcast to a channel (not in a topic). Defaults to the active channel. Returns {channel, location}.',
       inputSchema: {
         text: z.string().describe('Message text'),
         channel: z.string().optional().describe('Channel name. Defaults to the active channel.'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .describe('Transport location of the target channel. Inferred from subscriptions when omitted.'),
       },
     },
     async (args) => {
@@ -340,10 +464,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_topics',
     {
       description:
-        'Return topics as JSON array: [{id, name, channel, state, messageCount, isJoined, isMyActive, creator, createdAt}]. With no channel, scopes across all subscribed channels.',
+        'Return topics as JSON array: [{id, name, channel, location, state, messageCount, isJoined, isMyActive, creator, createdAt}]. With no channel, scopes across all subscribed channels on every enabled transport.',
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all subscribed channels.'),
         include_archived: z.boolean().optional().describe('Include archived topics (default: false)'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .describe('Restrict to a single location. Omit to query all enabled locations.'),
       },
     },
     async (args) => {
@@ -358,10 +486,15 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'start_topic',
     {
-      description: 'Create a topic in a channel (defaults to the active channel). Returns {id, name, channel}.',
+      description:
+        "Create a topic in a channel (defaults to the active channel). `location` selects the transport (defaults to the active channel's location). Returns {id, name, channel, location}.",
       inputSchema: {
         topic: z.string().describe('Topic name / title'),
         channel: z.string().optional().describe('Channel to create the topic in. Defaults to active channel.'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .describe('Transport location. Defaults to the active channel\'s location, or "local".'),
       },
     },
     async (args) => {
@@ -376,9 +509,10 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'join_topic',
     {
-      description: 'Join a topic by name (fuzzy match) or UUID. Returns {id, name, channel, history}.',
+      description:
+        'Join a topic by name (fuzzy match across transports) or id. Id format routes to the owning transport automatically. Returns {id, name, channel, location, history}.',
       inputSchema: {
-        topic: z.string().describe('Topic name (fuzzy match) or UUID'),
+        topic: z.string().describe('Topic name (fuzzy match) or id'),
       },
     },
     async (args) => {
@@ -410,9 +544,9 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'set_active_topic',
     {
-      description: 'Set the active topic among joined topics. Returns {id, name, channel}.',
+      description: 'Set the active topic among joined topics. Returns {id, name, channel, location}.',
       inputSchema: {
-        topic: z.string().describe('Topic name or UUID of a joined topic.'),
+        topic: z.string().describe('Topic name or id of a joined topic.'),
       },
     },
     async (args) => {
@@ -444,7 +578,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'unarchive_topic',
     {
-      description: 'Unarchive a previously archived topic. Returns {id, name, channel}.',
+      description: 'Unarchive a previously archived topic. Returns {id, name, channel, location}.',
       inputSchema: {
         topic: z.string().describe('Topic name (fuzzy match).'),
       },
@@ -461,7 +595,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'send_message_to_topic',
     {
-      description: 'Send a message to a topic. Defaults to the active topic. Returns {topicId}.',
+      description: 'Send a message to a topic. Defaults to the active topic. Routes by topic id. Returns {topicId}.',
       inputSchema: {
         text: z.string().describe('Message text'),
         topic: z.string().optional().describe('Topic name (fuzzy match). Defaults to active topic.'),
@@ -479,9 +613,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   mcp.registerTool(
     'list_sessions',
     {
-      description: 'Return visible sessions as JSON array: [{name, objective?, channels, registeredAt}].',
+      description:
+        'Return visible sessions as JSON array: [{name, objective?, channels: [{name, location}], registeredAt}]. Unions across every enabled transport, tagging each channel by the transport that reported it.',
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
+        location: z
+          .enum(['local', 'remote'])
+          .optional()
+          .describe('Restrict to a single location. Omit to query all enabled locations.'),
       },
     },
     async (args) => {
@@ -497,7 +636,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'send_message_to_session',
     {
       description:
-        'Send a private direct message to another session. Requires shared channel. Returns {to, viaChannel}.',
+        'Send a private direct message to another session. Routes by presence: prefers local when both know the recipient. Returns {to, viaChannel?}.',
       inputSchema: {
         to: z.string().describe('Recipient session name (must match their introduced name exactly)'),
         text: z.string().describe('Message text'),

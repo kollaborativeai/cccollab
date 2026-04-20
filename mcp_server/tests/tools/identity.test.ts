@@ -3,12 +3,14 @@ import { createIdentityTools, handleIdentityTool, type IdentityToolDeps } from '
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
+import { TransportRouter } from '../../src/transport/router.js'
 
 function createMockDeps(): IdentityToolDeps {
+  const transport = new LocalTransport(7850)
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
-    transport: new LocalTransport(7850),
+    router: new TransportRouter([transport]),
   }
 }
 
@@ -18,10 +20,10 @@ describe('Identity Tools', () => {
   })
 
   describe('createIdentityTools', () => {
-    it('returns 2 tool definitions', () => {
+    it('returns 3 tool definitions', () => {
       const tools = createIdentityTools()
-      expect(tools).toHaveLength(2)
-      expect(tools.map((t) => t.name)).toEqual(['introduce', 'whoami'])
+      expect(tools).toHaveLength(3)
+      expect(tools.map((t) => t.name)).toEqual(['introduce', 'whoami', 'authenticate'])
     })
   })
 
@@ -58,7 +60,7 @@ describe('Identity Tools', () => {
     it('introduce re-registers already-subscribed channels with broker', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
-      deps.context.joinChannel('default', 'fallback')
+      deps.context.joinChannel('default', 'fallback', 'local')
       await handleIdentityTool('introduce', { name: 'architect' }, deps)
       const channelJoinCall = mockFetch.mock.calls.find((c) => (c[0] as string).includes('/channels/join'))
       expect(channelJoinCall).toBeDefined()
@@ -72,45 +74,55 @@ describe('Identity Tools', () => {
     })
 
     describe('whoami', () => {
-      it('reports active channel and subscriptions with source', async () => {
+      it('reports active channel with location and subscriptions with source+location', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
         vi.stubGlobal('fetch', mockFetch)
-        deps.context.joinChannel('default', 'fallback')
-        deps.context.joinChannel('project_x', 'manual')
+        deps.context.joinChannel('default', 'fallback', 'local')
+        deps.context.joinChannel('project_x', 'manual', 'local')
         await handleIdentityTool('introduce', { name: 'architect', objective: 'design the API' }, deps)
 
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.name).toBe('architect')
         expect(result.objective).toBe('design the API')
-        expect(result.activeChannel).toBe('default')
+        expect(result.activeChannel).toEqual({ name: 'default', location: 'local' })
         expect(result.subscribedChannels).toEqual([
-          { name: 'default', source: 'fallback' },
-          { name: 'project_x', source: 'manual' },
+          { name: 'default', location: 'local', source: 'fallback' },
+          { name: 'project_x', location: 'local', source: 'manual' },
         ])
       })
 
       it('omits activeTopic when none set', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
         vi.stubGlobal('fetch', mockFetch)
-        deps.context.joinChannel('default', 'fallback')
+        deps.context.joinChannel('default', 'fallback', 'local')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.activeTopic).toBeUndefined()
       })
 
-      it('reports active topic with its channel', async () => {
+      it('reports active topic with channel and location', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
         vi.stubGlobal('fetch', mockFetch)
-        deps.context.joinChannel('default', 'fallback')
-        deps.context.joinTopic('uuid-1', 'Auth refactor', 'default')
+        deps.context.joinChannel('default', 'fallback', 'local')
+        deps.context.joinTopic('uuid-1', 'Auth refactor', 'default', 'local')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
-        expect(result.activeTopic).toEqual({ name: 'Auth refactor', channel: 'default' })
+        expect(result.activeTopic).toEqual({ name: 'Auth refactor', channel: 'default', location: 'local' })
       })
 
       it('returns error JSON when no name has been set', async () => {
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.error).toContain('introduce')
+      })
+    })
+
+    describe('authenticate', () => {
+      it('returns setup guidance when no remote URL configured', async () => {
+        delete process.env.CCCOLLAB_REMOTE_URL
+        delete process.env.CCCOLLAB_HOSTED_URL
+        const result = await handleIdentityTool('authenticate', {}, deps)
+        expect(result).toContain('Remote mode is not configured')
+        expect(result).toContain('CCCOLLAB_REMOTE_URL')
       })
     })
   })

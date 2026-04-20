@@ -2,13 +2,13 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import { loadHostedConfig, saveHostedConfig, type HostedConfig } from './config.js'
+import { loadRemoteConfig, saveRemoteConfig, type RemoteConfig } from './config.js'
 
-/** See `hosted/auth.ts` for rationale on runtime-typed action references. */
+/** See `remote/auth.ts` for rationale on runtime-typed action references. */
 const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as FunctionReference<'action'>
 
 /**
- * Create a `ConvexClient` for the hosted transport, wired with an
+ * Create a `ConvexClient` for the remote transport, wired with an
  * `AuthTokenFetcher` that refreshes the access token via the Convex
  * Auth `signIn({ refreshToken })` path when Convex signals the token
  * has expired.
@@ -21,8 +21,8 @@ const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as F
  * pending promise so we never issue two refreshes for the same stored
  * refresh token.
  */
-export function createHostedClient(initialConfig: HostedConfig): ConvexClient {
-  const client = new ConvexClient(initialConfig.hostedUrl)
+export function createRemoteClient(initialConfig: RemoteConfig): ConvexClient {
+  const client = new ConvexClient(initialConfig.remoteUrl)
   let currentAccessToken = initialConfig.accessToken
   let currentRefreshToken = initialConfig.refreshToken
   let refreshInFlight: Promise<string | null> | null = null
@@ -34,10 +34,10 @@ export function createHostedClient(initialConfig: HostedConfig): ConvexClient {
     if (refreshInFlight !== null) return await refreshInFlight
     refreshInFlight = (async () => {
       try {
-        const next = await refreshTokens(initialConfig.hostedUrl, currentRefreshToken)
+        const next = await refreshTokens(initialConfig.remoteUrl, currentRefreshToken)
         if (next === null) {
           // Refresh failed: clear in-memory tokens and surface null so
-          // Convex flips to unauthenticated. The caller (hosted
+          // Convex flips to unauthenticated. The caller (remote
           // transport) should trip its degradation switch on the next
           // operation.
           currentAccessToken = ''
@@ -45,7 +45,7 @@ export function createHostedClient(initialConfig: HostedConfig): ConvexClient {
         }
         currentAccessToken = next.accessToken
         currentRefreshToken = next.refreshToken
-        saveHostedConfig({
+        saveRemoteConfig({
           ...initialConfig,
           accessToken: next.accessToken,
           refreshToken: next.refreshToken,
@@ -67,9 +67,9 @@ interface RefreshedTokens {
   refreshToken: string
 }
 
-async function refreshTokens(hostedUrl: string, refreshToken: string): Promise<RefreshedTokens | null> {
+async function refreshTokens(remoteUrl: string, refreshToken: string): Promise<RefreshedTokens | null> {
   if (refreshToken === '') return null
-  const http = new ConvexHttpClient(hostedUrl)
+  const http = new ConvexHttpClient(remoteUrl)
   try {
     const res = (await http.action(SIGNIN_ACTION, {
       refreshToken,
@@ -88,14 +88,14 @@ async function refreshTokens(hostedUrl: string, refreshToken: string): Promise<R
 }
 
 /**
- * Rewrite of `createHostedClient` that sources its initial state from
- * disk via `loadHostedConfig()`. Returns `null` when hosted mode is
+ * Rewrite of `createRemoteClient` that sources its initial state from
+ * disk via `loadRemoteConfig()`. Returns `null` when remote mode is
  * not configured (no URL, or no tokens). Used by `server.ts` at
  * startup.
  */
-export function createHostedClientIfConfigured(): ConvexClient | null {
-  const cfg = loadHostedConfig()
+export function createRemoteClientIfConfigured(): ConvexClient | null {
+  const cfg = loadRemoteConfig()
   if (cfg === null) return null
   if (cfg.accessToken === '' || cfg.refreshToken === '') return null
-  return createHostedClient(cfg)
+  return createRemoteClient(cfg)
 }

@@ -1,13 +1,25 @@
+import type { ChannelLocation } from './transport/index.js'
+
 export type ChannelSource = 'manual' | 'fallback' | 'env' | 'cccollab.json'
+
+/** Identifies a channel by name AND location. A "dev" local channel and a
+ *  "dev" remote channel are two distinct entities. Channel state (session
+ *  subscriptions, joined topics) is keyed by this pair everywhere. */
+export interface ChannelRef {
+  name: string
+  location: ChannelLocation
+}
 
 interface SubscribedChannel {
   name: string
+  location: ChannelLocation
   source: ChannelSource
 }
 
 interface JoinedTopic {
   topicName: string
   channel: string
+  location: ChannelLocation
 }
 
 /** Canonical channel-name form used everywhere: trimmed + lowercased. */
@@ -15,36 +27,54 @@ export function normalizeChannelName(raw: string): string {
   return raw.trim().toLowerCase()
 }
 
+/** Compose the Map key for a channel. Never persisted; recomputed from
+ *  `{name, location}` so the shape stays the single source of truth. */
+function channelKey(name: string, location: ChannelLocation): string {
+  return `${location}::${name}`
+}
+
 export class ActiveContext {
   private activeThreadTs: string | undefined
   private activeTopicName: string | undefined
-  private activeChannel: string | undefined
+  private activeChannel: ChannelRef | undefined
   private readonly subscribed = new Map<string, SubscribedChannel>()
   private readonly joinedTopics = new Map<string, JoinedTopic>()
 
-  joinChannel(name: string, source: ChannelSource): { channel: string; becameActive: boolean } {
+  joinChannel(
+    name: string,
+    source: ChannelSource,
+    location: ChannelLocation = 'local',
+  ): { channel: string; location: ChannelLocation; becameActive: boolean } {
     const channel = normalizeChannelName(name)
     if (!channel) throw new Error('Channel name must be non-empty')
-    if (!this.subscribed.has(channel)) {
-      this.subscribed.set(channel, { name: channel, source })
+    const key = channelKey(channel, location)
+    if (!this.subscribed.has(key)) {
+      this.subscribed.set(key, { name: channel, location, source })
     }
     let becameActive = false
     if (this.activeChannel === undefined) {
-      this.activeChannel = channel
+      this.activeChannel = { name: channel, location }
       becameActive = true
     }
-    return { channel, becameActive }
+    return { channel, location, becameActive }
   }
 
-  leaveChannel(name: string): { channel: string; removed: boolean; newActive: string | undefined } {
+  leaveChannel(
+    name: string,
+    location: ChannelLocation = 'local',
+  ): { channel: string; location: ChannelLocation; removed: boolean; newActive: ChannelRef | undefined } {
     const channel = normalizeChannelName(name)
-    const removed = this.subscribed.delete(channel)
+    const key = channelKey(channel, location)
+    const removed = this.subscribed.delete(key)
+    // Drop any joined topics in this channel+location.
     for (const [threadTs, topic] of [...this.joinedTopics]) {
-      if (topic.channel === channel) this.joinedTopics.delete(threadTs)
+      if (topic.channel === channel && topic.location === location) {
+        this.joinedTopics.delete(threadTs)
+      }
     }
-    if (this.activeChannel === channel) {
-      const [first] = this.subscribed.keys()
-      this.activeChannel = first
+    if (this.activeChannel && this.activeChannel.name === channel && this.activeChannel.location === location) {
+      const first = [...this.subscribed.values()][0]
+      this.activeChannel = first ? { name: first.name, location: first.location } : undefined
       if (this.activeThreadTs) {
         const stillJoined = this.joinedTopics.get(this.activeThreadTs)
         if (!stillJoined) {
@@ -53,39 +83,73 @@ export class ActiveContext {
         }
       }
     }
-    return { channel, removed, newActive: this.activeChannel }
+    return { channel, location, removed, newActive: this.activeChannel }
   }
 
-  setActiveChannel(name: string): void {
+  setActiveChannel(name: string, location: ChannelLocation = 'local'): void {
     const channel = normalizeChannelName(name)
-    if (!this.subscribed.has(channel)) {
-      throw new Error(`Not subscribed to channel "${channel}". Use join_channel first.`)
+    const key = channelKey(channel, location)
+    if (!this.subscribed.has(key)) {
+      throw new Error(`Not subscribed to channel "${channel}" (${location}). Use join_channel first.`)
     }
-    this.activeChannel = channel
+    this.activeChannel = { name: channel, location }
   }
 
+  /** Active channel name (pre-breaking-change getter). Returns the name
+   *  only; callers that need to route by location should use
+   *  `getActiveChannelRef`. Kept so tool error messages stay terse. */
   getActiveChannel(): string | undefined {
-    return this.activeChannel
+    return this.activeChannel?.name
   }
 
-  isChannelSubscribed(name: string): boolean {
-    return this.subscribed.has(normalizeChannelName(name))
+  getActiveChannelRef(): ChannelRef | undefined {
+    return this.activeChannel ? { ...this.activeChannel } : undefined
   }
 
-  getChannelSource(name: string): ChannelSource | undefined {
-    return this.subscribed.get(normalizeChannelName(name))?.source
-  }
-
-  getSubscribedChannels(): Array<{ name: string; source: ChannelSource }> {
-    return [...this.subscribed.values()].map((c) => ({ name: c.name, source: c.source }))
-  }
-
-  joinTopic(threadTs: string, topicName: string, channel: string): void {
-    const normalized = normalizeChannelName(channel)
-    if (!this.subscribed.has(normalized)) {
-      throw new Error(`Cannot join topic in channel "${normalized}" - not subscribed.`)
+  /** Back-compat helper: does a channel with this name exist at ANY
+   *  location? Useful for error messages where a single location isn't
+   *  known yet. Callers that must route precisely should use the
+   *  location-qualified form. */
+  isChannelSubscribed(name: string, location?: ChannelLocation): boolean {
+    const channel = normalizeChannelName(name)
+    if (location) return this.subscribed.has(channelKey(channel, location))
+    for (const entry of this.subscribed.values()) {
+      if (entry.name === channel) return true
     }
-    this.joinedTopics.set(threadTs, { topicName, channel: normalized })
+    return false
+  }
+
+  getChannelSource(name: string, location?: ChannelLocation): ChannelSource | undefined {
+    const channel = normalizeChannelName(name)
+    if (location) return this.subscribed.get(channelKey(channel, location))?.source
+    for (const entry of this.subscribed.values()) {
+      if (entry.name === channel) return entry.source
+    }
+    return undefined
+  }
+
+  /** Returns the location of a subscribed channel. When the same name
+   *  is subscribed at both locations, returns `'local'` first
+   *  (deterministic tie-break matching the routing preference in
+   *  `list_sessions` / DM routing). */
+  getChannelLocation(name: string): ChannelLocation | undefined {
+    const channel = normalizeChannelName(name)
+    if (this.subscribed.has(channelKey(channel, 'local'))) return 'local'
+    if (this.subscribed.has(channelKey(channel, 'remote'))) return 'remote'
+    return undefined
+  }
+
+  getSubscribedChannels(): Array<{ name: string; location: ChannelLocation; source: ChannelSource }> {
+    return [...this.subscribed.values()].map((c) => ({ name: c.name, location: c.location, source: c.source }))
+  }
+
+  joinTopic(threadTs: string, topicName: string, channel: string, location: ChannelLocation = 'local'): void {
+    const normalized = normalizeChannelName(channel)
+    const key = channelKey(normalized, location)
+    if (!this.subscribed.has(key)) {
+      throw new Error(`Cannot join topic in channel "${normalized}" (${location}) - not subscribed.`)
+    }
+    this.joinedTopics.set(threadTs, { topicName, channel: normalized, location })
     this.activeThreadTs = threadTs
     this.activeTopicName = topicName
   }
@@ -124,28 +188,43 @@ export class ActiveContext {
     return this.joinedTopics.get(this.activeThreadTs)?.channel
   }
 
-  findJoinedTopic(query: string): { threadTs: string; topicName: string; channel: string } | null {
+  getTopicLocation(): ChannelLocation | undefined {
+    if (!this.activeThreadTs) return undefined
+    return this.joinedTopics.get(this.activeThreadTs)?.location
+  }
+
+  /** Lookup the location of ANY joined topic by its id. */
+  getJoinedTopicLocation(threadTs: string): ChannelLocation | undefined {
+    return this.joinedTopics.get(threadTs)?.location
+  }
+
+  findJoinedTopic(
+    query: string,
+  ): { threadTs: string; topicName: string; channel: string; location: ChannelLocation } | null {
     const direct = this.joinedTopics.get(query)
-    if (direct) return { threadTs: query, topicName: direct.topicName, channel: direct.channel }
+    if (direct) {
+      return { threadTs: query, topicName: direct.topicName, channel: direct.channel, location: direct.location }
+    }
 
     const q = query.toLowerCase()
-    const exact: Array<{ threadTs: string; topicName: string; channel: string }> = []
-    const fuzzy: Array<{ threadTs: string; topicName: string; channel: string }> = []
-    for (const [threadTs, { topicName, channel }] of this.joinedTopics) {
+    const exact: Array<{ threadTs: string; topicName: string; channel: string; location: ChannelLocation }> = []
+    const fuzzy: Array<{ threadTs: string; topicName: string; channel: string; location: ChannelLocation }> = []
+    for (const [threadTs, { topicName, channel, location }] of this.joinedTopics) {
       const lower = topicName.toLowerCase()
-      if (lower === q) exact.push({ threadTs, topicName, channel })
-      else if (lower.includes(q)) fuzzy.push({ threadTs, topicName, channel })
+      if (lower === q) exact.push({ threadTs, topicName, channel, location })
+      else if (lower.includes(q)) fuzzy.push({ threadTs, topicName, channel, location })
     }
     if (exact.length === 1) return exact[0]!
     if (exact.length === 0 && fuzzy.length === 1) return fuzzy[0]!
     return null
   }
 
-  getJoinedTopics(): Array<{ threadTs: string; topicName: string; channel: string }> {
-    return [...this.joinedTopics.entries()].map(([threadTs, { topicName, channel }]) => ({
+  getJoinedTopics(): Array<{ threadTs: string; topicName: string; channel: string; location: ChannelLocation }> {
+    return [...this.joinedTopics.entries()].map(([threadTs, { topicName, channel, location }]) => ({
       threadTs,
       topicName,
       channel,
+      location,
     }))
   }
 

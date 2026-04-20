@@ -10,7 +10,7 @@ import { MessageBus } from '../src/message-bus.js'
 import { ActiveContext } from '../src/context.js'
 import { BrokerEventListener } from '../src/broker-event-listener.js'
 import { LocalTransport } from '../src/transport/local.js'
-import type { Transport } from '../src/transport/index.js'
+import { TransportRouter } from '../src/transport/router.js'
 import { handleIdentityTool } from '../src/tools/identity.js'
 import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
@@ -32,7 +32,7 @@ async function waitUntil<T>(fn: () => T | null, timeoutMs = 5000, intervalMs = 5
 interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
-  transport: Transport
+  router: TransportRouter
 }
 
 interface SessionHarness {
@@ -67,7 +67,8 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
   await listener.start()
 
   const transport = new LocalTransport(brokerPort)
-  const deps: HarnessDeps = { session, context, transport }
+  const router = new TransportRouter([transport])
+  const deps: HarnessDeps = { session, context, router }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {

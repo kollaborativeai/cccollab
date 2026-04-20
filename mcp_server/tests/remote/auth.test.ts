@@ -4,24 +4,25 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // Redirect HOME before importing the modules so config writes land in
-// a tmp directory. See tests/hosted/config.test.ts for the rationale.
+// a tmp directory. See tests/remote/config.test.ts for the rationale.
 const TMP_HOME = mkdtempSync(join(tmpdir(), 'cccollab-auth-test-'))
 process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
 const { runAuthenticate } = await import('../../src/remote/auth.js')
-const { loadHostedConfig, clearHostedConfig } = await import('../../src/remote/config.js')
+const { loadRemoteConfig, clearRemoteConfig } = await import('../../src/remote/config.js')
 
 describe('runAuthenticate', () => {
   beforeEach(() => {
-    clearHostedConfig()
+    clearRemoteConfig()
+    delete process.env.CCCOLLAB_REMOTE_URL
     delete process.env.CCCOLLAB_HOSTED_URL
     delete process.env.CCCOLLAB_AUTH_TOKEN
     delete process.env.CCCOLLAB_AUTH_REFRESH_TOKEN
   })
 
   afterEach(() => {
-    clearHostedConfig()
+    clearRemoteConfig()
   })
 
   afterAll(() => {
@@ -54,17 +55,17 @@ describe('runAuthenticate', () => {
 
     const log: string[] = []
     const result = await runAuthenticate({
-      hostedUrl: 'https://wonderful-narwhal-409.convex.cloud',
+      remoteUrl: 'https://wonderful-narwhal-409.convex.cloud',
       httpClient: { action } as never,
       openUrl,
       log: (m) => log.push(m),
       timeoutMs: 5_000,
     })
 
-    expect(result.hostedUrl).toBe('https://wonderful-narwhal-409.convex.cloud')
+    expect(result.remoteUrl).toBe('https://wonderful-narwhal-409.convex.cloud')
     expect(action).toHaveBeenCalledTimes(2)
 
-    const persisted = loadHostedConfig()
+    const persisted = loadRemoteConfig()
     expect(persisted).not.toBeNull()
     expect(persisted!.accessToken).toBe('new-access')
     expect(persisted!.refreshToken).toBe('new-refresh')
@@ -86,14 +87,14 @@ describe('runAuthenticate', () => {
 
     await expect(
       runAuthenticate({
-        hostedUrl: 'https://example.convex.cloud',
+        remoteUrl: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},
         timeoutMs: 5_000,
       }),
     ).rejects.toThrow(/did not return tokens/)
-    expect(loadHostedConfig()).toBeNull()
+    expect(loadRemoteConfig()).toBeNull()
   })
 
   it('rejects when the first signIn call fails', async () => {
@@ -103,7 +104,7 @@ describe('runAuthenticate', () => {
     })
     await expect(
       runAuthenticate({
-        hostedUrl: 'https://example.convex.cloud',
+        remoteUrl: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},
@@ -121,7 +122,7 @@ describe('runAuthenticate', () => {
 
     await expect(
       runAuthenticate({
-        hostedUrl: 'https://example.convex.cloud',
+        remoteUrl: 'https://example.convex.cloud',
         httpClient: { action } as never,
         openUrl,
         log: () => {},

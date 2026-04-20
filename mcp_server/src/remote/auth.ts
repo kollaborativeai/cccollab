@@ -5,9 +5,9 @@ import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
 import { openBrowser } from './browser.js'
-import { saveHostedConfig, loadHostedConfig, type HostedConfig } from './config.js'
+import { saveRemoteConfig, loadRemoteConfig, type RemoteConfig } from './config.js'
 
-// The hosted mcp_server code compiles without a local reference to
+// The remote mcp_server code compiles without a local reference to
 // `convex/_generated`, so we use `anyApi` (runtime-typed) for the auth
 // entrypoint and cast to the `action` FunctionReference that
 // `ConvexHttpClient.action` expects.
@@ -45,13 +45,13 @@ interface SignInResult {
  * return is a summary so the caller can report back.
  */
 export interface AuthenticateResult {
-  hostedUrl: string
+  remoteUrl: string
   userId?: string
   userEmail?: string
 }
 
 interface AuthenticateOptions {
-  hostedUrl: string
+  remoteUrl: string
   /** Called with the user-facing message printed BEFORE the browser
    *  opens. Tests inject a collector instead of stderr. */
   log?: (message: string) => void
@@ -59,7 +59,7 @@ interface AuthenticateOptions {
   openUrl?: (url: string) => Promise<void>
   /** Override the fetch used to call the Convex action; tests pass a
    *  mock client. Production path uses a freshly constructed
-   *  `ConvexHttpClient` against `hostedUrl`. */
+   *  `ConvexHttpClient` against `remoteUrl`. */
   httpClient?: Pick<ConvexHttpClient, 'action'>
   /** Hard cap on how long we wait for the browser redirect. */
   timeoutMs?: number
@@ -72,7 +72,7 @@ interface AuthenticateOptions {
  * 1. Start an ephemeral HTTP listener on `127.0.0.1:<random>` that waits
  *    for `GET /cccollab-oauth-callback?code=<code>`.
  * 2. Call `api.auth.signIn({ provider: 'google', params: { redirectTo } })`
- *    on the hosted deployment. This returns `{ redirect, verifier }` -
+ *    on the remote deployment. This returns `{ redirect, verifier }` -
  *    the URL Google will show the user and a PKCE verifier we hold.
  * 3. Open the user's browser to `redirect`. Google handles the consent
  *    screen, Google posts back to Convex's callback, Convex redirects
@@ -87,7 +87,7 @@ interface AuthenticateOptions {
 export async function runAuthenticate(options: AuthenticateOptions): Promise<AuthenticateResult> {
   const log = options.log ?? ((m) => process.stderr.write(`[cccollab] ${m}\n`))
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000
-  const client = options.httpClient ?? new ConvexHttpClient(options.hostedUrl)
+  const client = options.httpClient ?? new ConvexHttpClient(options.remoteUrl)
   const openUrl = options.openUrl ?? openBrowser
 
   const listener = await startLoopbackListener(timeoutMs)
@@ -140,20 +140,20 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
     throw new Error('Convex signIn did not return tokens')
   }
 
-  const existing = loadHostedConfig()
-  const cfg: HostedConfig = {
-    hostedUrl: options.hostedUrl,
+  const existing = loadRemoteConfig()
+  const cfg: RemoteConfig = {
+    remoteUrl: options.remoteUrl,
     accessToken: second.tokens.token,
     refreshToken: second.tokens.refreshToken,
     userEmail: existing?.userEmail,
     userId: existing?.userId,
     updatedAt: Date.now(),
   }
-  saveHostedConfig(cfg)
+  saveRemoteConfig(cfg)
 
-  log(`Signed in. Hosted transport is now available.`)
+  log(`Signed in. Remote transport is now available.`)
   return {
-    hostedUrl: cfg.hostedUrl,
+    remoteUrl: cfg.remoteUrl,
     userEmail: cfg.userEmail,
     userId: cfg.userId,
   }

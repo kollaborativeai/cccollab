@@ -57,7 +57,7 @@ const DEGRADATION_THRESHOLD = 3
 
 /**
  * Remote transport: wraps a `ConvexClient` and maps the cccollab
- * `Transport` interface onto the hosted deployment's mutations +
+ * `Transport` interface onto the remote deployment's mutations +
  * queries.
  *
  * Design: channels at the remote Convex deployment live in a disjoint

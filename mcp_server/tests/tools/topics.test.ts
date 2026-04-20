@@ -3,13 +3,15 @@ import { createTopicTools, handleTopicTool, type TopicToolDeps } from '../../src
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
+import { TransportRouter } from '../../src/transport/router.js'
 
 function createMockDeps(): TopicToolDeps {
   const context = new ActiveContext()
-  context.joinChannel('default', 'fallback')
+  context.joinChannel('default', 'fallback', 'local')
   const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
   session.setName('architect')
-  return { session, context, transport: new LocalTransport(7850) }
+  const transport = new LocalTransport(7850)
+  return { session, context, router: new TransportRouter([transport]) }
 }
 
 describe('Topic Tools', () => {
@@ -133,7 +135,7 @@ describe('Topic Tools', () => {
     })
 
     it('list_topics flags isJoined and isMyActive per topic', async () => {
-      deps.context.joinTopic('uuid-joined', 'joined topic', 'default')
+      deps.context.joinTopic('uuid-joined', 'joined topic', 'default', 'local')
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () =>
@@ -189,7 +191,7 @@ describe('Topic Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
 
       const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'DB migration' }, deps))
-      expect(result).toEqual({ id: 'uuid-new', name: 'DB migration', channel: 'default' })
+      expect(result).toEqual({ id: 'uuid-new', name: 'DB migration', channel: 'default', location: 'local' })
       expect(deps.context.hasTopic()).toBe(true)
       expect(deps.context.getThreadTs()).toBe('uuid-new')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
@@ -205,7 +207,7 @@ describe('Topic Tools', () => {
       const context = new ActiveContext()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       session.setName('architect')
-      const deps2 = { session, context, transport: new LocalTransport(7850) }
+      const deps2 = { session, context, router: new TransportRouter([new LocalTransport(7850)]) }
       const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'x' }, deps2))
       expect(result.error).toContain('No active channel')
     })
@@ -353,10 +355,10 @@ describe('Topic Tools', () => {
     })
 
     it('set_active_topic switches among joined', async () => {
-      deps.context.joinTopic('uuid-1', 'First', 'default')
-      deps.context.joinTopic('uuid-2', 'Second', 'default')
+      deps.context.joinTopic('uuid-1', 'First', 'default', 'local')
+      deps.context.joinTopic('uuid-2', 'Second', 'default', 'local')
       const result = JSON.parse(await handleTopicTool('set_active_topic', { topic: 'First' }, deps))
-      expect(result).toEqual({ id: 'uuid-1', name: 'First', channel: 'default' })
+      expect(result).toEqual({ id: 'uuid-1', name: 'First', channel: 'default', location: 'local' })
       expect(deps.context.getThreadTs()).toBe('uuid-1')
     })
 
@@ -366,7 +368,7 @@ describe('Topic Tools', () => {
     })
 
     it('archive_topic via active topic', async () => {
-      deps.context.joinTopic('uuid-archive', 'Archive me', 'default')
+      deps.context.joinTopic('uuid-archive', 'Archive me', 'default', 'local')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('archive_topic', {}, deps))
@@ -375,7 +377,7 @@ describe('Topic Tools', () => {
     })
 
     it('leave_topic via active topic', async () => {
-      deps.context.joinTopic('uuid-leave', 'stale', 'default')
+      deps.context.joinTopic('uuid-leave', 'stale', 'default', 'local')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('leave_topic', {}, deps))
@@ -384,7 +386,7 @@ describe('Topic Tools', () => {
     })
 
     it('send_message_to_topic routes to active topic', async () => {
-      deps.context.joinTopic('uuid-topic', 'Test', 'default')
+      deps.context.joinTopic('uuid-topic', 'Test', 'default', 'local')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('send_message_to_topic', { text: 'Hello' }, deps))
@@ -417,7 +419,7 @@ describe('Topic Tools', () => {
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('unarchive_topic', { topic: 'Unarchive' }, deps))
-      expect(result).toEqual({ id: 'uuid-unarch', name: 'Unarchive me', channel: 'default' })
+      expect(result).toEqual({ id: 'uuid-unarch', name: 'Unarchive me', channel: 'default', location: 'local' })
     })
 
     it('list_sessions with channel arg rejects unsubscribed', async () => {
@@ -439,7 +441,11 @@ describe('Topic Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
       expect(result).toHaveLength(1)
-      expect(result[0]).toMatchObject({ name: 'architect', objective: 'Design', channels: ['default'] })
+      expect(result[0]).toMatchObject({
+        name: 'architect',
+        objective: 'Design',
+        channels: [{ name: 'default', location: 'local' }],
+      })
     })
 
     it('send_message_to_session posts to /direct-message', async () => {

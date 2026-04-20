@@ -72,7 +72,7 @@ describe('ActiveContext', () => {
       ctx.joinChannel('default', 'fallback')
       ctx.joinChannel('project_x', 'manual')
       const { newActive } = ctx.leaveChannel('default')
-      expect(newActive).toBe('project_x')
+      expect(newActive).toEqual({ name: 'project_x', location: 'local' })
       expect(ctx.isChannelSubscribed('default')).toBe(false)
     })
 

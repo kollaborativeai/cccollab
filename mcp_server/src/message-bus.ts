@@ -4,10 +4,10 @@ import type { ParsedMessage } from './types.js'
 
 /**
  * Source tag attached to inbound events as they flow through the bus.
- * Local = from the in-process broker's SSE stream; hosted = from a
+ * Local = from the in-process broker's SSE stream; remote = from a
  * Convex reactive subscription.
  */
-export type MessageSource = 'local' | 'hosted'
+export type MessageSource = 'local' | 'remote'
 
 /**
  * Window in which two events with the same dedup key are considered
@@ -34,7 +34,7 @@ const MAX_DEDUP_ENTRIES = 2048
  * `ts` is rounded to the second because the broker emits ISO
  * millisecond timestamps and Convex writes its own; tolerating a 1s
  * bucket on either side is the expected clock skew between a local
- * broker event and the hosted transport's push for the same send.
+ * broker event and the remote transport's push for the same send.
  */
 function dedupKey(msg: ParsedMessage): string {
   const threadOrChannel = msg.threadTs ?? msg.channel
@@ -55,7 +55,7 @@ export class MessageBus extends EventEmitter {
   /**
    * Push one inbound message to the MCP client as a
    * `notifications/claude/channel` tag. `source` tags where the event
-   * originated (local broker vs hosted Convex subscription). Same-
+   * originated (local broker vs remote Convex subscription). Same-
    * logical-message arrivals within `DEDUP_WINDOW_MS` are dropped so
    * users don't see duplicates when both transports are live and
    * peered.
