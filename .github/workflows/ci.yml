@@ -36,7 +36,7 @@ jobs:
           node-version: '22'
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn lint
+      - run: yarn workspace @flatoutsolutions/cccollab lint
 
   typecheck:
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
           node-version: '22'
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn tsc --noEmit
+      - run: yarn workspace @flatoutsolutions/cccollab typecheck
 
   test:
     runs-on: ubuntu-latest
@@ -58,7 +58,7 @@ jobs:
           node-version: '22'
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn test
+      - run: yarn workspace @flatoutsolutions/cccollab test
 
   build:
     runs-on: ubuntu-latest
@@ -69,7 +69,7 @@ jobs:
           node-version: '22'
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn build
+      - run: yarn workspace @flatoutsolutions/cccollab build
 
   release:
     if: >-
@@ -136,17 +136,18 @@ jobs:
 
       - name: Build
         if: steps.semver.outputs.nextStrict != ''
-        run: yarn build
+        run: yarn workspace @flatoutsolutions/cccollab build
 
-      - name: Update version in package.json and plugin.json
+      - name: Update version in mcp_server/package.json and plugin.json
         if: steps.semver.outputs.nextStrict != ''
         env:
           VERSION: ${{ steps.semver.outputs.nextStrict }}
         run: |
-          node -e "const fs=require('fs'); for (const f of ['./package.json','./plugin/.claude-plugin/plugin.json']) { const p=JSON.parse(fs.readFileSync(f,'utf8')); p.version=process.env.VERSION; fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n'); }"
+          node -e "const fs=require('fs'); for (const f of ['./mcp_server/package.json','./plugin/.claude-plugin/plugin.json']) { const p=JSON.parse(fs.readFileSync(f,'utf8')); p.version=process.env.VERSION; fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n'); }"
 
       - name: Publish
         if: steps.semver.outputs.nextStrict != ''
+        working-directory: mcp_server
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -159,7 +160,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json plugin/.claude-plugin/plugin.json
+          git add mcp_server/package.json plugin/.claude-plugin/plugin.json
           git commit -m "chore: bump version to ${VERSION} [skip ci]"
           git tag "${TAG}"
           git push origin main --tags

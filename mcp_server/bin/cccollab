@@ -1,0 +1,47 @@
+#!/bin/sh
+# Resolve the real script path through any symlinks (npm bin shim, yarn, etc.).
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  LINK="$(readlink "$SCRIPT")"
+  case "$LINK" in
+    /*) SCRIPT="$LINK" ;;
+    *) SCRIPT="$(cd "$(dirname "$SCRIPT")" && cd "$(dirname "$LINK")" && pwd)/$(basename "$LINK")" ;;
+  esac
+done
+
+# DIR is the directory that owns this launcher: either the package root
+# when installed from npm (so `$DIR/dist/server.js` exists) or the
+# `mcp_server/` workspace during dev (so `$DIR/src/server.ts` exists).
+DIR="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+
+# find_tsx walks up from a starting directory looking for a Yarn/npm
+# node_modules/.bin/tsx. In a Yarn workspace setup dependencies are hoisted
+# to the repo root, so `mcp_server/node_modules/.bin/tsx` doesn't exist -
+# the hoisted copy lives at `<repo-root>/node_modules/.bin/tsx`. When
+# installed as an npm package, node_modules is a sibling of the package
+# itself, so the same walk works.
+find_tsx() {
+  d="$1"
+  while [ "$d" != "/" ]; do
+    if [ -x "$d/node_modules/.bin/tsx" ]; then
+      printf '%s\n' "$d/node_modules/.bin/tsx"
+      return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+if [ -f "$DIR/src/server.ts" ]; then
+  TSX_BIN="$(find_tsx "$DIR")" || TSX_BIN=""
+  if [ -n "$TSX_BIN" ] && [ -x "$TSX_BIN" ]; then
+    exec "$TSX_BIN" "$DIR/src/server.ts" "$@"
+  fi
+fi
+
+if [ -f "$DIR/dist/server.js" ]; then
+  exec node "$DIR/dist/server.js" "$@"
+fi
+
+echo "cccollab: no runnable target found (expected src/server.ts + tsx on PATH, or dist/server.js)" >&2
+exit 1

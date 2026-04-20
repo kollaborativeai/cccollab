@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { resolveTsx } from '../src/resolve-tsx.js'
 import { SessionManager } from '../src/session.js'
 import { MessageBus } from '../src/message-bus.js'
 import { ActiveContext } from '../src/context.js'
@@ -118,7 +120,8 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
   let brokerPort: number
 
   beforeAll(async () => {
-    const tsx = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
+    const tsx = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsx) throw new Error('tsx binary not found on any ancestor')
     const brokerPath = new URL('../src/broker.ts', import.meta.url).pathname
     broker = spawn(tsx, [brokerPath], {
       env: { ...process.env, CCCOLLAB_PROFILE: PROFILE },

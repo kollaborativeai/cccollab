@@ -24,3 +24,5 @@ test/.claude/settings.local.json
 
 # Stray codegraph init artifacts (top-level .codegraph is tracked intentionally)
 /i/
+
+.env.local

@@ -153,5 +153,3 @@ interchangeably between the two audiences, disentangling requires a repo-wide
 rename and a careful review of every reference. Writing this rule page now -
 before the HTTP server has a single file of its own - makes the distinction
 load-bearing from day one.
-</content>
-</invoke>

@@ -1,12 +1,14 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { PROFILE, CCCOLLAB_RUN_DIR } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
+import { resolveTsx } from './resolve-tsx.js'
 import { SessionManager } from './session.js'
 import { resolveInitialIdentity } from './initial-identity.js'
 import { resolveInitialChannels } from './initial-channels.js'
@@ -287,7 +289,11 @@ async function ensureBroker(): Promise<number> {
       command = process.execPath
       args = [brokerPath]
     } else {
-      command = new URL('../node_modules/.bin/tsx', import.meta.url).pathname
+      const tsx = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+      if (!tsx) {
+        throw new Error('cccollab: unable to locate tsx binary (node_modules/.bin/tsx not found on any ancestor)')
+      }
+      command = tsx
       args = [brokerPath]
     }
 
