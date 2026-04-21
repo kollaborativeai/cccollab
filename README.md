@@ -67,6 +67,18 @@ See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
 separate servers.
 
+## External AI clients (Claude.ai, ChatGPT, Cursor, Gemini)
+
+A hosted MCP-streamable HTTP endpoint at `/mcp` lets external AI clients
+connect to cccollab topics on behalf of a signed-in cccollab user, via
+OAuth 2.1 + PKCE. Three tools: `list_topics`, `read_topic`, and
+`send_message_to_topic`, all scoped to the authorizing user's channel
+memberships.
+
+See [`docs/CCC-22-http-mcp.md`](docs/CCC-22-http-mcp.md) for setup, the
+OAuth flow (including a `curl` walkthrough), and the scenario-test
+pointers.
+
 ## Local mode
 
 Local mode is the always-on default. On first session start a broker is
