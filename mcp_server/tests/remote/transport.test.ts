@@ -265,6 +265,64 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
   })
 })
 
+describe('RemoteTransport.introduce rethrow', () => {
+  it('rethrows transient errors so attach.ts can abort before registering', async () => {
+    // If introduce() swallows the error, attach.ts's try/catch never fires
+    // and the caller ends up with a half-wired transport where sessionId
+    // is null — subsequent tool calls silently no-op. Rethrow preserves
+    // the safety contract.
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => {
+        throw new Error('network glitch')
+      }),
+      onUpdate: vi.fn(),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'laptop' })).rejects.toThrow(/network glitch|introduce/)
+    expect((transport as unknown as { sessionId: string | null }).sessionId).toBeNull()
+  })
+
+  it('rethrow does not bypass the failure counter (still counts toward degradation)', async () => {
+    let calls = 0
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => {
+        calls++
+        throw new Error(`call ${calls}`)
+      }),
+      onUpdate: vi.fn(),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    // Three failures in the window disables the transport.
+    for (let i = 0; i < 3; i++) {
+      await expect(transport.introduce({ sessionName: 'laptop' })).rejects.toThrow()
+    }
+    expect(transport.enabled).toBe(false)
+  })
+
+  it('introduce on a disabled transport throws rather than silently no-op', async () => {
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => {
+        throw new Error('perm error')
+      }),
+      onUpdate: vi.fn(),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    // Trip the circuit breaker.
+    for (let i = 0; i < 3; i++) {
+      await transport.introduce({ sessionName: 'x' }).catch(() => {})
+    }
+    expect(transport.enabled).toBe(false)
+    // A subsequent introduce must not silently succeed.
+    await expect(transport.introduce({ sessionName: 'x' })).rejects.toThrow(/disabled/)
+  })
+})
+
 describe('RemoteTransport.subscribeDirectMessages dedup', () => {
   it('dedupes same-ms DMs', () => {
     const callbacks: Array<(rows: unknown) => void> = []

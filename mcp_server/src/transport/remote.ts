@@ -166,8 +166,22 @@ export class RemoteTransport implements Transport {
   }
 
   // ─── Identity ─────────────────────────────────────────────────────────
+  /**
+   * Register the session with the remote backend. Unlike the tool-dispatch
+   * mutations below (joinChannel, leaveTopic, sendTopicMessage, ...) which
+   * swallow errors and degrade the transport silently, `introduce` RETHROWS
+   * on failure so `attach.ts`'s "abort before registering" safety contract
+   * holds. Callers that need a best-effort introduce should catch the
+   * rethrow themselves.
+   *
+   * `registerFailure` still runs on the way out so the circuit breaker
+   * counts this against the failure window — a transient blip at startup
+   * is a failure just like one mid-session.
+   */
   async introduce(args: { sessionName: string; objective?: string }): Promise<void> {
-    if (!this.enabled) return
+    if (!this.enabled) {
+      throw new Error('remote transport is disabled; cannot introduce')
+    }
     try {
       const id = (await this.client.mutation(fn<'mutation'>(REF.sessions.mutations.introduce), {
         sessionName: args.sessionName,
@@ -186,6 +200,7 @@ export class RemoteTransport implements Transport {
       }
     } catch (err) {
       this.registerFailure('introduce', err)
+      throw err
     }
   }
 
