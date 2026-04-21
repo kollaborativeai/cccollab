@@ -19,9 +19,7 @@ describe('messages', () => {
       text: 'hello',
     })
     const list = await t.query(api.messages.listForTopic, { topicId })
-    expect(list).toMatchObject([
-      { _id: messageId, authorType: 'external', authorName: 'User', text: 'hello' },
-    ])
+    expect(list).toMatchObject([{ _id: messageId, authorType: 'external', authorName: 'User', text: 'hello' }])
   })
 
   it('sendAsUser succeeds when user is a member of the topic', async () => {
@@ -44,9 +42,9 @@ describe('messages', () => {
     const bob = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'b', displayName: 'B' })
     const channelId = await t.mutation(api.channels.getOrCreate, { name: 'c', creatorUserId: alice })
     const topicId = await t.mutation(api.topics.create, { name: 't', channelId, creatorUserId: alice })
-    await expect(
-      t.mutation(api.messages.sendAsUser, { topicId, userId: bob, text: 'intruder' }),
-    ).rejects.toThrow(/not a member/i)
+    await expect(t.mutation(api.messages.sendAsUser, { topicId, userId: bob, text: 'intruder' })).rejects.toThrow(
+      /not a member/i,
+    )
   })
 
   it('listRecent returns most recent 50 messages in chronological order', async () => {

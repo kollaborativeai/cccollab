@@ -81,6 +81,7 @@ Allow external users on Claude.ai / ChatGPT / Gemini / Cursor to connect to ccco
 ### Convex project layout
 
 All Convex code lives under `convex/`. This is the standard Convex convention. The main deliverables:
+
 - `convex/schema.ts` — DB schema
 - `convex/auth.config.ts` — Clerk JWT issuer
 - `convex/{users,topics,messages,channels}.ts` — CRUD functions
@@ -116,11 +117,13 @@ Convex functions are either `query` (read), `mutation` (write), `action` (extern
 ### Message attribution
 
 `messages` table has:
+
 - `authorType`: `'session'` (Claude Code via CCC-3 eventually) or `'external'` (HTTP MCP)
 - `authorKey`: unique key for the author (Clerk userId for external, session name for sessions)
 - `authorName`: display name
 
 When rendering in Claude Code's channel tag, messages from external authors look like:
+
 ```xml
 <channel source="cccollab" topic="X" sender="alice@example.com" authorType="external">...
 ```
@@ -128,6 +131,7 @@ When rendering in Claude Code's channel tag, messages from external authors look
 ### Convex bridge (optional real-time path)
 
 `src/bridge/convex-bridge.ts` is a standalone Node process launched when `CCCOLLAB_CONVEX_URL` is set. It:
+
 1. Opens Convex reactive subscription on `messages.listRecent`.
 2. When new messages arrive, POSTs them to the local broker's `/local-event` endpoint with a channel envelope.
 3. The broker broadcasts to all connected SSE clients (i.e. Claude Code sessions).

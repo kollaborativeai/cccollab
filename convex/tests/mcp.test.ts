@@ -10,9 +10,7 @@ describe('mcp dispatcher', () => {
   it('initialize returns server info + capabilities + protocol version', async () => {
     const t = convexTest(schema, modules)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx) =>
-      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 1, method: 'initialize' }),
-    )
+    const res = await t.run(async (ctx) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 1, method: 'initialize' }))
     expect(res).toMatchObject({
       jsonrpc: '2.0',
       id: 1,
@@ -27,18 +25,14 @@ describe('mcp dispatcher', () => {
   it('ping returns empty result', async () => {
     const t = convexTest(schema, modules)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx) =>
-      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 7, method: 'ping' }),
-    )
+    const res = await t.run(async (ctx) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 7, method: 'ping' }))
     expect(res).toEqual({ jsonrpc: '2.0', id: 7, result: {} })
   })
 
   it('tools/list returns the three MCP tools', async () => {
     const t = convexTest(schema, modules)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx) =>
-      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 2, method: 'tools/list' }),
-    )
+    const res = await t.run(async (ctx) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 2, method: 'tools/list' }))
     const tools = (res.result as { tools: Array<{ name: string }> }).tools
     expect(tools.map((tool) => tool.name).sort()).toEqual(['list_topics', 'read_topic', 'send_message_to_topic'])
   })
@@ -46,9 +40,7 @@ describe('mcp dispatcher', () => {
   it('unknown method returns JSON-RPC -32601', async () => {
     const t = convexTest(schema, modules)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx) =>
-      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 99, method: 'nope' }),
-    )
+    const res = await t.run(async (ctx) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 99, method: 'nope' }))
     expect(res.error?.code).toBe(-32601)
   })
 
@@ -67,9 +59,9 @@ describe('mcp dispatcher', () => {
         params: { name: 'list_topics', arguments: {} },
       }),
     )
-    const aliceContent = JSON.parse(
-      (aliceRes.result as { content: Array<{ text: string }> }).content[0]!.text,
-    ) as { topics: Array<{ name: string }> }
+    const aliceContent = JSON.parse((aliceRes.result as { content: Array<{ text: string }> }).content[0]!.text) as {
+      topics: Array<{ name: string }>
+    }
     expect(aliceContent.topics.map((topic) => topic.name)).toEqual(['design'])
 
     const bobRes = await t.run(async (ctx) =>
@@ -80,9 +72,9 @@ describe('mcp dispatcher', () => {
         params: { name: 'list_topics', arguments: {} },
       }),
     )
-    const bobContent = JSON.parse(
-      (bobRes.result as { content: Array<{ text: string }> }).content[0]!.text,
-    ) as { topics: unknown[] }
+    const bobContent = JSON.parse((bobRes.result as { content: Array<{ text: string }> }).content[0]!.text) as {
+      topics: unknown[]
+    }
     expect(bobContent.topics).toEqual([])
   })
 

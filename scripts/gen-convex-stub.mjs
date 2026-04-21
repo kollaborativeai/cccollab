@@ -51,14 +51,14 @@ function collectModules() {
 const modules = collectModules()
 
 // ---- api.d.ts ----
-const importLines = modules.map(m => {
-  const varName = m.replace(/[/.-]/g, '_')
-  return `import type * as ${varName} from "../${m}.js";`
-}).join('\n')
-
-const moduleMapEntries = modules
-  .map(m => `  "${m}": typeof ${m.replace(/[/.-]/g, '_')};`)
+const importLines = modules
+  .map((m) => {
+    const varName = m.replace(/[/.-]/g, '_')
+    return `import type * as ${varName} from "../${m}.js";`
+  })
   .join('\n')
+
+const moduleMapEntries = modules.map((m) => `  "${m}": typeof ${m.replace(/[/.-]/g, '_')};`).join('\n')
 
 const apiDts = `/* eslint-disable */
 /**

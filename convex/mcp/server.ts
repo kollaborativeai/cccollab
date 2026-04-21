@@ -24,11 +24,7 @@ export const PROTOCOL_VERSION = '2025-06-18'
 
 const ALL_TOOLS = [listTopicsTool, readTopicTool, sendMessageToTopicTool]
 
-export async function dispatchMcp(
-  ctx: McpCtx,
-  userId: Id<'users'>,
-  request: JsonRpcRequest,
-): Promise<JsonRpcResponse> {
+export async function dispatchMcp(ctx: McpCtx, userId: Id<'users'>, request: JsonRpcRequest): Promise<JsonRpcResponse> {
   const id = request.id ?? null
   switch (request.method) {
     case 'initialize':

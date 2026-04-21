@@ -5,7 +5,7 @@ import { defineConfig } from 'eslint/config'
 
 export default defineConfig([
   {
-    ignores: ['dist', '.yarn', '.codegraph', 'i', 'node_modules'],
+    ignores: ['dist', '.yarn', '.codegraph', 'i', 'node_modules', 'convex/_generated'],
   },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],

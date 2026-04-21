@@ -65,10 +65,7 @@ export const listForUser = query({
 
 export const readForUser = query({
   args: { topicId: v.id('topics'), userId: v.id('users') },
-  handler: async (
-    ctx,
-    { topicId, userId },
-  ): Promise<{ topic: Doc<'topics'>; messages: Doc<'messages'>[] } | null> => {
+  handler: async (ctx, { topicId, userId }): Promise<{ topic: Doc<'topics'>; messages: Doc<'messages'>[] } | null> => {
     const membership = await ctx.db
       .query('topicMemberships')
       .withIndex('by_user_topic', (q) => q.eq('userId', userId).eq('topicId', topicId))

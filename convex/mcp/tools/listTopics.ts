@@ -16,10 +16,7 @@ export type ListTopicsResult = {
   topics: Array<{ id: string; name: string; channelId: string }>
 }
 
-export async function handleListTopics(
-  ctx: McpCtx,
-  userId: Id<'users'>,
-): Promise<ListTopicsResult> {
+export async function handleListTopics(ctx: McpCtx, userId: Id<'users'>): Promise<ListTopicsResult> {
   const rows = await ctx.runQuery(api.topics.listForUser, { userId })
   return {
     topics: rows.map((t) => ({

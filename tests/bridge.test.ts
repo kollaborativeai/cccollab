@@ -1,9 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import {
-  buildLocalEventPayload,
-  forwardRowToBroker,
-  type ConvexMessageRow,
-} from '../src/bridge/convex-bridge.js'
+import { buildLocalEventPayload, forwardRowToBroker, type ConvexMessageRow } from '../src/bridge/convex-bridge.js'
 
 describe('convex bridge', () => {
   it('builds a /local-event payload from a message row + topic context', () => {
@@ -57,10 +53,14 @@ describe('convex bridge', () => {
       authorName: 'Bob',
       text: 'yo',
     }
-    await forwardRowToBroker(row, { topicName: 't', channel: 'eng' }, {
-      brokerUrl: 'http://127.0.0.1:9999',
-      fetch: fakeFetch,
-    })
+    await forwardRowToBroker(
+      row,
+      { topicName: 't', channel: 'eng' },
+      {
+        brokerUrl: 'http://127.0.0.1:9999',
+        fetch: fakeFetch,
+      },
+    )
     expect(calls.length).toBe(1)
     expect(calls[0]!.url).toBe('http://127.0.0.1:9999/local-event')
     expect(calls[0]!.init?.method).toBe('POST')

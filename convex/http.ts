@@ -76,7 +76,11 @@ http.route({
       return errorResponse(400, 'unsupported_response_type')
     }
     if (!clientId || !redirectUri || !codeChallenge || codeChallengeMethod !== 'S256') {
-      return errorResponse(400, 'invalid_request', 'client_id, redirect_uri, code_challenge, code_challenge_method=S256 required')
+      return errorResponse(
+        400,
+        'invalid_request',
+        'client_id, redirect_uri, code_challenge, code_challenge_method=S256 required',
+      )
     }
 
     // Resolve the human user. In production Convex's `ctx.auth.getUserIdentity()`
@@ -85,7 +89,7 @@ http.route({
     const identity = await ctx.auth.getUserIdentity()
     let clerkId: string | null = identity?.subject ?? null
     let displayName: string | null = identity?.name ?? identity?.email ?? null
-    let email: string | undefined = identity?.email ?? undefined
+    const email: string | undefined = identity?.email ?? undefined
     if (!clerkId) {
       const testUserId = req.headers.get('x-test-user-id')
       const testUserName = req.headers.get('x-test-user-name')

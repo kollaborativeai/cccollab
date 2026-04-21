@@ -23,6 +23,9 @@ dist/
 # Convex generated code
 convex/_generated/
 
+# Convex local dev state
+.convex/
+
 # Per-project Claude Code local overrides
 test/.claude/settings.local.json
 

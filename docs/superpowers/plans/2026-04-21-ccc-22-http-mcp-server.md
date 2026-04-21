@@ -73,6 +73,7 @@ docs/
 ### Task 1: Add Convex dev dependencies
 
 **Files:**
+
 - Modify: `package.json`
 
 - [ ] **Step 1: Add Convex + testing deps**
@@ -110,6 +111,7 @@ git commit -m "chore(ccc-22): add Convex, clerk backend, and convex-test dev dep
 ### Task 2: Scaffold `convex/` directory
 
 **Files:**
+
 - Create: `convex/_disabled.ts` (placeholder, will be replaced)
 - Create: `convex/README.md`
 - Create: `convex/.gitignore`
@@ -117,7 +119,7 @@ git commit -m "chore(ccc-22): add Convex, clerk backend, and convex-test dev dep
 
 - [ ] **Step 1: Create `convex/README.md`**
 
-```markdown
+````markdown
 # cccollab Convex Backend
 
 Hosts the HTTP MCP server for CCC-22 (external LLM participants in topics).
@@ -127,38 +129,46 @@ Hosts the HTTP MCP server for CCC-22 (external LLM participants in topics).
 ```bash
 npx convex dev
 ```
+````
 
 This starts a local Convex dev server and pushes any code changes in `convex/`. URLs are printed on startup.
 
 ## Environment
 
 See `.env.example` at repo root.
+
 ```
 
 - [ ] **Step 2: Create `convex/.gitignore`**
 
 ```
-_generated/
+
+\_generated/
+
 ```
 
 - [ ] **Step 3: Append to root `.gitignore`**
 
 ```
+
 # Convex
-convex/_generated/
+
+convex/\_generated/
 .env.local
-```
+
+````
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add convex/ .gitignore
 git commit -m "chore(ccc-22): scaffold convex/ directory"
-```
+````
 
 ### Task 3: Schema definition
 
 **Files:**
+
 - Create: `convex/schema.ts`
 
 - [ ] **Step 1: Write `convex/schema.ts`**
@@ -260,6 +270,7 @@ git commit -m "feat(ccc-22): add Convex schema for topics, messages, memberships
 ### Task 4: Auth config + env example
 
 **Files:**
+
 - Create: `convex/auth.config.ts`
 - Create: `.env.example`
 
@@ -301,6 +312,7 @@ git commit -m "chore(ccc-22): add Clerk auth.config and .env.example"
 ### Task 5: Crypto helpers
 
 **Files:**
+
 - Create: `convex/lib/crypto.ts`
 - Create: `convex/tests/crypto.test.ts`
 
@@ -369,10 +381,7 @@ export async function sha256Base64Url(input: string): Promise<string> {
   return toBase64Url(digest)
 }
 
-export async function verifyPkceS256(args: {
-  verifier: string
-  challenge: string
-}): Promise<boolean> {
+export async function verifyPkceS256(args: { verifier: string; challenge: string }): Promise<boolean> {
   const expected = await sha256Base64Url(args.verifier)
   return expected === args.challenge
 }
@@ -393,6 +402,7 @@ git commit -m "feat(ccc-22): crypto helpers for PKCE and random tokens"
 ### Task 6: HTTP + time helpers
 
 **Files:**
+
 - Create: `convex/lib/http.ts`
 - Create: `convex/lib/time.ts`
 
@@ -457,6 +467,7 @@ git commit -m "feat(ccc-22): convex http/time helpers"
 ### Task 7: Users — JIT creation from Clerk identity
 
 **Files:**
+
 - Create: `convex/users.ts`
 - Create: `convex/tests/users.test.ts`
 
@@ -510,7 +521,10 @@ import type { Doc, Id } from './_generated/dataModel'
 export const getByClerkId = query({
   args: { clerkId: v.string() },
   handler: async (ctx, { clerkId }): Promise<Doc<'users'> | null> => {
-    return await ctx.db.query('users').withIndex('by_clerkId', q => q.eq('clerkId', clerkId)).unique()
+    return await ctx.db
+      .query('users')
+      .withIndex('by_clerkId', (q) => q.eq('clerkId', clerkId))
+      .unique()
   },
 })
 
@@ -528,7 +542,10 @@ export const getOrCreateByClerk = mutation({
     displayName: v.string(),
   },
   handler: async (ctx, args): Promise<Id<'users'>> => {
-    const existing = await ctx.db.query('users').withIndex('by_clerkId', q => q.eq('clerkId', args.clerkId)).unique()
+    const existing = await ctx.db
+      .query('users')
+      .withIndex('by_clerkId', (q) => q.eq('clerkId', args.clerkId))
+      .unique()
     if (existing) {
       // keep displayName/email in sync
       if (existing.displayName !== args.displayName || existing.email !== args.email) {
@@ -560,6 +577,7 @@ git commit -m "feat(ccc-22): users table with just-in-time Clerk sync"
 ### Task 8: Channels — create + membership
 
 **Files:**
+
 - Create: `convex/channels.ts`
 - Create: `convex/tests/channels.test.ts`
 
@@ -587,7 +605,7 @@ describe('channels', () => {
     const channelId = await t.mutation(api.channels.getOrCreate, { name: 'eng', creatorUserId: userId })
     await t.mutation(api.channels.join, { channelId, userId })
     const channels = await t.query(api.channels.listForUser, { userId })
-    expect(channels.map(c => c.name)).toEqual(['eng'])
+    expect(channels.map((c) => c.name)).toEqual(['eng'])
   })
 })
 ```
@@ -607,7 +625,10 @@ import type { Doc, Id } from './_generated/dataModel'
 export const getOrCreate = mutation({
   args: { name: v.string(), creatorUserId: v.id('users') },
   handler: async (ctx, { name, creatorUserId }): Promise<Id<'channels'>> => {
-    const existing = await ctx.db.query('channels').withIndex('by_name', q => q.eq('name', name)).unique()
+    const existing = await ctx.db
+      .query('channels')
+      .withIndex('by_name', (q) => q.eq('name', name))
+      .unique()
     if (existing) return existing._id
     return await ctx.db.insert('channels', { name, createdBy: creatorUserId })
   },
@@ -618,7 +639,7 @@ export const join = mutation({
   handler: async (ctx, { channelId, userId }) => {
     const existing = await ctx.db
       .query('channelMemberships')
-      .withIndex('by_user_channel', q => q.eq('userId', userId).eq('channelId', channelId))
+      .withIndex('by_user_channel', (q) => q.eq('userId', userId).eq('channelId', channelId))
       .unique()
     if (existing) return existing._id
     return await ctx.db.insert('channelMemberships', { channelId, userId })
@@ -630,7 +651,7 @@ export const listForUser = query({
   handler: async (ctx, { userId }): Promise<Doc<'channels'>[]> => {
     const memberships = await ctx.db
       .query('channelMemberships')
-      .withIndex('by_user_channel', q => q.eq('userId', userId))
+      .withIndex('by_user_channel', (q) => q.eq('userId', userId))
       .collect()
     const results: Doc<'channels'>[] = []
     for (const m of memberships) {
@@ -657,6 +678,7 @@ git commit -m "feat(ccc-22): channels with idempotent create and per-user member
 ### Task 9: Topics — create, list (by user membership), read
 
 **Files:**
+
 - Create: `convex/topics.ts`
 - Create: `convex/tests/topics.test.ts`
 
@@ -688,7 +710,7 @@ describe('topics', () => {
     const aliceTopics = await t.query(api.topics.listForUser, { userId: alice })
     const bobTopics = await t.query(api.topics.listForUser, { userId: bob })
 
-    expect(aliceTopics.map(t => t._id)).toEqual([topicId])
+    expect(aliceTopics.map((t) => t._id)).toEqual([topicId])
     expect(bobTopics).toEqual([])
   })
 
@@ -732,7 +754,7 @@ export const create = mutation({
   handler: async (ctx, { name, channelId, creatorUserId }): Promise<Id<'topics'>> => {
     const existing = await ctx.db
       .query('topics')
-      .withIndex('by_name_channel', q => q.eq('name', name).eq('channelId', channelId))
+      .withIndex('by_name_channel', (q) => q.eq('name', name).eq('channelId', channelId))
       .unique()
     if (existing && existing.state === 'active') return existing._id
     const topicId = await ctx.db.insert('topics', { name, channelId, state: 'active', createdBy: creatorUserId })
@@ -746,7 +768,7 @@ export const join = mutation({
   handler: async (ctx, { topicId, userId }) => {
     const existing = await ctx.db
       .query('topicMemberships')
-      .withIndex('by_user_topic', q => q.eq('userId', userId).eq('topicId', topicId))
+      .withIndex('by_user_topic', (q) => q.eq('userId', userId).eq('topicId', topicId))
       .unique()
     if (existing) return existing._id
     return await ctx.db.insert('topicMemberships', { topicId, userId })
@@ -758,7 +780,7 @@ export const listForUser = query({
   handler: async (ctx, { userId }): Promise<Doc<'topics'>[]> => {
     const memberships = await ctx.db
       .query('topicMemberships')
-      .withIndex('by_user_topic', q => q.eq('userId', userId))
+      .withIndex('by_user_topic', (q) => q.eq('userId', userId))
       .collect()
     const out: Doc<'topics'>[] = []
     for (const m of memberships) {
@@ -774,12 +796,15 @@ export const readForUser = query({
   handler: async (ctx, { topicId, userId }) => {
     const membership = await ctx.db
       .query('topicMemberships')
-      .withIndex('by_user_topic', q => q.eq('userId', userId).eq('topicId', topicId))
+      .withIndex('by_user_topic', (q) => q.eq('userId', userId).eq('topicId', topicId))
       .unique()
     if (!membership) return null
     const topic = await ctx.db.get(topicId)
     if (!topic) return null
-    const messages = await ctx.db.query('messages').withIndex('by_topic', q => q.eq('topicId', topicId)).collect()
+    const messages = await ctx.db
+      .query('messages')
+      .withIndex('by_topic', (q) => q.eq('topicId', topicId))
+      .collect()
     return { topic, messages }
   },
 })
@@ -800,6 +825,7 @@ git commit -m "feat(ccc-22): topics create/join/list/read scoped by user members
 ### Task 10: Messages — send + list
 
 **Files:**
+
 - Create: `convex/messages.ts`
 - Create: `convex/tests/messages.test.ts`
 
@@ -826,9 +852,7 @@ describe('messages', () => {
       text: 'hello',
     })
     const list = await t.query(api.messages.listForTopic, { topicId })
-    expect(list).toMatchObject([
-      { _id: messageId, authorType: 'external', authorName: 'User', text: 'hello' },
-    ])
+    expect(list).toMatchObject([{ _id: messageId, authorType: 'external', authorName: 'User', text: 'hello' }])
   })
 
   it('rejects send from non-member external user', async () => {
@@ -886,7 +910,7 @@ export const sendAsUser = mutation({
   handler: async (ctx, { topicId, userId, text }): Promise<Id<'messages'>> => {
     const membership = await ctx.db
       .query('topicMemberships')
-      .withIndex('by_user_topic', q => q.eq('userId', userId).eq('topicId', topicId))
+      .withIndex('by_user_topic', (q) => q.eq('userId', userId).eq('topicId', topicId))
       .unique()
     if (!membership) {
       throw new Error(`User is not a member of this topic`)
@@ -906,7 +930,10 @@ export const sendAsUser = mutation({
 export const listForTopic = query({
   args: { topicId: v.id('topics') },
   handler: async (ctx, { topicId }): Promise<Doc<'messages'>[]> => {
-    return await ctx.db.query('messages').withIndex('by_topic', q => q.eq('topicId', topicId)).collect()
+    return await ctx.db
+      .query('messages')
+      .withIndex('by_topic', (q) => q.eq('topicId', topicId))
+      .collect()
   },
 })
 ```
@@ -930,6 +957,7 @@ git commit -m "feat(ccc-22): messages send + list with per-topic membership enfo
 ### Task 11: OAuth token store
 
 **Files:**
+
 - Create: `convex/oauth/tokens.ts`
 
 - [ ] **Step 1: Implement `convex/oauth/tokens.ts`**
@@ -962,7 +990,10 @@ export const storeAuthCode = internalMutation({
 export const consumeAuthCode = internalMutation({
   args: { code: v.string() },
   handler: async (ctx, { code }): Promise<Doc<'oauthAuthCodes'> | null> => {
-    const row = await ctx.db.query('oauthAuthCodes').withIndex('by_code', q => q.eq('code', code)).unique()
+    const row = await ctx.db
+      .query('oauthAuthCodes')
+      .withIndex('by_code', (q) => q.eq('code', code))
+      .unique()
     if (!row) return null
     if (row.used || row.expiresAt < nowMs()) return null
     await ctx.db.patch(row._id, { used: true })
@@ -1005,7 +1036,10 @@ export const issueRefreshToken = internalMutation({
 export const resolveAccessToken = internalQuery({
   args: { token: v.string() },
   handler: async (ctx, { token }): Promise<Doc<'oauthAccessTokens'> | null> => {
-    const row = await ctx.db.query('oauthAccessTokens').withIndex('by_token', q => q.eq('token', token)).unique()
+    const row = await ctx.db
+      .query('oauthAccessTokens')
+      .withIndex('by_token', (q) => q.eq('token', token))
+      .unique()
     if (!row) return null
     if (row.revoked || row.expiresAt < nowMs()) return null
     return row
@@ -1015,7 +1049,10 @@ export const resolveAccessToken = internalQuery({
 export const consumeRefreshToken = internalMutation({
   args: { token: v.string() },
   handler: async (ctx, { token }): Promise<Doc<'oauthRefreshTokens'> | null> => {
-    const row = await ctx.db.query('oauthRefreshTokens').withIndex('by_token', q => q.eq('token', token)).unique()
+    const row = await ctx.db
+      .query('oauthRefreshTokens')
+      .withIndex('by_token', (q) => q.eq('token', token))
+      .unique()
     if (!row) return null
     if (row.revoked || row.expiresAt < nowMs()) return null
     await ctx.db.patch(row._id, { revoked: true })
@@ -1034,6 +1071,7 @@ git commit -m "feat(ccc-22): oauth token store (auth codes, access + refresh tok
 ### Task 12: OAuth Dynamic Client Registration
 
 **Files:**
+
 - Create: `convex/oauth/register.ts`
 - Create: `convex/tests/oauth.test.ts` (will grow through OAuth tasks)
 
@@ -1087,7 +1125,10 @@ export const register = mutation({
     redirectUris: v.array(v.string()),
     tokenEndpointAuthMethod: v.union(v.literal('none'), v.literal('client_secret_post')),
   },
-  handler: async (ctx, args): Promise<{
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
     client_id: string
     client_secret?: string
     client_name: string
@@ -1147,6 +1188,7 @@ git commit -m "feat(ccc-22): oauth dynamic client registration (RFC 7591)"
 ### Task 13: OAuth Authorization endpoint (code issuance)
 
 **Files:**
+
 - Create: `convex/oauth/authorize.ts`
 - Modify: `convex/tests/oauth.test.ts`
 
@@ -1234,7 +1276,7 @@ export const issueAuthCode = mutation({
   handler: async (ctx, args): Promise<{ code: string }> => {
     const client = await ctx.db
       .query('oauthClients')
-      .withIndex('by_clientId', q => q.eq('clientId', args.clientId))
+      .withIndex('by_clientId', (q) => q.eq('clientId', args.clientId))
       .unique()
     if (!client) throw new Error('unknown client')
     if (!client.redirectUris.includes(args.redirectUri)) throw new Error('redirect_uri not registered for client')
@@ -1268,6 +1310,7 @@ git commit -m "feat(ccc-22): oauth authorize (issues PKCE-bound auth codes)"
 ### Task 14: OAuth Token endpoint (exchange + refresh)
 
 **Files:**
+
 - Create: `convex/oauth/token.ts`
 - Modify: `convex/tests/oauth.test.ts`
 
@@ -1452,6 +1495,7 @@ git commit -m "feat(ccc-22): oauth token endpoint (auth-code exchange + refresh,
 ### Task 15: OAuth metadata + HTTP wiring
 
 **Files:**
+
 - Create: `convex/oauth/metadata.ts`
 - Create: `convex/http.ts`
 
@@ -1548,6 +1592,7 @@ git commit -m "feat(ccc-22): oauth metadata endpoints + /register HTTP wiring"
 ### Task 16: OAuth /authorize and /token HTTP endpoints
 
 **Files:**
+
 - Modify: `convex/http.ts`
 
 - [ ] **Step 1: Add /authorize and /token routes to `convex/http.ts`**
@@ -1681,6 +1726,7 @@ git commit -m "feat(ccc-22): wire /authorize and /token HTTP endpoints"
 ### Task 17: MCP server dispatcher
 
 **Files:**
+
 - Create: `convex/mcp/server.ts`
 - Create: `convex/mcp/tools/listTopics.ts`
 - Create: `convex/mcp/tools/readTopic.ts`
@@ -1706,7 +1752,7 @@ export async function handleListTopics(
   userId: Id<'users'>,
 ): Promise<{ topics: Array<{ id: string; name: string; channelId: string }> }> {
   const rows = await ctx.runQuery(api.topics.listForUser, { userId })
-  return { topics: rows.map(t => ({ id: t._id, name: t.name, channelId: t.channelId })) }
+  return { topics: rows.map((t) => ({ id: t._id, name: t.name, channelId: t.channelId })) }
 }
 ```
 
@@ -1748,7 +1794,7 @@ export async function handleReadTopic(
   if (!result) return { error: 'topic_not_found_or_not_a_member' }
   return {
     topic: { id: result.topic._id, name: result.topic.name, channelId: result.topic.channelId },
-    messages: result.messages.map(m => ({
+    messages: result.messages.map((m) => ({
       id: m._id,
       authorType: m.authorType,
       authorName: m.authorName,
@@ -1904,6 +1950,7 @@ git commit -m "feat(ccc-22): mcp server dispatcher and three tools (list/read/se
 ### Task 18: MCP HTTP endpoint wired with bearer token auth
 
 **Files:**
+
 - Modify: `convex/http.ts`
 
 - [ ] **Step 1: Add /mcp route to `convex/http.ts`**
@@ -1952,6 +1999,7 @@ git commit -m "feat(ccc-22): /mcp endpoint with bearer token auth + WWW-Authenti
 ### Task 19: MCP endpoint integration test
 
 **Files:**
+
 - Create: `convex/tests/mcp.test.ts`
 
 - [ ] **Step 1: Write integration tests**
@@ -1967,7 +2015,9 @@ describe('mcp dispatcher', () => {
   it('initialize returns server info + capabilities', async () => {
     const t = convexTest(schema)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx: any) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 1, method: 'initialize' }))
+    const res = await t.run(async (ctx: any) =>
+      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 1, method: 'initialize' }),
+    )
     expect(res).toMatchObject({
       jsonrpc: '2.0',
       id: 1,
@@ -1978,7 +2028,9 @@ describe('mcp dispatcher', () => {
   it('tools/list returns three tools', async () => {
     const t = convexTest(schema)
     const userId = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'U' })
-    const res = await t.run(async (ctx: any) => dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 2, method: 'tools/list' }))
+    const res = await t.run(async (ctx: any) =>
+      dispatchMcp(ctx, userId, { jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    )
     const names = (res.result as any).tools.map((t: any) => t.name)
     expect(names.sort()).toEqual(['list_topics', 'read_topic', 'send_message_to_topic'])
   })
@@ -1991,13 +2043,23 @@ describe('mcp dispatcher', () => {
     const topicId = await t.mutation(api.topics.create, { name: 'design', channelId, creatorUserId: alice })
 
     const aliceRes = await t.run(async (ctx: any) =>
-      dispatchMcp(ctx, alice, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_topics', arguments: {} } }),
+      dispatchMcp(ctx, alice, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'list_topics', arguments: {} },
+      }),
     )
     const aliceText = JSON.parse((aliceRes.result as any).content[0].text)
     expect(aliceText.topics.map((t: any) => t.name)).toEqual(['design'])
 
     const bobRes = await t.run(async (ctx: any) =>
-      dispatchMcp(ctx, bob, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_topics', arguments: {} } }),
+      dispatchMcp(ctx, bob, {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'list_topics', arguments: {} },
+      }),
     )
     const bobText = JSON.parse((bobRes.result as any).content[0].text)
     expect(bobText.topics).toEqual([])
@@ -2017,7 +2079,7 @@ describe('mcp dispatcher', () => {
         params: { name: 'send_message_to_topic', arguments: { topicId, text: 'hi from alice' } },
       }),
     )
-    const result = (res.result as any)
+    const result = res.result as any
     expect(result.isError).toBeFalsy()
 
     const msgs = await t.query(api.messages.listForTopic, { topicId })
@@ -2045,6 +2107,7 @@ git commit -m "test(ccc-22): integration tests for MCP dispatcher (initialize, t
 ### Task 20: Convex bridge
 
 **Files:**
+
 - Create: `src/bridge/convex-bridge.ts`
 - Create: `tests/bridge.test.ts`
 
@@ -2149,27 +2212,23 @@ export async function startBridge(opts: BridgeOptions): Promise<BridgeHandle> {
     client.setAuth(() => Promise.resolve(opts.accessToken))
   }
   const seen = new Set<string>()
-  const unsubscribe = client.onUpdate(
-    ('messages:listRecent' as any),
-    {},
-    async (rows: ConvexMessageRow[]) => {
-      for (const row of rows) {
-        if (seen.has(row._id)) continue
-        seen.add(row._id)
-        const payload = buildLocalEventPayload(row, {
-          topicName: row.topicId,
-          channel: 'external',
-        })
-        await fetch(`${opts.brokerUrl}/local-event`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }).catch(() => {
-          /* best-effort */
-        })
-      }
-    },
-  )
+  const unsubscribe = client.onUpdate('messages:listRecent' as any, {}, async (rows: ConvexMessageRow[]) => {
+    for (const row of rows) {
+      if (seen.has(row._id)) continue
+      seen.add(row._id)
+      const payload = buildLocalEventPayload(row, {
+        topicName: row.topicId,
+        channel: 'external',
+      })
+      await fetch(`${opts.brokerUrl}/local-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        /* best-effort */
+      })
+    }
+  })
   return {
     async stop() {
       unsubscribe()
@@ -2194,6 +2253,7 @@ git commit -m "feat(ccc-22): convex-to-broker bridge + test for payload translat
 ### Task 21: Add `listRecent` query for bridge
 
 **Files:**
+
 - Modify: `convex/messages.ts`
 
 - [ ] **Step 1: Add `listRecent` query**
@@ -2223,6 +2283,7 @@ git commit -m "feat(ccc-22): messages.listRecent query for the bridge"
 ### Task 22: Scenario harness
 
 **Files:**
+
 - Create: `tests/scenarios/harness.ts`
 
 The harness uses `convex-test` to run Convex functions in-memory, then hands us a `MockFetch` function we can use to call the HTTP endpoints (simulating external clients). It supplies a helper to register a fake Clerk identity.
@@ -2238,7 +2299,10 @@ import type { Id } from '../../convex/_generated/dataModel'
 
 export async function makeHarness() {
   const t = convexTest(schema)
-  async function withFakeIdentity<T>(identity: { subject: string; name?: string; email?: string }, fn: () => Promise<T>): Promise<T> {
+  async function withFakeIdentity<T>(
+    identity: { subject: string; name?: string; email?: string },
+    fn: () => Promise<T>,
+  ): Promise<T> {
     const asIdentity = t.withIdentity({
       issuer: 'https://test.clerk',
       tokenIdentifier: `https://test.clerk|${identity.subject}`,
@@ -2284,6 +2348,7 @@ git commit -m "test(ccc-22): scenario test harness with fake Clerk identities"
 ### Task 23: OAuth flow scenario test
 
 **Files:**
+
 - Create: `tests/scenarios/oauth-flow.scenario.test.ts`
 
 - [ ] **Step 1: Write scenario**
@@ -2381,6 +2446,7 @@ git commit -m "test(ccc-22): scenario test for OAuth 2.1 flow (register + author
 ### Task 24: MCP tool scenario test (list/read/send)
 
 **Files:**
+
 - Create: `tests/scenarios/mcp-tools.scenario.test.ts`
 
 - [ ] **Step 1: Write scenario**
@@ -2400,7 +2466,12 @@ describe('Scenario: MCP tools end-to-end', () => {
 
     // list_topics
     const listRes = await t.run(async (ctx: any) =>
-      dispatchMcp(ctx, alice, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_topics', arguments: {} } }),
+      dispatchMcp(ctx, alice, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_topics', arguments: {} },
+      }),
     )
     const listed = JSON.parse((listRes.result as any).content[0].text)
     expect(listed.topics.length).toBe(1)
@@ -2450,6 +2521,7 @@ git commit -m "test(ccc-22): scenario test for MCP tools list/read/send end-to-e
 ### Task 25: Attribution scenario test
 
 **Files:**
+
 - Create: `tests/scenarios/attribution.scenario.test.ts`
 
 - [ ] **Step 1: Scenario**
@@ -2493,7 +2565,7 @@ describe('Scenario: attribution', () => {
     expect((res.result as any).isError).toBeFalsy()
 
     const messages = await t.query(api.messages.listForTopic, { topicId })
-    const alicesMessage = messages.find(m => m.text === 'my take')
+    const alicesMessage = messages.find((m) => m.text === 'my take')
     expect(alicesMessage).toBeDefined()
     expect(alicesMessage!.authorType).toBe('external')
     expect(alicesMessage!.authorName).toBe('Alice External')
@@ -2516,6 +2588,7 @@ git commit -m "test(ccc-22): scenario test for message attribution (external use
 ### Task 26: Cross-visibility scenario test (external -> Claude Code via bridge)
 
 **Files:**
+
 - Create: `tests/scenarios/cross-visibility.scenario.test.ts`
 
 - [ ] **Step 1: Scenario — exercises the bridge transformer**
@@ -2612,6 +2685,7 @@ git commit -m "test(ccc-22): scenario tests for cross-visibility between externa
 ### Task 27: Scoping scenario test
 
 **Files:**
+
 - Create: `tests/scenarios/scoping.scenario.test.ts`
 
 - [ ] **Step 1: Scenario**
@@ -2633,7 +2707,12 @@ describe('Scenario: per-user scoping', () => {
     // Bob is not a member of this topic.
 
     const list = await t.run(async (ctx: any) =>
-      dispatchMcp(ctx, bob, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_topics', arguments: {} } }),
+      dispatchMcp(ctx, bob, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_topics', arguments: {} },
+      }),
     )
     const listed = JSON.parse((list.result as any).content[0].text)
     expect(listed.topics).toEqual([])
@@ -2680,6 +2759,7 @@ git commit -m "test(ccc-22): scenario test for per-user scoping (non-members blo
 ### Task 28: README + deployment docs
 
 **Files:**
+
 - Create: `docs/CCC-22-http-mcp.md`
 - Modify: `README.md`
 
@@ -2705,6 +2785,7 @@ git commit -m "docs(ccc-22): http mcp server + bridge setup guide"
 ### Task 29: Ensure tests run in CI; adjust vitest config
 
 **Files:**
+
 - Modify: `vitest.config.ts`
 - Modify: `package.json`
 
@@ -2739,6 +2820,7 @@ git commit -m "chore(ccc-22): wire vitest to run convex tests (edge runtime) and
 ### Task 30: Final smoke + release notes
 
 **Files:**
+
 - Modify: (depends on findings)
 
 - [ ] **Step 1: Run typecheck + full test suite**
@@ -2764,6 +2846,7 @@ gh pr create --title "feat(ccc-22): external LLMs participate in topics via host
 ```
 
 PR body includes:
+
 - Summary of ACs satisfied
 - What's deferred (deployment to `cccollab.flatout.solutions/mcp`, CCC-3 plugin migration)
 - Test plan: OAuth flow, scoping, attribution, cross-visibility scenario tests
