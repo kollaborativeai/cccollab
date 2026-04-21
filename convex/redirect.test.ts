@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { OAUTH_CALLBACK_PATH, isAllowedRedirect } from './redirect'
 
@@ -51,5 +51,46 @@ describe('isAllowedRedirect', () => {
 
   it('exposes the callback path as a shared constant', () => {
     expect(OAUTH_CALLBACK_PATH).toBe('/cccollab-oauth-callback')
+  })
+})
+
+describe('isAllowedRedirect — same-origin /authorize (CCC-22 external-AI flow)', () => {
+  let savedSiteUrl: string | undefined
+  beforeEach(() => {
+    savedSiteUrl = process.env.CONVEX_SITE_URL
+    process.env.CONVEX_SITE_URL = 'https://example.convex.site'
+  })
+  afterEach(() => {
+    if (savedSiteUrl === undefined) delete process.env.CONVEX_SITE_URL
+    else process.env.CONVEX_SITE_URL = savedSiteUrl
+  })
+
+  it('accepts /authorize on the deployment origin (with query string, as expected)', () => {
+    expect(
+      isAllowedRedirect(
+        'https://example.convex.site/authorize?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&code_challenge=x&code_challenge_method=S256',
+      ),
+    ).toBe(true)
+  })
+
+  it('rejects /authorize on a DIFFERENT origin', () => {
+    expect(isAllowedRedirect('https://attacker.convex.site/authorize?foo=bar')).toBe(false)
+  })
+
+  it('rejects non-/authorize path on the deployment origin', () => {
+    expect(isAllowedRedirect('https://example.convex.site/other')).toBe(false)
+    expect(isAllowedRedirect('https://example.convex.site/')).toBe(false)
+  })
+
+  it('rejects http:// on the deployment origin (must be https)', () => {
+    expect(isAllowedRedirect('http://example.convex.site/authorize')).toBe(false)
+  })
+
+  it('rejects a hash component on a same-origin /authorize', () => {
+    expect(isAllowedRedirect('https://example.convex.site/authorize?x=1#frag')).toBe(false)
+  })
+
+  it('rejects userinfo on same-origin /authorize', () => {
+    expect(isAllowedRedirect('https://user:pass@example.convex.site/authorize')).toBe(false)
   })
 })

@@ -1,35 +1,30 @@
 /**
  * Allow-list check for Convex Auth's `redirect` callback.
  *
- * The cccollab local MCP server is the only first-party client at the
- * moment. Its OAuth flow opens a loopback HTTP listener on an ephemeral
- * port and then tells Convex "when the Google exchange is done, redirect
- * the user back to http://127.0.0.1:<port>/cccollab-oauth-callback".
+ * Two legitimate destinations:
  *
- * Convex Auth requires us to whitelist those URLs here so an attacker
- * can't coerce the OAuth flow into redirecting to a phishing origin.
+ * 1. The first-party cccollab local MCP server's loopback listener:
+ *    `http://127.0.0.1:<port>/cccollab-oauth-callback`. Exact pathname,
+ *    no userinfo, loopback-only. See file history for why `localhost` is
+ *    rejected — it can resolve to IPv6 or a user-controlled DNS entry.
  *
- * The allow rule is intentionally narrow:
- * - scheme MUST be `http:` (loopback only)
- * - hostname MUST be exactly `127.0.0.1`
- * - NO userinfo component (`user:pass@host` bypasses hostname-only checks)
- * - pathname MUST be exactly `/cccollab-oauth-callback`
- * - no query / hash component is permitted
- * - any port number on the loopback interface is allowed
+ * 2. Same-origin `/authorize?...` on this Convex deployment. Used by the
+ *    external-AI OAuth flow (CCC-22): when a user visits `/authorize`
+ *    unauthenticated, we bounce them through Convex Auth's Google sign-in
+ *    with `redirectTo` set to the original `/authorize` URL so the callback
+ *    returns them to the same `/authorize` after the browser cookie is set.
+ *    The "same origin" check is against `CONVEX_SITE_URL`, which Convex
+ *    injects into every deployment's env at runtime.
  *
- * `localhost` is intentionally rejected. The MCP server only ever binds
- * to `127.0.0.1`, and `localhost` can resolve to IPv6 (`::1`) or a
- * user-controlled DNS entry — accepting it would let a local process
- * that can bind the right port race the MCP server's ephemeral listener
- * and intercept the OAuth code.
+ * Any other destination is rejected so an attacker can't coerce the OAuth
+ * flow into redirecting to a phishing origin.
  *
- * IPv6 loopback (`::1`) is rejected for the same binding reason.
- *
- * Kept as a pure function so the Convex callback in `convex/auth.ts` is
- * a one-liner and the policy is testable without going through the
- * OAuth flow.
+ * Kept as a pure function so the Convex callback in `convex/auth.ts` is a
+ * one-liner and the policy is testable without going through the OAuth
+ * flow.
  */
 export const OAUTH_CALLBACK_PATH = '/cccollab-oauth-callback'
+export const AUTHORIZE_PATH = '/authorize'
 
 export function isAllowedRedirect(redirectTo: string): boolean {
   let url: URL
@@ -38,10 +33,41 @@ export function isAllowedRedirect(redirectTo: string): boolean {
   } catch {
     return false
   }
-  if (url.protocol !== 'http:') return false
   if (url.username !== '' || url.password !== '') return false
-  if (url.hostname !== '127.0.0.1') return false
-  if (url.pathname !== OAUTH_CALLBACK_PATH) return false
-  if (url.search !== '' || url.hash !== '') return false
-  return true
+
+  // 1. Loopback: first-party MCP server callback.
+  if (
+    url.protocol === 'http:' &&
+    url.hostname === '127.0.0.1' &&
+    url.pathname === OAUTH_CALLBACK_PATH &&
+    url.search === '' &&
+    url.hash === ''
+  ) {
+    return true
+  }
+
+  // 2. Same-origin /authorize on this deployment (external-AI OAuth flow).
+  const siteUrl = process.env.CONVEX_SITE_URL
+  if (siteUrl) {
+    let site: URL
+    try {
+      site = new URL(siteUrl)
+    } catch {
+      return false
+    }
+    if (
+      url.protocol === site.protocol &&
+      url.hostname === site.hostname &&
+      url.port === site.port &&
+      url.pathname === AUTHORIZE_PATH &&
+      url.hash === ''
+    ) {
+      // The /authorize URL carries its original query string on the way
+      // back; that's the whole point of bouncing through sign-in. Don't
+      // filter on `search === ''` here.
+      return true
+    }
+  }
+
+  return false
 }
