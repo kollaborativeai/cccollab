@@ -184,6 +184,22 @@ export const unarchive = authenticatedMutation({
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
+/**
+ * Convex's schema indexes don't support conditional uniqueness, so we can't
+ * index on `(channelId, normalizedTopic, state)` to point at just the
+ * active topic row. Every archive-then-start-same-name cycle leaves a row
+ * in the table with that (channelId, normalizedTopic) key, so this scan
+ * grows linearly in archived revisions.
+ *
+ * The `.take(100)` cap bounds latency at worst case. For any single team
+ * to exceed 100 archived revisions of one topic name would be very
+ * unusual; we prefer degrading correctness slightly (returning `null` and
+ * inserting a new row even if one of the first 100 hits is active) to
+ * unbounded scan latency, because the mutation's insert path would then
+ * rely on its other uniqueness checks to surface a conflict cleanly.
+ */
+const ACTIVE_TOPIC_LOOKUP_LIMIT = 100
+
 async function findActiveTopicByNormalizedName(
   ctx: AuthenticatedMutationCtx,
   channelId: Id<'channels'>,
@@ -194,7 +210,7 @@ async function findActiveTopicByNormalizedName(
     .withIndex('by_channel_and_normalizedTopic', (q) =>
       q.eq('channelId', channelId).eq('normalizedTopic', normalizedTopic),
     )
-    .collect()
+    .take(ACTIVE_TOPIC_LOOKUP_LIMIT)
   for (const t of matches) {
     if (t.state === 'active') return t
   }

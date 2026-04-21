@@ -25,6 +25,12 @@ export const listByTopic = authenticatedQuery({
     const topic = await requireTopic(ctx, args.topicId)
     await assertCallerSubscribedToChannel(ctx, topic.channelId)
 
+    // Archived topics stop delivering messages. Members keep their
+    // topicMembers row and can unarchive later, but reactive
+    // subscriptions on an archived topic return empty — matches the
+    // broker's "archive means 'no new activity on this thread'" semantic.
+    if (topic.state === 'archived') return []
+
     const cutoff = args.sinceTs
     const rows = await ctx.db
       .query('messages')

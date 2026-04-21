@@ -136,6 +136,43 @@ describe('messages.sendToSession (DM)', () => {
   })
 })
 
+describe('messages.listByTopic archived-topic filter', () => {
+  it('returns empty once the topic is archived, even for members who were subscribed', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 't',
+    })
+    await asStefan.mutation(api.messages.mutations.sendToTopic, { sessionId, topicId, text: 'first' })
+    expect((await asStefan.query(api.messages.queries.listByTopic, { topicId })).length).toBe(1)
+    await asStefan.mutation(api.topics.mutations.archive, { sessionId, topicId })
+    expect(await asStefan.query(api.messages.queries.listByTopic, { topicId })).toEqual([])
+  })
+
+  it('returns messages again after the topic is unarchived', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 't',
+    })
+    await asStefan.mutation(api.messages.mutations.sendToTopic, { sessionId, topicId, text: 'first' })
+    await asStefan.mutation(api.topics.mutations.archive, { sessionId, topicId })
+    expect(await asStefan.query(api.messages.queries.listByTopic, { topicId })).toEqual([])
+    await asStefan.mutation(api.topics.mutations.unarchive, { sessionId, topicId })
+    expect((await asStefan.query(api.messages.queries.listByTopic, { topicId })).length).toBe(1)
+  })
+})
+
 describe('messages.listByTopic with sinceTs cursor', () => {
   it('returns messages at the cutoff timestamp (inclusive) so same-ms rows are not dropped', async () => {
     const t = convexTest(schema, modules)
