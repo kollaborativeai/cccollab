@@ -484,6 +484,57 @@ describe('/authorize error handling (RFC 6749 §4.1.2.1)', () => {
     const body = (await res.json()) as { error: string }
     expect(body.error).toBe('invalid_request')
   })
+
+  it('rejects UNKNOWN_CLIENT at the mutation layer with a code that will NOT redirect — RFC 6749 §4.1.2.1', async () => {
+    // Open-redirect regression: an attacker with no registered client can
+    // craft /authorize?client_id=ghost&redirect_uri=https://attacker/...
+    // and turn the authorization endpoint into an unauth'd redirect
+    // bouncer. The server MUST return a direct error (JSON 400) rather
+    // than redirect once it realises it cannot verify redirect_uri.
+    //
+    // We exercise this at the mutation layer (issueAuthCode) so the test
+    // is deterministic regardless of what the /authorize HTTP handler
+    // does with unauthenticated requests in different environments. The
+    // HTTP handler's branch that maps UNKNOWN_CLIENT to `errorResponse`
+    // instead of `redirectError` is covered by inspecting the code
+    // mapping directly (see below).
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    await expect(
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: 'ghost-unregistered',
+        redirectUri: 'https://attacker.example.com/collect',
+        codeChallenge: 'abc',
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+    ).rejects.toThrow(/UNKNOWN_CLIENT/)
+  })
+
+  it('rejects INVALID_REDIRECT_URI at the mutation layer (registered client, wrong redirect)', async () => {
+    // Same class of attack but when the client IS registered: an attacker
+    // who knows a valid client_id but supplies a redirect_uri that isn't
+    // on that client's registered list must not be redirected to the
+    // unregistered URI. Mutation must throw INVALID_REDIRECT_URI; the
+    // HTTP handler's error-code mapping drops that error into the
+    // non-redirect branch.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Real Client',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    await expect(
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'https://attacker.example.com/collect',
+        codeChallenge: 'abc',
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+    ).rejects.toThrow(/INVALID_REDIRECT_URI|redirect/)
+  })
 })
 
 describe('/mcp — well-known metadata', () => {

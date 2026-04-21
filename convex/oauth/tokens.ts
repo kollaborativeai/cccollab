@@ -2,7 +2,7 @@ import { ConvexError, v } from 'convex/values'
 
 import type { Doc, Id } from '../_generated/dataModel'
 import { internalMutation, internalQuery } from '../_generated/server'
-import { sha256Base64Url, timingSafeEqual } from '../lib/crypto'
+import { timingSafeEqual } from '../lib/crypto'
 import { ACCESS_TOKEN_TTL_MS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, nowMs } from '../lib/time'
 
 /**
@@ -31,25 +31,56 @@ export const storeAuthCode = internalMutation({
 })
 
 /**
- * Validate a presented auth code against its bindings AND consume it in a
- * single atomic mutation. Order matters: all checks run before the `used`
- * flag is flipped, so a legitimate client that sends the right code with a
- * wrong `redirect_uri` or wrong `code_verifier` can retry — the code is not
- * burned on a mismatch.
+ * Prepare the database side of a successful authorization-code exchange in
+ * one atomic mutation:
  *
- * Errors propagate as ConvexError so the caller can distinguish "expired"
- * from "wrong verifier" from "wrong redirect_uri" in telemetry. The public
- * token endpoint normalises all of these to OAuth `invalid_grant` on the
- * wire (RFC 6749 §5.2).
+ *   1. validate the code (existence, not-yet-used, not-expired, clientId,
+ *      redirectUri, PKCE challenge comparison)
+ *   2. mark the code `used`
+ *   3. revoke every non-revoked access + refresh token for (userId, clientId)
+ *   4. get-or-create the synthetic session for (userId, clientId)
+ *
+ * Steps 2–4 happen in the same Convex transaction as step 1. That closes
+ * the concurrent-double-authorize race: two parallel `/authorize` flows
+ * for the same (userId, clientId) will serialise on the token-table
+ * writes and the second flow's revoke + issue will observe the first
+ * flow's new tokens (and revoke them correctly).
+ *
+ * **Why `expectedChallenge` is pre-computed by the caller**: `crypto.subtle.digest`
+ * is NOT available in the Convex mutation isolate. Only the action runtime
+ * exposes the full Web Crypto API. Test environments (Node / convex-test)
+ * mask this because they run mutations in a normal V8 with full globals,
+ * but production deployments would throw at runtime. So the action hashes
+ * the verifier and hands us the result; the mutation only does a
+ * constant-time string compare (no SubtleCrypto call).
+ *
+ * Returns the consumed auth-code row plus the synthetic sessionId so the
+ * action can insert the access + refresh token rows without another round
+ * trip.
+ *
+ * Errors propagate as ConvexError so the caller can distinguish each
+ * failure mode in telemetry. The public token endpoint normalises all of
+ * these to OAuth `invalid_grant` on the wire (RFC 6749 §5.2).
  */
-export const validateAndConsumeAuthCode = internalMutation({
+export const consumeCodeAndPrepareSession = internalMutation({
   args: {
     code: v.string(),
     clientId: v.string(),
+    clientName: v.string(),
     redirectUri: v.string(),
-    codeVerifier: v.string(),
+    /** Caller (action) must compute `base64url(sha256(code_verifier))` and pass it here. */
+    expectedChallenge: v.string(),
   },
-  handler: async (ctx, args): Promise<Doc<'oauthAuthCodes'>> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    code: Doc<'oauthAuthCodes'>
+    sessionId: Id<'sessions'>
+    accessRevoked: number
+    refreshRevoked: number
+  }> => {
+    // 1. Validate the code.
     const row = await ctx.db
       .query('oauthAuthCodes')
       .withIndex('by_code', (q) => q.eq('code', args.code))
@@ -69,47 +100,60 @@ export const validateAndConsumeAuthCode = internalMutation({
     if (row.redirectUri !== args.redirectUri) {
       throw new ConvexError({ code: 'REDIRECT_URI_MISMATCH', message: 'redirect_uri does not match code' })
     }
-    // PKCE S256 verify — happens in the mutation so the consume is
-    // guarded by the verifier check (no burning a code on a typo).
-    const expectedChallenge = await sha256Base64Url(args.codeVerifier)
-    if (!timingSafeEqual(expectedChallenge, row.codeChallenge)) {
+    // Constant-time compare of caller-supplied expectedChallenge against
+    // the stored challenge. No SubtleCrypto call here on purpose.
+    if (!timingSafeEqual(args.expectedChallenge, row.codeChallenge)) {
       throw new ConvexError({ code: 'PKCE_MISMATCH', message: 'code_verifier does not match stored challenge' })
     }
-    await ctx.db.patch(row._id, { used: true })
-    return { ...row, used: true }
-  },
-})
 
-/**
- * Revoke every non-revoked access + refresh token for (userId, clientId).
- * Called from exchangeAuthCode before issuing a new pair on re-authorize,
- * so a leaked previous-session token doesn't stay valid alongside the
- * new one for up to the access-token TTL.
- */
-export const revokeExistingTokens = internalMutation({
-  args: { userId: v.id('users'), clientId: v.string() },
-  handler: async (ctx, { userId, clientId }): Promise<{ accessRevoked: number; refreshRevoked: number }> => {
+    // 2. Consume the code.
+    await ctx.db.patch(row._id, { used: true })
+
+    // 3. Revoke existing tokens for (userId, clientId) atomically.
     let accessRevoked = 0
-    const access = await ctx.db
+    const accessRows = await ctx.db
       .query('oauthAccessTokens')
-      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', userId).eq('clientId', clientId))
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
       .collect()
-    for (const row of access) {
-      if (row.revoked) continue
-      await ctx.db.patch(row._id, { revoked: true })
+    for (const t of accessRows) {
+      if (t.revoked) continue
+      await ctx.db.patch(t._id, { revoked: true })
       accessRevoked++
     }
     let refreshRevoked = 0
-    const refresh = await ctx.db
+    const refreshRows = await ctx.db
       .query('oauthRefreshTokens')
-      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', userId).eq('clientId', clientId))
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
       .collect()
-    for (const row of refresh) {
-      if (row.revoked) continue
-      await ctx.db.patch(row._id, { revoked: true })
+    for (const t of refreshRows) {
+      if (t.revoked) continue
+      await ctx.db.patch(t._id, { revoked: true })
       refreshRevoked++
     }
-    return { accessRevoked, refreshRevoked }
+
+    // 4. Get-or-create the synthetic external session for (userId, clientId).
+    const sessionName = sessionNameFor(args.clientId, args.clientName)
+    const existingSession = await ctx.db
+      .query('sessions')
+      .withIndex('by_user_and_sessionName', (q) => q.eq('userId', row.userId).eq('sessionName', sessionName))
+      .unique()
+    let sessionId: Id<'sessions'>
+    const now = nowMs()
+    if (existingSession) {
+      await ctx.db.patch(existingSession._id, { lastSeenAt: now })
+      sessionId = existingSession._id
+    } else {
+      sessionId = await ctx.db.insert('sessions', {
+        userId: row.userId,
+        sessionName,
+        objective: `External MCP client: ${args.clientName}`,
+        machine: 'external-mcp',
+        createdAt: now,
+        lastSeenAt: now,
+      })
+    }
+
+    return { code: { ...row, used: true }, sessionId, accessRevoked, refreshRevoked }
   },
 })
 
@@ -173,32 +217,6 @@ export const consumeRefreshToken = internalMutation({
     }
     await ctx.db.patch(row._id, { revoked: true })
     return { ...row, revoked: true }
-  },
-})
-
-export const getOrCreateExternalSession = internalMutation({
-  args: { userId: v.id('users'), clientId: v.string(), clientName: v.string() },
-  handler: async (ctx, { userId, clientId, clientName }): Promise<Id<'sessions'>> => {
-    // One synthetic session per (userId, clientId) — reused across token
-    // rotations so the external AI's history in `messages` is stable.
-    const sessionName = sessionNameFor(clientId, clientName)
-    const existing = await ctx.db
-      .query('sessions')
-      .withIndex('by_user_and_sessionName', (q) => q.eq('userId', userId).eq('sessionName', sessionName))
-      .unique()
-    if (existing) {
-      await ctx.db.patch(existing._id, { lastSeenAt: nowMs() })
-      return existing._id
-    }
-    const now = nowMs()
-    return await ctx.db.insert('sessions', {
-      userId,
-      sessionName,
-      objective: `External MCP client: ${clientName}`,
-      machine: 'external-mcp',
-      createdAt: now,
-      lastSeenAt: now,
-    })
   },
 })
 

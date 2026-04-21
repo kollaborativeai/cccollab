@@ -165,16 +165,27 @@ http.route({
             { status: 401, headers: { 'Content-Type': 'text/html' } },
           )
         }
-        // The redirect_uri + response_type have already been validated above,
-        // so from here we MUST report errors via redirect per RFC 6749 §4.1.2.1.
+        // RFC 6749 §4.1.2.1, last paragraph: if the server cannot verify
+        // the redirect_uri — either because the client_id is unknown or
+        // because the submitted redirect_uri isn't one of the registered
+        // ones for the client — it MUST NOT redirect. Redirecting would
+        // turn the authorization endpoint into an open-redirect gadget
+        // that lets an unregistered attacker aim the user's browser at
+        // any origin of their choice. Return a direct error response
+        // instead.
+        if (errCode === 'UNKNOWN_CLIENT' || errCode === 'INVALID_REDIRECT_URI') {
+          return errorResponse(400, 'invalid_request', errMsg)
+        }
+        // For every other error, the redirect_uri has been validated
+        // (issueAuthCode checks it before everything downstream), so
+        // RFC 6749 §4.1.2.1 REQUIRES reporting the error via a redirect
+        // to redirect_uri with `error=...&state=...`.
         const oauthError =
-          errCode === 'UNKNOWN_CLIENT' || errCode === 'INVALID_REDIRECT_URI'
-            ? 'unauthorized_client'
-            : errCode === 'INVALID_SCOPE'
-              ? 'invalid_scope'
-              : errCode === 'INVALID_REQUEST'
-                ? 'invalid_request'
-                : 'server_error'
+          errCode === 'INVALID_SCOPE'
+            ? 'invalid_scope'
+            : errCode === 'INVALID_REQUEST'
+              ? 'invalid_request'
+              : 'server_error'
         return redirectError(oauthError, errMsg)
       }
       return redirectError('server_error', err instanceof Error ? err.message : 'error')

@@ -66,55 +66,53 @@ export const exchangeAuthCode = action({
   handler: async (ctx, args): Promise<TokenResponse> => {
     await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
 
-    // All validation + consume happens atomically in one mutation. A
-    // typo in redirect_uri or code_verifier does NOT burn the code —
-    // the client can retry. Only successful validation marks it used.
-    const codeRow = await ctx.runMutation(internal.oauth.tokens.validateAndConsumeAuthCode, {
+    // PKCE hash is computed in the action: `crypto.subtle.digest` is not
+    // available in the Convex mutation isolate, only in the action
+    // runtime. We pre-hash the verifier here and hand the mutation a
+    // string to constant-time compare against the stored challenge.
+    const expectedChallenge = await sha256Base64Url(args.codeVerifier)
+
+    // ONE atomic mutation does: validate + consume + revoke prior tokens
+    // for (userId, clientId) + get-or-create synthetic session. Running
+    // all four in a single Convex transaction closes the concurrent-
+    // authorize race that would otherwise let two parallel flows leave
+    // overlapping valid token pairs behind.
+    //
+    // On any validation failure (INVALID_AUTH_CODE, CLIENT_ID_MISMATCH,
+    // REDIRECT_URI_MISMATCH, PKCE_MISMATCH), the mutation throws before
+    // patching `used: true`, so the caller can retry with the correct
+    // parameters. The HTTP layer normalises all of these to OAuth
+    // `invalid_grant` on the wire per RFC 6749 §5.2.
+    const prep = await ctx.runMutation(internal.oauth.tokens.consumeCodeAndPrepareSession, {
       code: args.code,
       clientId: args.clientId,
-      redirectUri: args.redirectUri,
-      codeVerifier: args.codeVerifier,
-    })
-
-    // Re-authorize semantics: if this same user has previously issued
-    // tokens to this same client, revoke the old ones before minting new
-    // ones. A successful full-flow authorize is the moment of highest
-    // certainty that the user wants to start fresh; letting old tokens
-    // stay valid alongside would leave a leaked-but-forgotten previous
-    // token usable for up to the 1h access-token TTL.
-    await ctx.runMutation(internal.oauth.tokens.revokeExistingTokens, {
-      userId: codeRow.userId,
-      clientId: codeRow.clientId,
-    })
-
-    const sessionId = await ctx.runMutation(internal.oauth.tokens.getOrCreateExternalSession, {
-      userId: codeRow.userId,
-      clientId: codeRow.clientId,
       clientName: args.clientName ?? 'External MCP client',
+      redirectUri: args.redirectUri,
+      expectedChallenge,
     })
 
     const accessToken = randomToken(32)
     const refreshToken = randomToken(32)
     await ctx.runMutation(internal.oauth.tokens.issueAccessToken, {
       token: accessToken,
-      clientId: codeRow.clientId,
-      userId: codeRow.userId,
-      sessionId,
-      scope: codeRow.scope,
+      clientId: prep.code.clientId,
+      userId: prep.code.userId,
+      sessionId: prep.sessionId,
+      scope: prep.code.scope,
     })
     await ctx.runMutation(internal.oauth.tokens.issueRefreshToken, {
       token: refreshToken,
-      clientId: codeRow.clientId,
-      userId: codeRow.userId,
-      sessionId,
-      scope: codeRow.scope,
+      clientId: prep.code.clientId,
+      userId: prep.code.userId,
+      sessionId: prep.sessionId,
+      scope: prep.code.scope,
     })
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
       token_type: 'Bearer',
       expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-      scope: codeRow.scope,
+      scope: prep.code.scope,
     }
   },
 })
