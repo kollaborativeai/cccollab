@@ -18,6 +18,8 @@ import { saveLocationAuth } from '../config/save.js'
 // Convex idiom for library / tooling code that calls into a
 // user-supplied deployment.
 const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as FunctionReference<'action'>
+const WHOAMI_QUERY = (anyApi as unknown as { sessions: { queries: { whoami: unknown } } }).sessions.queries
+  .whoami as FunctionReference<'query'>
 
 /**
  * The loopback callback path must match the `isAllowedRedirect` rule on
@@ -66,7 +68,7 @@ interface AuthenticateOptions {
   /** Override the fetch used to call the Convex action; tests pass a
    *  mock client. Production path uses a freshly constructed
    *  `ConvexHttpClient` against `url`. */
-  httpClient?: Pick<ConvexHttpClient, 'action'>
+  httpClient?: Pick<ConvexHttpClient, 'action' | 'query' | 'setAuth'>
   /** Hard cap on how long we wait for the browser redirect. */
   timeoutMs?: number
 }
@@ -142,10 +144,33 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
     updatedAt: Date.now(),
   })
 
-  log(`Signed in. Remote transport for "${options.locationName}" is now available.`)
+  // Best-effort: ask the backend who we just signed in as. A failure
+  // here is non-fatal — the tokens are already persisted, so the caller
+  // can continue without the profile fields. They're used only to
+  // populate the "Signed in as <email>" UI copy.
+  let userId: string | undefined
+  let userEmail: string | undefined
+  try {
+    client.setAuth(second.tokens.token)
+    const profile = (await client.query(WHOAMI_QUERY, {})) as
+      | { userId?: string; email?: string }
+      | null
+    if (profile) {
+      userId = profile.userId
+      userEmail = profile.email
+    }
+  } catch {
+    /* non-fatal; keep fields undefined */
+  }
+
+  log(
+    `Signed in${userEmail ? ` as ${userEmail}` : ''}. Remote transport for "${options.locationName}" is now available.`,
+  )
   return {
     locationName: options.locationName,
     url: options.url,
+    userId,
+    userEmail,
   }
 }
 
