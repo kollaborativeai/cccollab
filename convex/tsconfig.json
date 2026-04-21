@@ -14,7 +14,7 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
-    "types": ["vitest/globals"]
+    "types": ["node", "vite/client", "vitest/globals"]
   },
   "include": ["."],
   "exclude": ["_generated"]

@@ -24,7 +24,7 @@ mkdirSync(generatedDir, { recursive: true })
 // excluding the _generated/ directory, tests/, README.md, schema.ts, auth.config.ts,
 // tsconfig.json, http.ts, and non-.ts files.
 const SKIP_FILES = new Set(['schema.ts', 'auth.config.ts', 'http.ts', 'README.md', 'tsconfig.json', '.gitignore'])
-const SKIP_DIRS = new Set(['_generated', 'tests', 'lib', 'mcp'])
+const SKIP_DIRS = new Set(['_generated', 'tests', 'lib'])
 
 /** @returns {string[]} relative paths to convexDir, without extension */
 function collectModules() {

@@ -4,7 +4,8 @@
 function toBase64Url(bytes: Uint8Array): string {
   let s = ''
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!)
-  const b64 = typeof btoa === 'function' ? btoa(s) : Buffer.from(bytes).toString('base64')
+  // `btoa` is available in the Convex runtime, Node >= 16, and Edge runtimes.
+  const b64 = btoa(s)
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
