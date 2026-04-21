@@ -3,6 +3,20 @@ import { mutation } from '../_generated/server.js'
 import { internal } from '../_generated/api.js'
 import { randomToken } from '../lib/crypto.js'
 
+export const ALLOWED_SCOPES = ['cccollab:topics.rw'] as const
+
+export function isAllowedScope(scope: string): boolean {
+  const requested = scope
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (requested.length === 0) return false
+  for (const s of requested) {
+    if (!(ALLOWED_SCOPES as readonly string[]).includes(s)) return false
+  }
+  return true
+}
+
 export const issueAuthCode = mutation({
   args: {
     clientId: v.string(),
@@ -22,6 +36,9 @@ export const issueAuthCode = mutation({
       throw new Error('redirect_uri not registered for client')
     }
     if (!args.codeChallenge) throw new Error('code_challenge required')
+    if (!isAllowedScope(args.scope)) {
+      throw new Error(`invalid scope; allowed: ${ALLOWED_SCOPES.join(' ')}`)
+    }
     const code = randomToken(32)
     await ctx.runMutation(internal.oauth.tokens.storeAuthCode, {
       code,

@@ -1,8 +1,14 @@
 import { v } from 'convex/values'
-import { mutation, query } from './_generated/server.js'
+import { internalMutation, mutation, query } from './_generated/server.js'
 import type { Doc, Id } from './_generated/dataModel.js'
 
-export const send = mutation({
+/**
+ * Raw message insert, bypassing membership checks. Only callable from other
+ * trusted server functions and tests (via `convexTest`'s internal path). The
+ * HTTP MCP surface uses `sendAsUser` below, which enforces membership and
+ * derives attribution from the authenticated user record.
+ */
+export const send = internalMutation({
   args: {
     topicId: v.id('topics'),
     authorType: v.union(v.literal('session'), v.literal('external')),
@@ -16,10 +22,10 @@ export const send = mutation({
 })
 
 /**
- * Membership-enforced send used by the HTTP MCP tools.
- * The caller supplies the *user id* (already resolved from the bearer token);
- * the function verifies membership and writes the message with attribution
- * fields lifted from the user record.
+ * Membership-enforced send used by the HTTP MCP tools. The caller supplies the
+ * *user id* (already resolved from the bearer token); the function verifies
+ * membership and writes the message with attribution fields lifted from the
+ * user record.
  */
 export const sendAsUser = mutation({
   args: {
@@ -55,10 +61,40 @@ export const listForTopic = query({
   },
 })
 
+/**
+ * Hydrated message row used by the Convex-to-broker bridge. Includes the
+ * topic's human-readable name and parent channel name so the bridge can
+ * build a broker `/local-event` payload the plugin's SSE listener can route.
+ */
+export type HydratedMessage = Doc<'messages'> & {
+  topicName: string
+  channelName: string
+}
+
 export const listRecent = query({
   args: {},
-  handler: async (ctx): Promise<Doc<'messages'>[]> => {
+  handler: async (ctx): Promise<HydratedMessage[]> => {
     const rows = await ctx.db.query('messages').order('desc').take(50)
-    return rows.reverse()
+    const topicCache = new Map<Id<'topics'>, { name: string; channelName: string }>()
+    const channelCache = new Map<Id<'channels'>, string>()
+    const out: HydratedMessage[] = []
+    for (const row of rows) {
+      let info = topicCache.get(row.topicId)
+      if (!info) {
+        const topic = await ctx.db.get(row.topicId)
+        if (!topic) continue
+        let channelName = channelCache.get(topic.channelId)
+        if (!channelName) {
+          const channel = await ctx.db.get(topic.channelId)
+          if (!channel) continue
+          channelName = channel.name
+          channelCache.set(topic.channelId, channelName)
+        }
+        info = { name: topic.name, channelName }
+        topicCache.set(row.topicId, info)
+      }
+      out.push({ ...row, topicName: info.name, channelName: info.channelName })
+    }
+    return out.reverse()
   },
 })

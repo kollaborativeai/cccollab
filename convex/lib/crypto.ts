@@ -27,10 +27,15 @@ export async function verifyPkceS256(args: { verifier: string; challenge: string
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let diff = 0
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  // Always iterate the longer of the two strings so the comparison takes the
+  // same amount of time whether the lengths match or not. Length mismatch is
+  // still a "not equal" signal via the initial XOR on lengths.
+  const len = Math.max(a.length, b.length)
+  let diff = a.length ^ b.length
+  for (let i = 0; i < len; i++) {
+    const ac = i < a.length ? a.charCodeAt(i) : 0
+    const bc = i < b.length ? b.charCodeAt(i) : 0
+    diff |= ac ^ bc
   }
   return diff === 0
 }

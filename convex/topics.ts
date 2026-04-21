@@ -72,11 +72,19 @@ export const readForUser = query({
       .unique()
     if (!membership) return null
     const topic = await ctx.db.get(topicId)
-    if (!topic) return null
+    // Hide archived topics from readers even if their membership row remains.
+    // `listForUser` already filters by state; `readForUser` must match.
+    if (!topic || topic.state !== 'active') return null
     const messages = await ctx.db
       .query('messages')
       .withIndex('by_topic', (q) => q.eq('topicId', topicId))
-      .collect()
-    return { topic, messages }
+      .order('desc')
+      .take(READ_TOPIC_MESSAGE_CAP)
+    // `.order('desc').take(N)` gives us the newest N; return them oldest-first
+    // so the MCP client sees chronological history.
+    return { topic, messages: messages.reverse() }
   },
 })
+
+/** Max messages returned by `read_topic` to keep MCP responses bounded. */
+export const READ_TOPIC_MESSAGE_CAP = 200

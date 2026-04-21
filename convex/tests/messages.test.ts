@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { convexTest } from 'convex-test'
 import schema from '../schema.js'
-import { api } from '../_generated/api.js'
+import { api, internal } from '../_generated/api.js'
 
 const modules = import.meta.glob('../**/*.*s')
 
@@ -11,7 +11,7 @@ describe('messages', () => {
     const u = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'User' })
     const channelId = await t.mutation(api.channels.getOrCreate, { name: 'c', creatorUserId: u })
     const topicId = await t.mutation(api.topics.create, { name: 't', channelId, creatorUserId: u })
-    const messageId = await t.mutation(api.messages.send, {
+    const messageId = await t.mutation(internal.messages.send, {
       topicId,
       authorType: 'external',
       authorKey: 'u',
@@ -47,13 +47,13 @@ describe('messages', () => {
     )
   })
 
-  it('listRecent returns most recent 50 messages in chronological order', async () => {
+  it('listRecent returns hydrated messages with topicName + channelName (chronological)', async () => {
     const t = convexTest(schema, modules)
     const u = await t.mutation(api.users.getOrCreateByClerk, { clerkId: 'u', displayName: 'User' })
-    const channelId = await t.mutation(api.channels.getOrCreate, { name: 'c', creatorUserId: u })
-    const topicId = await t.mutation(api.topics.create, { name: 't', channelId, creatorUserId: u })
+    const channelId = await t.mutation(api.channels.getOrCreate, { name: 'eng', creatorUserId: u })
+    const topicId = await t.mutation(api.topics.create, { name: 'design', channelId, creatorUserId: u })
     for (let i = 0; i < 5; i++) {
-      await t.mutation(api.messages.send, {
+      await t.mutation(internal.messages.send, {
         topicId,
         authorType: 'external',
         authorKey: 'u',
@@ -63,5 +63,6 @@ describe('messages', () => {
     }
     const recent = await t.query(api.messages.listRecent, {})
     expect(recent.map((m) => m.text)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4'])
+    expect(recent.every((m) => m.topicName === 'design' && m.channelName === 'eng')).toBe(true)
   })
 })

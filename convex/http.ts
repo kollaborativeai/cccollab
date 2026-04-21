@@ -84,13 +84,15 @@ http.route({
     }
 
     // Resolve the human user. In production Convex's `ctx.auth.getUserIdentity()`
-    // reads the Clerk JWT from the request. For tests we allow X-Test-* headers
-    // (never trust these in prod; Convex in prod requires a real Clerk token).
+    // reads the Clerk JWT from the request. The `X-Test-*` header fallback is
+    // gated on CCCOLLAB_ALLOW_TEST_AUTH=1 so it is never reachable in production
+    // even if an attacker adds the headers — the env var must be set in Convex
+    // by an operator, which they should only do in CI / local dev.
     const identity = await ctx.auth.getUserIdentity()
     let clerkId: string | null = identity?.subject ?? null
     let displayName: string | null = identity?.name ?? identity?.email ?? null
     const email: string | undefined = identity?.email ?? undefined
-    if (!clerkId) {
+    if (!clerkId && process.env.CCCOLLAB_ALLOW_TEST_AUTH === '1') {
       const testUserId = req.headers.get('x-test-user-id')
       const testUserName = req.headers.get('x-test-user-name')
       if (testUserId) {
@@ -132,9 +134,19 @@ http.route({
   path: '/token',
   method: 'POST',
   handler: httpAction(async (ctx, req) => {
+    // RFC 6749 §3.2 requires application/x-www-form-urlencoded at the token endpoint.
+    const contentType = req.headers.get('content-type') ?? ''
+    if (!contentType.toLowerCase().includes('application/x-www-form-urlencoded')) {
+      return errorResponse(
+        400,
+        'invalid_request',
+        'token endpoint requires Content-Type: application/x-www-form-urlencoded',
+      )
+    }
     const form = await readFormBody(req)
     const grantType = form.get('grant_type')
     const clientId = form.get('client_id') ?? ''
+    const clientSecret = form.get('client_secret') ?? undefined
 
     if (grantType === 'authorization_code') {
       const code = form.get('code') ?? ''
@@ -143,6 +155,7 @@ http.route({
       try {
         const tokens = await ctx.runAction(api.oauth.token.exchangeAuthCode, {
           clientId,
+          clientSecret,
           code,
           codeVerifier,
           redirectUri,
@@ -157,6 +170,7 @@ http.route({
       try {
         const tokens = await ctx.runAction(api.oauth.token.refreshAccessToken, {
           clientId,
+          clientSecret,
           refreshToken,
         })
         return jsonResponse(tokens)
@@ -195,6 +209,19 @@ http.route({
         },
       })
     }
+    const scopes = tokenRow.scope.split(/\s+/).filter(Boolean)
+    if (!scopes.includes('cccollab:topics.rw')) {
+      return new Response(
+        JSON.stringify({ error: 'insufficient_scope', error_description: 'cccollab:topics.rw required' }),
+        {
+          status: 403,
+          headers: {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer error="insufficient_scope", scope="cccollab:topics.rw"',
+          },
+        },
+      )
+    }
 
     let body: JsonRpcRequest
     try {
@@ -206,6 +233,10 @@ http.route({
       )
     }
     const response = await dispatchMcp(ctx, tokenRow.userId, body)
+    // Notifications produce no response per the MCP spec — return 202 Accepted.
+    if (response === null) {
+      return new Response(null, { status: 202 })
+    }
     return jsonResponse(response)
   }),
 })

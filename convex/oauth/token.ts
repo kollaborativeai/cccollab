@@ -1,8 +1,10 @@
 import { v } from 'convex/values'
+import type { GenericActionCtx } from 'convex/server'
 import { action } from '../_generated/server.js'
 import { internal } from '../_generated/api.js'
-import { randomToken, verifyPkceS256 } from '../lib/crypto.js'
+import { randomToken, sha256Base64Url, verifyPkceS256 } from '../lib/crypto.js'
 import { ACCESS_TOKEN_TTL_MS } from '../lib/time.js'
+import type { DataModel } from '../_generated/dataModel.js'
 
 export type TokenResponse = {
   access_token: string
@@ -12,14 +14,41 @@ export type TokenResponse = {
   scope: string
 }
 
+/**
+ * Confidential clients (those registered with `token_endpoint_auth_method:
+ * 'client_secret_post'`) must present their `client_secret` at the token
+ * endpoint. Public clients (`'none'`) authenticate solely with PKCE.
+ *
+ * This helper looks up the client and, if confidential, verifies the presented
+ * secret against the stored SHA-256 hash. Throws on failure.
+ */
+async function assertClientAuth(
+  ctx: GenericActionCtx<DataModel>,
+  clientId: string,
+  clientSecret: string | null,
+): Promise<void> {
+  const client = await ctx.runQuery(internal.oauth.clients.getByClientId, { clientId })
+  if (!client) throw new Error('unknown client')
+  if (client.tokenEndpointAuthMethod === 'client_secret_post') {
+    if (!clientSecret) throw new Error('client_secret required for confidential client')
+    if (!client.clientSecretHash) throw new Error('client has no stored secret hash')
+    const providedHash = await sha256Base64Url(clientSecret)
+    if (providedHash !== client.clientSecretHash) {
+      throw new Error('client_secret mismatch')
+    }
+  }
+}
+
 export const exchangeAuthCode = action({
   args: {
     clientId: v.string(),
+    clientSecret: v.optional(v.string()),
     code: v.string(),
     codeVerifier: v.string(),
     redirectUri: v.string(),
   },
   handler: async (ctx, args): Promise<TokenResponse> => {
+    await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
     const codeRow = await ctx.runMutation(internal.oauth.tokens.consumeAuthCode, { code: args.code })
     if (!codeRow) throw new Error('invalid or expired code')
     if (codeRow.clientId !== args.clientId) throw new Error('client_id mismatch')
@@ -55,8 +84,13 @@ export const exchangeAuthCode = action({
 })
 
 export const refreshAccessToken = action({
-  args: { clientId: v.string(), refreshToken: v.string() },
+  args: {
+    clientId: v.string(),
+    clientSecret: v.optional(v.string()),
+    refreshToken: v.string(),
+  },
   handler: async (ctx, args): Promise<TokenResponse> => {
+    await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
     const row = await ctx.runMutation(internal.oauth.tokens.consumeRefreshToken, {
       token: args.refreshToken,
     })

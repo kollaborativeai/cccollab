@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { makeHarness } from './harness.js'
 import { api } from '../../convex/_generated/api.js'
-import { dispatchMcp } from '../../convex/mcp/server.js'
+import { dispatchMcpExpectResponse as dispatchMcp } from '../../convex/mcp/server.js'
 
 describe('Scenario: per-user scoping (CCC-22 AC: tools scoped to authenticated user memberships)', () => {
   it('non-members cannot list, read, or send to a topic', async () => {

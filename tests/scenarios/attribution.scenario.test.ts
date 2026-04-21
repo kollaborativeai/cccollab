@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { makeHarness } from './harness.js'
-import { api } from '../../convex/_generated/api.js'
-import { dispatchMcp } from '../../convex/mcp/server.js'
+import { api, internal } from '../../convex/_generated/api.js'
+import { dispatchMcpExpectResponse as dispatchMcp } from '../../convex/mcp/server.js'
 
 describe('Scenario: attribution (CCC-22 AC: messages posted via MCP attributed to the external user)', () => {
   it('external message is attributed to the external user, not to the developer or a generic sender', async () => {
@@ -22,7 +22,7 @@ describe('Scenario: attribution (CCC-22 AC: messages posted via MCP attributed t
     await t.mutation(api.topics.join, { topicId, userId: externalAlice })
 
     // Developer posts a session-attributed message (simulating a Claude Code session)
-    await t.mutation(api.messages.send, {
+    await t.mutation(internal.messages.send, {
       topicId,
       authorType: 'session',
       authorKey: 'dev-session',

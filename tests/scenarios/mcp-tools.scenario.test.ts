@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { makeHarness } from './harness.js'
 import { api } from '../../convex/_generated/api.js'
-import { dispatchMcp } from '../../convex/mcp/server.js'
+import { dispatchMcpExpectResponse as dispatchMcp } from '../../convex/mcp/server.js'
 
 describe('Scenario: MCP tools (CCC-22 AC: list_topics, read_topic, send_message_to_topic)', () => {
   it('external AI can list + read + send end-to-end', async () => {

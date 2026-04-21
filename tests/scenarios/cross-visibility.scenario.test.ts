@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { makeHarness } from './harness.js'
-import { api } from '../../convex/_generated/api.js'
-import { dispatchMcp } from '../../convex/mcp/server.js'
+import { api, internal } from '../../convex/_generated/api.js'
+import { dispatchMcpExpectResponse as dispatchMcp } from '../../convex/mcp/server.js'
 import { buildLocalEventPayload, type ConvexMessageRow } from '../../src/bridge/convex-bridge.js'
 
 describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code message visibility)', () => {
@@ -30,19 +30,20 @@ describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code messag
       }),
     )
 
-    const messages = await t.query(api.messages.listForTopic, { topicId })
-    expect(messages.length).toBe(1)
-
+    const hydrated = await t.query(api.messages.listRecent, {})
+    expect(hydrated.length).toBe(1)
     const row: ConvexMessageRow = {
-      _id: messages[0]!._id,
-      _creationTime: messages[0]!._creationTime,
-      topicId: messages[0]!.topicId,
-      authorType: messages[0]!.authorType,
-      authorKey: messages[0]!.authorKey,
-      authorName: messages[0]!.authorName,
-      text: messages[0]!.text,
+      _id: hydrated[0]!._id,
+      _creationTime: hydrated[0]!._creationTime,
+      topicId: hydrated[0]!.topicId,
+      authorType: hydrated[0]!.authorType,
+      authorKey: hydrated[0]!.authorKey,
+      authorName: hydrated[0]!.authorName,
+      text: hydrated[0]!.text,
+      topicName: hydrated[0]!.topicName,
+      channelName: hydrated[0]!.channelName,
     }
-    const payload = buildLocalEventPayload(row, { topicName: 'design', channel: 'eng' })
+    const payload = buildLocalEventPayload(row)
     expect(payload).toMatchObject({
       type: 'message',
       channel: 'eng',
@@ -51,7 +52,6 @@ describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code messag
       authorType: 'external',
       text: 'from external',
     })
-    // Timestamp is present and is an ISO-8601 date string
     expect(payload.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/)
   })
 
@@ -70,7 +70,7 @@ describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code messag
 
     // Simulate a message written by a Claude Code session via the session
     // author branch (what CCC-3 will use once the plugin migrates).
-    await t.mutation(api.messages.send, {
+    await t.mutation(internal.messages.send, {
       topicId,
       authorType: 'session',
       authorKey: 'dev-1',
@@ -100,7 +100,7 @@ describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code messag
     const channelId = await t.mutation(api.channels.getOrCreate, { name: 'eng', creatorUserId: alice })
     const topicId = await t.mutation(api.topics.create, { name: 'design', channelId, creatorUserId: alice })
 
-    await t.mutation(api.messages.send, {
+    await t.mutation(internal.messages.send, {
       topicId,
       authorType: 'session',
       authorKey: 'dev',
@@ -116,24 +116,25 @@ describe('Scenario: cross-visibility (CCC-22 AC: external <-> Claude Code messag
       }),
     )
 
-    const messages = await t.query(api.messages.listForTopic, { topicId })
-    const payloads = messages.map((m) =>
-      buildLocalEventPayload(
-        {
-          _id: m._id,
-          _creationTime: m._creationTime,
-          topicId: m.topicId,
-          authorType: m.authorType,
-          authorKey: m.authorKey,
-          authorName: m.authorName,
-          text: m.text,
-        },
-        { topicName: 'design', channel: 'eng' },
-      ),
+    const hydrated = await t.query(api.messages.listRecent, {})
+    const payloads = hydrated.map((m) =>
+      buildLocalEventPayload({
+        _id: m._id,
+        _creationTime: m._creationTime,
+        topicId: m.topicId,
+        authorType: m.authorType,
+        authorKey: m.authorKey,
+        authorName: m.authorName,
+        text: m.text,
+        topicName: m.topicName,
+        channelName: m.channelName,
+      }),
     )
     expect(payloads.map((p) => ({ sender: p.sender, authorType: p.authorType, text: p.text }))).toEqual([
       { sender: 'reviewer', authorType: 'session', text: 'dev message' },
       { sender: 'Alice', authorType: 'external', text: 'alice message' },
     ])
+    // All payloads carry the real channel + topic name (not the "external" placeholder).
+    expect(payloads.every((p) => p.channel === 'eng' && p.topicName === 'design')).toBe(true)
   })
 })
