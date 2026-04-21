@@ -1,4 +1,10 @@
 {
-  "profile": "test",
-  "default_channels": ["cccollab-test"]
+  "locations": {
+    "local": {
+      "active": true,
+      "channels": {
+        "cccollab-test": { "active": true }
+      }
+    }
+  }
 }

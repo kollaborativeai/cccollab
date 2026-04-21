@@ -19,6 +19,11 @@ clear
 # install without touching it.
 export PATH="$(cd ../mcp_server/bin && pwd):$PATH"
 
+# Pin this test session's broker isolation key so it doesn't collide with
+# production sessions. See mcp_server/src/constants.ts - PROFILE defaults to
+# "default" when CCCOLLAB_PROFILE is unset.
+export CCCOLLAB_PROFILE="test"
+
 # If the first positional arg is a bare word (not a flag), treat it as the
 # session name and expose it via CCCOLLAB_NAME so cccollab pre-seeds identity.
 NAME=""
