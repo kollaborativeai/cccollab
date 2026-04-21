@@ -119,10 +119,37 @@ export const exchangeCodeForTokens = internalMutation({
     // 2. Consume the code.
     await ctx.db.patch(row._id, { used: true })
 
-    // 3. Revoke existing tokens for (userId, clientId) atomically. Reading
-    //    this index + inserting new tokens later in the same mutation is
-    //    what forces Convex OCC to conflict-and-retry the later flow when
-    //    two concurrent exchanges race.
+    // 3. Read-and-patch the (userId, clientId) grant sentinel row. This
+    //    is the ONLY thing that forces real OCC on concurrent exchanges:
+    //    Convex OCC is document-keyed, not range-keyed, so reading an
+    //    empty tokens-by-(userId, clientId) index adds nothing to the
+    //    read set and two parallel flows won't conflict on that alone.
+    //    Reading and writing a shared document per (userId, clientId)
+    //    makes both concurrent mutations register the same document ID
+    //    in their read+write sets; the later mutation's commit detects
+    //    the conflict, retries, and observes the earlier flow's tokens.
+    const grantNow = nowMs()
+    const existingGrant = await ctx.db
+      .query('oauthGrants')
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
+      .unique()
+    if (existingGrant) {
+      await ctx.db.patch(existingGrant._id, {
+        version: existingGrant.version + 1,
+        lastRotatedAt: grantNow,
+      })
+    } else {
+      await ctx.db.insert('oauthGrants', {
+        userId: row.userId,
+        clientId: args.clientId,
+        version: 1,
+        lastRotatedAt: grantNow,
+      })
+    }
+
+    // 4. Revoke existing tokens for (userId, clientId). After the OCC
+    //    retry forced by step 3, the later flow will observe the earlier
+    //    flow's rows and patch them revoked here.
     let accessRevoked = 0
     const accessRows = await ctx.db
       .query('oauthAccessTokens')
@@ -144,7 +171,7 @@ export const exchangeCodeForTokens = internalMutation({
       refreshRevoked++
     }
 
-    // 4. Get-or-create the synthetic external session for (userId, clientId).
+    // 5. Get-or-create the synthetic external session for (userId, clientId).
     //    Stable naming means re-authorize reuses the session; history
     //    persists across rotations. This is intentional for the CCC-22
     //    MVP — a future /revoke endpoint would need to decide whether to
@@ -170,12 +197,8 @@ export const exchangeCodeForTokens = internalMutation({
       })
     }
 
-    // 5. Issue the new access + refresh token rows. Both inserts happen in
+    // 6. Issue the new access + refresh token rows. Both inserts happen in
     //    THIS transaction so a crash / error between them is impossible.
-    //    A concurrent flow that tries to do the same thing will see the
-    //    rows we just inserted during its own revoke step and revoke them
-    //    before inserting its own — or conflict on the shared index read
-    //    and get retried by Convex, observing our writes on the retry.
     await ctx.db.insert('oauthAccessTokens', {
       token: args.accessToken,
       clientId: args.clientId,
@@ -199,9 +222,16 @@ export const exchangeCodeForTokens = internalMutation({
   },
 })
 
-/** Refresh-token rotation issued atomically in a single mutation. Same
- *  shape as `exchangeCodeForTokens`: the two inserts and the consumption
- *  of the old refresh token all live in one transaction. */
+/**
+ * Refresh-token rotation issued atomically in a single mutation. Same
+ * shape as `exchangeCodeForTokens`: the two inserts and the consumption
+ * of the old refresh token all live in one transaction.
+ *
+ * Concurrency: two parallel rotate calls with the same old token both
+ * read+patch the same `oauthRefreshTokens` document by ID, so Convex
+ * OCC fires naturally on the shared document. The grant-row bump below
+ * is defence-in-depth + a useful "last rotation" telemetry signal.
+ */
 export const rotateRefreshToken = internalMutation({
   args: {
     oldRefreshToken: v.string(),
@@ -221,6 +251,23 @@ export const rotateRefreshToken = internalMutation({
       throw new ConvexError({ code: 'CLIENT_ID_MISMATCH', message: 'client_id does not match refresh token' })
     }
     await ctx.db.patch(row._id, { revoked: true })
+
+    // Bump the grant sentinel.
+    const grantNow = nowMs()
+    const grant = await ctx.db
+      .query('oauthGrants')
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
+      .unique()
+    if (grant) {
+      await ctx.db.patch(grant._id, { version: grant.version + 1, lastRotatedAt: grantNow })
+    } else {
+      await ctx.db.insert('oauthGrants', {
+        userId: row.userId,
+        clientId: args.clientId,
+        version: 1,
+        lastRotatedAt: grantNow,
+      })
+    }
 
     await ctx.db.insert('oauthAccessTokens', {
       token: args.accessToken,

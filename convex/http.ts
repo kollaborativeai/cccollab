@@ -158,10 +158,14 @@ http.route({
           } catch {
             /* fall through */
           }
-          // Preserve the original /authorize URL (which carries the
-          // client's `state` param for CSRF correlation) as a "Try
-          // again" link so the user can resume after signing in through
-          // some other path. Escape the URL for safe embedding in HTML.
+          // The sign-in redirect path above failed — most commonly
+          // because Google OAuth isn't configured on this deployment
+          // (local dev without AUTH_GOOGLE_ID). Render a static
+          // instructional page. Don't offer a "retry" link pointing at
+          // the same /authorize URL: clicking it would re-enter this
+          // same branch and produce the same 401 in a loop. We DO
+          // preserve the original URL in the page text (HTML-escaped)
+          // so the user can copy it after manual authentication.
           const escapedUrl = req.url
             .replace(/&/g, '&amp;')
             .replace(/"/g, '&quot;')
@@ -170,8 +174,9 @@ http.route({
             .replace(/>/g, '&gt;')
           return new Response(
             `<html><body><h2>Sign in required</h2>` +
-              `<p>Authenticate with your cccollab account, then retry your authorization request.</p>` +
-              `<p><a href="${escapedUrl}">Retry this authorization</a></p>` +
+              `<p>This cccollab deployment could not start a sign-in flow (Google OAuth may not be configured). ` +
+              `Sign in to cccollab through your normal path, then re-issue this authorization request:</p>` +
+              `<pre style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapedUrl}</pre>` +
               `</body></html>`,
             { status: 401, headers: { 'Content-Type': 'text/html' } },
           )

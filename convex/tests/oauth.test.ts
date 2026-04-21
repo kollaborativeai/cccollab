@@ -457,15 +457,24 @@ describe('oauth token exchange — validation order + re-auth hygiene', () => {
     expect(refresh?.revoked).toBe(true)
   })
 
-  it('parallel exchanges for different codes / same (userId, clientId) do not both produce valid tokens', async () => {
-    // Regression guard for the concurrent-authorize race: before the
-    // atomic-mutation fix, two parallel exchangeAuthCode calls (each
-    // consuming its own code for the same user + client) could each see
-    // an empty oauthAccessTokens index at revoke-time and both emit
-    // valid tokens. The fix keeps consume + revoke + insert inside one
-    // Convex transaction so OCC forces the second flow to conflict and
-    // retry — on retry, it sees the first flow's newly-inserted tokens
-    // and revokes them as part of its own revoke step.
+  it('two sequential exchanges for different codes / same (userId, clientId) leave only one valid access token', async () => {
+    // Sequential-correctness test (not a true concurrency test).
+    //
+    // convex-test serialises mutations — Promise.all-wrapped t.action
+    // calls don't actually interleave at the database layer; the second
+    // mutation runs after the first has fully committed. So this test
+    // proves the "later exchange revokes earlier tokens" invariant, not
+    // the concurrent-OCC behaviour.
+    //
+    // The true concurrent-race defence lives in production: the
+    // `oauthGrants` sentinel row read+patched inside
+    // `exchangeCodeForTokens` makes two real-parallel mutations conflict
+    // on a shared document, so Convex OCC retries the later one — at
+    // which point this sequential test's revoke logic kicks in.
+    //
+    // Verifying the true-OCC behaviour requires a real Convex
+    // integration environment (not convex-test), which is out of scope
+    // for this test file.
     const t = convexTest(schema, modules)
     const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
     const client = await t.mutation(api.oauth.register.register, {

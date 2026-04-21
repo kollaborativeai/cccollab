@@ -26,6 +26,7 @@ import { messagesTable } from './messages/schema'
 import { oauthAccessTokensTable } from './oauthAccessTokens/schema'
 import { oauthAuthCodesTable } from './oauthAuthCodes/schema'
 import { oauthClientsTable } from './oauthClients/schema'
+import { oauthGrantsTable } from './oauthGrants/schema'
 import { oauthRefreshTokensTable } from './oauthRefreshTokens/schema'
 import { sessionChannelsTable } from './sessionChannels/schema'
 import { sessionsTable } from './sessions/schema'
@@ -51,4 +52,5 @@ export default defineSchema({
   oauthAuthCodes: oauthAuthCodesTable,
   oauthAccessTokens: oauthAccessTokensTable,
   oauthRefreshTokens: oauthRefreshTokensTable,
+  oauthGrants: oauthGrantsTable,
 })
