@@ -127,10 +127,19 @@ export const exchangeCodeForTokens = internalMutation({
     //
     //    (a) OCC: the sentinel read is what puts the grant document (or
     //        the empty index range, for the first-time exchange) into
-    //        this mutation's read set. Convex then detects the conflict
-    //        when any concurrent flow writes to the same grant row or
-    //        the same index range, forces a retry, and the retry
-    //        observes the earlier flow's tokens in step 4 below.
+    //        this mutation's read set. Convex's read set tracks index
+    //        *intervals*, not just matched document IDs — an empty
+    //        `.unique()` still registers the scanned interval. Source:
+    //        `crates/database/src/reads.rs` (`ReadSet.indexed` is an
+    //        `IntervalSet`; `overlaps_document` asks whether the written
+    //        key falls in any tracked interval) and
+    //        `crates/database/src/query/index_range.rs:~245-258` (the
+    //        range scanner calls `record_indexed_directly` with the
+    //        initial unfetched interval even when zero rows match).
+    //        Two concurrent first-time exchanges therefore BOTH register
+    //        the same interval; whichever inserts first wins, the other
+    //        conflicts at commit, retries, and observes the earlier
+    //        flow's tokens in step 5 below.
     //
     //    (b) Fail-safe: `.unique()` can throw (e.g., if a past bug ever
     //        produced two grant rows for the same (userId, clientId)).
@@ -258,6 +267,7 @@ export const rotateRefreshToken = internalMutation({
     refreshToken: v.string(),
   },
   handler: async (ctx, args): Promise<{ userId: Id<'users'>; scope: string; sessionId: Id<'sessions'> }> => {
+    // 1. Validate the refresh token (read-only).
     const row = await ctx.db
       .query('oauthRefreshTokens')
       .withIndex('by_token', (q) => q.eq('token', args.oldRefreshToken))
@@ -268,14 +278,22 @@ export const rotateRefreshToken = internalMutation({
     if (row.clientId !== args.clientId) {
       throw new ConvexError({ code: 'CLIENT_ID_MISMATCH', message: 'client_id does not match refresh token' })
     }
-    await ctx.db.patch(row._id, { revoked: true })
 
-    // Bump the grant sentinel.
-    const grantNow = nowMs()
+    // 2. Read the grant sentinel (still read-only). Same "validate,
+    //    then commit" discipline as `exchangeCodeForTokens`: any throw
+    //    here (e.g., a pathological `.unique()` failure) rolls back
+    //    before we revoke the old refresh token, so the client can
+    //    legitimately retry.
     const grant = await ctx.db
       .query('oauthGrants')
       .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
       .unique()
+
+    // 3. Revoke the old refresh token.
+    await ctx.db.patch(row._id, { revoked: true })
+
+    // 4. Bump the grant sentinel.
+    const grantNow = nowMs()
     if (grant) {
       await ctx.db.patch(grant._id, { version: grant.version + 1, lastRotatedAt: grantNow })
     } else {

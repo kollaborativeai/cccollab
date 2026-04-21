@@ -650,10 +650,18 @@ describe('oauth token exchange — validation order + re-auth hygiene', () => {
     expect(grants[0]!.version).toBe(2)
   })
 
-  it('wrong code_verifier does NOT create a grant row (transaction rollback)', async () => {
-    // If validation throws, the grant-sentinel write MUST roll back too.
-    // Otherwise a wrong-verifier attempt would pollute the grant table
-    // and make telemetry on "last rotated" lie.
+  it('wrong code_verifier throws BEFORE the grant-sentinel write (ordering invariant)', async () => {
+    // Guards against a regression that would move the PKCE check below
+    // the sentinel write. With the R6 ordering, PKCE validation happens
+    // at step 1 (read-only), strictly before the grant-sentinel write
+    // at step 4 — so a failed exchange leaves zero grant rows behind
+    // and "last rotated" telemetry stays honest.
+    //
+    // (This is an ORDERING test, not a rollback test. Proving full
+    // transactional rollback of the grant write would require injecting
+    // a throw between step 4 and return, which isn't expressible in
+    // convex-test without monkey-patching the runtime. Convex's
+    // transactional guarantees are well-established upstream.)
     const t = convexTest(schema, modules)
     const { clientId, code } = await freshCode(t)
     await expect(

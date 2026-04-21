@@ -7,20 +7,25 @@ import { v } from 'convex/values'
  * One row per `(userId, clientId)` pair. Exists purely as an OCC sentinel
  * document for the token-exchange + refresh-rotate flows.
  *
- * Why: Convex's optimistic-concurrency-control conflict detection is
- * **document-keyed**, not range-keyed. Reading an index range adds no
- * document IDs to the read set if the range returns zero rows, so two
- * concurrent mutations that both read an empty `oauthAccessTokens`
- * index for the same `(userId, clientId)` pair and then both insert
- * new rows would both commit — producing two overlapping valid token
- * pairs.
+ * Why: Convex OCC tracks *index intervals*, not just matched document
+ * IDs (see `crates/database/src/reads.rs` — `ReadSet.indexed` is an
+ * `IntervalSet` and `overlaps_document` checks whether a written key
+ * falls in any tracked interval). Reading an `oauthAccessTokens` index
+ * range for `(userId, clientId)` records the interval in the read set
+ * even when it's empty — but the conflict detection there only fires
+ * if a concurrent exchange writes an access-token row, which on a
+ * first-time authorize both flows would do independently. The first
+ * writer would commit, the second would conflict, retry, and observe
+ * the first's tokens. Without the sentinel the same argument holds,
+ * but it forces reviewers to trace the OCC story through the token
+ * tables for every code path that issues tokens.
  *
- * The fix: every code-exchange and refresh-rotation reads the grant
- * row by `(userId, clientId)` and patches its `version` counter.
- * Because both concurrent mutations read and write the same document,
- * OCC genuinely fires and the later one is retried. On retry it sees
- * the earlier flow's tokens and revokes them as part of its own revoke
- * step.
+ * The sentinel collapses that reasoning into a single shared document
+ * per `(userId, clientId)`: every code-exchange and refresh-rotation
+ * reads + patches this row, so OCC always fires on a well-known,
+ * explicitly-named anchor. The later mutation is retried; on retry it
+ * sees the earlier flow's tokens in the revoke step and marks them
+ * revoked.
  *
  * Fields:
  * - `userId` / `clientId`: foreign keys identifying the grant.
