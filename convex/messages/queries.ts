@@ -9,9 +9,12 @@ import { assertCallerSubscribedToChannel, requireTopic } from '../topics/helpers
  * Code via the Channel protocol without polling.
  *
  * The `sinceTs` argument is a client-side windowing hint: when set, the
- * query only returns messages newer than the given epoch ms. Useful on
- * reconnect - the client avoids re-processing messages it has already
- * delivered to Claude. When omitted the query returns the full history.
+ * query returns messages with `ts >= sinceTs` (inclusive). The inclusivity
+ * matters because `ts` has millisecond resolution and two inserts in the
+ * same mutation can share a timestamp — a strict `>` cursor would silently
+ * drop the second message on reconnect. Clients must dedupe by `_id` on
+ * their side to skip the watermark message on resubscribe; the transport
+ * in `mcp_server/src/transport/remote.ts` does this explicitly.
  */
 export const listByTopic = authenticatedQuery({
   args: {
@@ -27,7 +30,7 @@ export const listByTopic = authenticatedQuery({
       .query('messages')
       .withIndex('by_topic_and_ts', (q) => {
         const scoped = q.eq('topicId', topic._id)
-        return cutoff === undefined ? scoped : scoped.gt('ts', cutoff)
+        return cutoff === undefined ? scoped : scoped.gte('ts', cutoff)
       })
       .collect()
     return rows
@@ -52,7 +55,7 @@ export const listByChannel = authenticatedQuery({
       .query('messages')
       .withIndex('by_channel_and_ts', (q) => {
         const scoped = q.eq('channelId', args.channelId)
-        return cutoff === undefined ? scoped : scoped.gt('ts', cutoff)
+        return cutoff === undefined ? scoped : scoped.gte('ts', cutoff)
       })
       .collect()
   },
@@ -75,7 +78,7 @@ export const listDirectMessagesForSession = authenticatedQuery({
       .query('messages')
       .withIndex('by_toSessionId_and_ts', (q) => {
         const scoped = q.eq('toSessionId', args.sessionId)
-        return cutoff === undefined ? scoped : scoped.gt('ts', cutoff)
+        return cutoff === undefined ? scoped : scoped.gte('ts', cutoff)
       })
       .collect()
   },

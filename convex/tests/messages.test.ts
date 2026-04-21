@@ -136,6 +136,117 @@ describe('messages.sendToSession (DM)', () => {
   })
 })
 
+describe('messages.listByTopic with sinceTs cursor', () => {
+  it('returns messages at the cutoff timestamp (inclusive) so same-ms rows are not dropped', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 't',
+    })
+    const channelId = (await t.run(async (ctx) => ctx.db.get(topicId)))!.channelId
+
+    // Force two inserts at exactly the same `ts`. The bug-before-fix: a
+    // client asking for messages `sinceTs=now` after delivering one of the
+    // two would silently drop the other on reconnect.
+    const now = 1700000000000
+    await t.run(async (ctx) => {
+      await ctx.db.insert('messages', {
+        kind: 'topic',
+        topicId,
+        channelId,
+        fromSessionId: sessionId,
+        fromUserId: userId,
+        text: 'a',
+        ts: now,
+      })
+      await ctx.db.insert('messages', {
+        kind: 'topic',
+        topicId,
+        channelId,
+        fromSessionId: sessionId,
+        fromUserId: userId,
+        text: 'b',
+        ts: now,
+      })
+    })
+
+    const rows = await asStefan.query(api.messages.queries.listByTopic, { topicId, sinceTs: now })
+    expect(rows.map((r) => r.text).sort()).toEqual(['a', 'b'])
+  })
+
+  it('listByChannel is also inclusive on its sinceTs cursor', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    const { channelId } = await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+
+    const now = 1700000000000
+    await t.run(async (ctx) => {
+      await ctx.db.insert('messages', {
+        kind: 'broadcast',
+        channelId,
+        fromSessionId: sessionId,
+        fromUserId: userId,
+        text: 'a',
+        ts: now,
+      })
+      await ctx.db.insert('messages', {
+        kind: 'broadcast',
+        channelId,
+        fromSessionId: sessionId,
+        fromUserId: userId,
+        text: 'b',
+        ts: now,
+      })
+    })
+    const rows = await asStefan.query(api.messages.queries.listByChannel, { channelId, sinceTs: now })
+    expect(rows.map((r) => r.text).sort()).toEqual(['a', 'b'])
+  })
+
+  it('listDirectMessagesForSession is also inclusive on its sinceTs cursor', async () => {
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const bobSession = await asBob.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    await asAlice.mutation(api.channels.mutations.join, { sessionId: aliceSession, channel: 'eng' })
+    await asBob.mutation(api.channels.mutations.join, { sessionId: bobSession, channel: 'eng' })
+
+    const now = 1700000000000
+    await t.run(async (ctx) => {
+      await ctx.db.insert('messages', {
+        kind: 'direct',
+        fromSessionId: aliceSession,
+        fromUserId: alice,
+        toSessionId: bobSession,
+        text: 'dm1',
+        ts: now,
+      })
+      await ctx.db.insert('messages', {
+        kind: 'direct',
+        fromSessionId: aliceSession,
+        fromUserId: alice,
+        toSessionId: bobSession,
+        text: 'dm2',
+        ts: now,
+      })
+    })
+    const inbox = await asBob.query(api.messages.queries.listDirectMessagesForSession, {
+      sessionId: bobSession,
+      sinceTs: now,
+    })
+    expect(inbox.map((m) => m.text).sort()).toEqual(['dm1', 'dm2'])
+  })
+})
+
 describe('messages.listDirectMessagesForSession', () => {
   it('refuses to surface another user’s DMs', async () => {
     const t = convexTest(schema, modules)

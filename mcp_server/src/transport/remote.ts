@@ -56,6 +56,39 @@ const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
 
 /**
+ * Per-subscription cap on the message-id dedup set. Each `onUpdate` call
+ * hands us the full set of rows matching the current `sinceTs` window, so
+ * the dedup set grows as messages accumulate within the window. 10k entries
+ * bound the memory at ~1MB worst case while covering a very busy topic
+ * for a multi-hour session.
+ */
+const DEDUP_CAPACITY = 10_000
+
+/**
+ * Bounded FIFO id-set used to dedupe already-delivered messages across the
+ * lifetime of a single subscription. Per-`_id` lookups are O(1); eviction
+ * is O(1) amortised. Grows monotonically until it hits `capacity`, then
+ * evicts the oldest insertion first.
+ */
+class BoundedIdSet {
+  private readonly ids = new Set<string>()
+  private readonly order: string[] = []
+  constructor(private readonly capacity: number) {}
+  has(id: string): boolean {
+    return this.ids.has(id)
+  }
+  add(id: string): void {
+    if (this.ids.has(id)) return
+    this.ids.add(id)
+    this.order.push(id)
+    while (this.order.length > this.capacity) {
+      const evicted = this.order.shift()
+      if (evicted !== undefined) this.ids.delete(evicted)
+    }
+  }
+}
+
+/**
  * Remote transport: wraps a `ConvexClient` and maps the cccollab
  * `Transport` interface onto the remote deployment's mutations +
  * queries.
@@ -481,20 +514,26 @@ export class RemoteTransport implements Transport {
    */
   subscribeDirectMessages(onEvent: (msg: ParsedMessage) => void): () => void {
     if (this.sessionId === null || this.shutdownStarted) return () => {}
-    let lastTs = 0
+    // Per-subscription id dedup. Necessary because Convex's `ts` has
+    // millisecond resolution and two DMs inserted in the same mutation
+    // share a `ts` — filtering on `row.ts <= lastTs` would drop the
+    // second one. See convex/messages/queries.ts for the matching
+    // inclusive cursor on the server side.
+    const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listDirectMessagesForSession),
       { sessionId: this.sessionId },
       (rows) => {
         const arr = rows as Array<{
+          _id: string
           fromSessionId: string
           text: string
           ts: number
           channelId?: string
         }>
         for (const row of arr) {
-          if (row.ts <= lastTs) continue
-          lastTs = row.ts
+          if (seen.has(row._id)) continue
+          seen.add(row._id)
           onEvent({
             sender: row.fromSessionId,
             text: row.text,
@@ -523,23 +562,23 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    // Narrow the reactive window server-side: if we've previously
-    // delivered messages for this topic, ask Convex to skip anything at
-    // or before that watermark. On the first subscribe for a topic we
-    // leave `sinceTs` undefined so the query returns the initial
-    // history, same as before.
+    // Narrow the reactive window server-side with the inclusive `sinceTs`
+    // cursor (>= rather than >). The dedup happens client-side by `_id`
+    // since `ts` alone can collide at millisecond resolution.
     const startingTs = this.topicMaxTs.get(args.topicId)
     const queryArgs: { topicId: string; sinceTs?: number } =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
+    const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
-        const arr = rows as Array<{ fromSessionId: string; text: string; ts: number }>
+        const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
         for (const row of arr) {
+          if (seen.has(row._id)) continue
+          seen.add(row._id)
           const prior = this.topicMaxTs.get(args.topicId) ?? 0
-          if (row.ts <= prior) continue
-          this.topicMaxTs.set(args.topicId, row.ts)
+          if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
           onEvent({
             sender: row.fromSessionId,
             text: row.text,
