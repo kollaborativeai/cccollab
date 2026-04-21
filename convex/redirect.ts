@@ -11,14 +11,19 @@
  *
  * The allow rule is intentionally narrow:
  * - scheme MUST be `http:` (loopback only)
- * - hostname MUST be `127.0.0.1` or `localhost`
+ * - hostname MUST be exactly `127.0.0.1`
+ * - NO userinfo component (`user:pass@host` bypasses hostname-only checks)
  * - pathname MUST be exactly `/cccollab-oauth-callback`
  * - no query / hash component is permitted
  * - any port number on the loopback interface is allowed
  *
- * IPv6 loopback (`::1`) is intentionally rejected - Node's `http.listen`
- * on `127.0.0.1` already binds IPv4, and allowing `[::1]` would expand
- * the attack surface without any developer benefit.
+ * `localhost` is intentionally rejected. The MCP server only ever binds
+ * to `127.0.0.1`, and `localhost` can resolve to IPv6 (`::1`) or a
+ * user-controlled DNS entry — accepting it would let a local process
+ * that can bind the right port race the MCP server's ephemeral listener
+ * and intercept the OAuth code.
+ *
+ * IPv6 loopback (`::1`) is rejected for the same binding reason.
  *
  * Kept as a pure function so the Convex callback in `convex/auth.ts` is
  * a one-liner and the policy is testable without going through the
@@ -34,7 +39,8 @@ export function isAllowedRedirect(redirectTo: string): boolean {
     return false
   }
   if (url.protocol !== 'http:') return false
-  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') return false
+  if (url.username !== '' || url.password !== '') return false
+  if (url.hostname !== '127.0.0.1') return false
   if (url.pathname !== OAUTH_CALLBACK_PATH) return false
   if (url.search !== '' || url.hash !== '') return false
   return true
