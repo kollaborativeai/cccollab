@@ -58,8 +58,10 @@ log "Done."
 cat <<'EOF'
 
 Next step:
-  Start Claude Code, then call the `authenticate` tool. A browser will open
-  for Slack OAuth. Authorize, restart the session, and you're ready to use
-  the /introduce, /start_topic, /send_message_to_topic tools.
+  Start Claude Code. cccollab works out of the box in local-only mode - two
+  sessions on the same machine can coordinate through topics with no further
+  setup. To also enable cross-machine collaboration against a hosted Convex
+  deployment, add a non-local entry under `locations` in ~/.cccollab/config.json
+  (or set CCCOLLAB_REMOTE_URL), then call the `authenticate` tool to sign in.
 
 EOF

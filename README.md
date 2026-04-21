@@ -1,10 +1,20 @@
 # cccollab
 
-MCP server that lets Claude Code sessions collaborate in real-time. Sessions communicate through threaded topics - either locally (in-process, no Slack required) or via a shared Slack channel. Messages arrive as push events via the Claude Code Channel protocol; no polling.
+MCP server that lets Claude Code sessions collaborate in real time. Sessions
+communicate through threaded topics inside channels. Messages arrive as push
+events via the Claude Code Channel protocol; no polling. Two modes:
+
+- **Local mode (default, always on)**: a per-machine in-process broker lets
+  sessions on the same machine coordinate with zero configuration.
+- **Remote mode (opt-in, additive)**: sessions on different machines
+  coordinate through a shared Convex backend. Enabling remote mode does not
+  disable local mode - the two transports run side by side.
 
 ## Install
 
-Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`), [Node.js](https://nodejs.org/) 20+, and [Claude Code](https://claude.com/claude-code).
+Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated
+(`gh auth login`), [Node.js](https://nodejs.org/) 20+, and
+[Claude Code](https://claude.com/claude-code).
 
 ```bash
 bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
@@ -12,26 +22,194 @@ bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: a
 
 That command:
 
-- Adds the `read:packages` scope to your gh CLI token if missing (browser consent, one-time).
-- Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc` (idempotent).
+- Adds the `read:packages` scope to your gh CLI token if missing (browser
+  consent, one-time).
+- Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc`
+  (idempotent).
 - Installs `@flatoutsolutions/cccollab` globally.
-- Registers the `flatoutsolutions` Claude Code marketplace and installs the `cccollab` plugin (which auto-registers the MCP server and bundles the usage skill).
+- Registers the `flatoutsolutions` Claude Code marketplace and installs the
+  `cccollab` plugin (which auto-registers the MCP server and bundles the
+  usage skill).
 
-Then open Claude Code and call the `authenticate` tool. A browser opens for Slack OAuth. Authorize, restart the session, and you're ready to go.
+After install, Claude Code has cccollab available immediately in local mode.
+No authentication is required for local mode. To also enable cross-machine
+collaboration, see [Remote mode](#remote-mode).
 
 ### Start Claude Code with the Channel protocol enabled
 
-The MCP server pushes messages from other sessions to Claude via the Claude Code Channel protocol. That protocol is opt-in, so you must launch Claude Code with:
+The MCP server pushes messages from other sessions to Claude via the Claude
+Code Channel protocol. That protocol is opt-in, so launch Claude Code with:
 
 ```bash
 claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions
 ```
 
-Without this flag, the MCP tools still work, but inbound messages from other sessions won't appear as `<channel>` tags in your session. Consider aliasing the command in your shell:
+Without this flag the tools still work, but inbound messages won't appear as
+`<channel>` tags in your session. Consider aliasing:
 
 ```bash
 alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions'
 ```
+
+## Repo layout
+
+This repo is a yarn 4 monorepo. Everything lands together under
+`@flatoutsolutions/cccollab` (the published npm package) and one shared Convex
+deployment.
+
+| Path          | What it holds                                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@flatoutsolutions/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
+| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.         |
+| `convex/`     | The shared Convex backend: schema, queries, mutations, and auth. Both the local MCP server's remote transport and the future hosted HTTP MCP server call into it.         |
+
+See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
+why the local stdio server and the future hosted HTTP MCP server are two
+separate servers.
+
+## Local mode
+
+Local mode is the always-on default. On first session start a broker is
+spawned automatically; subsequent sessions on the same machine reuse it.
+Channels and topics in local mode are scoped to one machine.
+
+Two sessions on the same machine:
+
+```text
+session A          session B
+   │                  │
+   ▼                  ▼
+        broker (localhost)
+```
+
+No config is required. Calling `introduce`, then `join_channel` and
+`start_topic` in session A and the same in session B puts them in the same
+channel; `send_message_to_topic` in A arrives as a `<channel>` tag in B.
+
+## Remote mode
+
+Remote mode adds a second transport that points at a Convex deployment.
+When enabled, outbound operations fan out to both transports and inbound
+events from both feed the same Channel-protocol stream. A channel at the
+reserved `local` location is always distinct from a channel at a named
+remote location - same channel name, different scope.
+
+Two ways to enable it:
+
+**1. Environment variables (one-liner):**
+
+```bash
+export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
+```
+
+This registers a location named `remote` with that URL. Start Claude Code,
+then call the `authenticate` tool. A browser opens for Google OAuth. After
+sign-in the tokens are persisted in `~/.cccollab/config.json` and the remote
+transport hot-attaches to the running session - no restart needed.
+
+**2. Config file (multiple locations):**
+
+Add a location to `~/.cccollab/config.json`:
+
+```json
+{
+  "locations": {
+    "flatout": {
+      "url": "https://<your-deployment>.convex.cloud"
+    }
+  }
+}
+```
+
+Then call `authenticate({ location: "flatout" })` in Claude Code.
+
+Channels configured under a remote location auto-subscribe on startup:
+
+```json
+{
+  "locations": {
+    "flatout": {
+      "url": "https://<your-deployment>.convex.cloud",
+      "channels": {
+        "cccollab": {
+          "topics": {
+            "general": {}
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+For the full schema (including project-level `.cccollab.json`, active-state
+cascade, env var overrides, and reserved keys), see
+[`docs/config.md`](docs/config.md).
+
+### How the `authenticate` tool works
+
+- If no non-local location is configured, the tool returns setup guidance.
+- If exactly one non-local location is configured, it signs you in to that
+  one by default.
+- If multiple are configured, pass `{ location: "<name>" }` explicitly.
+- When an existing location already has a live remote transport, the tool
+  short-circuits unless you pass `{ force: true }`. A forced re-auth tears
+  down the old transport (closing its websocket and its DM subscription)
+  before swapping the new one in.
+
+### Graceful degradation
+
+If a remote call fails in a way that suggests the backend has moved on
+(function-not-found, auth error, or three failures in a minute), that
+transport marks itself disabled for the rest of the session. Local mode
+keeps running. The `whoami` tool surfaces the degraded state in its
+`locations` map so you can see it immediately.
+
+## Session identity
+
+Every session has a `name` and an optional `objective`. Precedence:
+
+1. `CCCOLLAB_NAME` / `CCCOLLAB_OBJECTIVE` env vars (per-invocation).
+2. `name` / `objective` in a project-level `.cccollab.json` (walked up from
+   `cwd`).
+3. `name` / `objective` at the top level of `~/.cccollab/config.json`.
+4. Neither: the LLM is told to call `introduce` before using any other tool.
+
+## Per-profile isolation
+
+`CCCOLLAB_PROFILE` (env var) keys the local broker's runtime state so
+sessions on one profile never see sessions on another. Useful when you want
+client work, personal projects, or different accounts to stay isolated on
+the same machine. Profile affects the local broker only; remote locations
+have their own scoping via their own URL.
+
+Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/` keyed
+by profile.
+
+## Usage
+
+```text
+introduce                 - set your role name and optional objective
+whoami                    - show your identity and per-location transport status
+authenticate              - sign in to a remote location (Google OAuth, hot-attach)
+list_channels             - channels across every enabled transport
+join_channel              - subscribe to a channel at a location
+leave_channel             - unsubscribe
+set_active_channel        - switch which channel is "active"
+send_message_to_channel   - top-level broadcast to a channel
+list_topics               - topics across subscribed channels (optional location filter)
+start_topic               - create a topic in a channel
+join_topic                - join a topic by name (fuzzy) or id
+leave_topic               - leave the active topic
+set_active_topic          - switch which topic is "active"
+archive_topic             - mark a topic done (reversible)
+unarchive_topic           - restore an archived topic
+send_message_to_topic     - send a message to a topic
+list_sessions             - show other sessions (unions across every transport)
+send_message_to_session   - private DM to a session by name
+```
+
+Messages from other sessions arrive as `<channel>` tags via push.
 
 ## Local development
 
@@ -39,128 +217,48 @@ alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatou
 git clone git@github.com:flatoutsolutions/cccollab.git
 cd cccollab
 yarn install
-npm link
+cd mcp_server && npm link && cd ..
 claude plugin marketplace add ./test-marketplace
 claude plugin install cccollab@cccollab-test
 ```
 
-The repo ships a `test-marketplace/` that references `plugin/` via symlink, plus a `test/` project with `.claude/settings.json` that disables `@flatoutsolutions` and enables the local build. Run `cd test` and launch with the local channel target:
+The repo ships a `test-marketplace/` that references `plugin/` via symlink,
+plus a `test/` project with `.claude/settings.json` that disables
+`@flatoutsolutions` and enables the local build. Run `cd test` and launch
+with the local channel target:
 
 ```bash
 claude --dangerously-load-development-channels plugin:cccollab@cccollab-test
 ```
 
-The `bin` launcher prefers `src/` + `tsx` when available (hot source), falls back to `dist/server.js`.
-
-## Usage
-
-```
-introduce                 - set your role name (required before sending messages)
-whoami                    - show your current name and objective
-list_channels             - list all channels on the broker with subscription + active status
-join_channel              - join a Slack channel and make it active
-leave_channel             - leave current channel
-list_topics               - list active topics in the active channel (or local)
-start_topic               - create a new topic
-join_topic                - join by name (fuzzy/exact match), thread_ts, or UUID
-leave_topic               - leave the active topic (stop receiving its messages)
-archive_topic             - mark topic done (reversible)
-unarchive_topic           - restore a previously archived topic
-send_message_to_topic     - send to active topic
-send_broadcast            - send to all sessions (no topic required)
-list_sessions             - show sessions registered on the local broker
-send_message_to_session   - send a direct message to a specific session
-```
-
-Local topics are the default. Slack topics require `join_channel` first.
-
-Messages from other sessions and humans arrive as `<channel>` tags via push.
-
-## Per-profile isolation
-
-Sessions sharing a profile see the same channels, topics, and peers; sessions on different profiles stay completely separate. Useful for keeping client work, personal projects, or different accounts from bleeding into each other.
-
-Precedence:
-
-1. `CCCOLLAB_PROFILE` env var - overrides the file for that session.
-2. `profile` in `.cccollab.json` at the repo root (walked up from `cwd`).
-3. Fallback: `default`.
-
-Runtime state lives under `~/.cccollab/run/` and `~/.cccollab/logs/`, keyed by profile.
-
-## Pre-seeded session identity
-
-Normally the session calls `introduce` to set its name and (optionally) objective. You can skip that by pre-seeding both at launch, in two ways:
-
-**Dynamic (env vars)** - best for per-ticket / per-worktree launchers:
-
-```bash
-export CCCOLLAB_NAME="KAI-80"
-export CCCOLLAB_OBJECTIVE="Implement widget resize handles"
-claude ...
-```
-
-The MCP server reads these on startup and auto-introduces the session. The LLM is told not to call `introduce`.
-
-**Static (per-repo file)** - best for a repo whose role never changes:
-
-Create `.cccollab.json` at the repo root:
-
-```json
-{
-  "name": "platform-reviewer",
-  "objective": "Review PRs for the platform monorepo and enforce style"
-}
-```
-
-The file is found by walking up from `cwd`, so it works from any subdirectory. Env vars take precedence over the file when both are set.
-
-## Default channels
-
-Sessions auto-subscribe to one or more channels on startup. In precedence order:
-
-1. `CCCOLLAB_DEFAULT_CHANNELS` env var - CSV of channel names (e.g. `"platform,security"`). Overrides the file for that session. An empty string or whitespace-only value is treated as "explicit zero channels" (useful to suppress the fallback).
-2. `default_channels` in `.cccollab.json` at the repo root (walked up from `cwd`). An empty array is treated as "explicit zero channels".
-3. Fallback: a single channel named `default`.
-
-Example `.cccollab.json` with identity, profile, and default channels:
-
-```json
-{
-  "name": "platform-reviewer",
-  "objective": "Review PRs for the platform monorepo and enforce style",
-  "profile": "platform",
-  "default_channels": ["platform", "reviews"]
-}
-```
-
-The **first channel** in the list becomes the session's active channel. Subsequent entries are subscribed but inactive; a later `join_channel` call never steals active. To switch active mid-session use `set_active_channel`. To pick a different active channel at startup, reorder the list (or set `CCCOLLAB_DEFAULT_CHANNELS` with the desired channel first).
-
-Because the file is committed to the repo, everyone who clones it lands in the same channels with zero configuration. `join_channel` / `leave_channel` continue to work for per-session tweaks after startup. `whoami` reports each subscribed channel with its source (`env`, `cccollab.json`, `fallback`, or `manual`). `list_channels` shows every channel the broker knows about (not just your subscriptions), so you can discover channels other sessions are using and `join_channel` into them without pre-configuring anything.
-
-## Architecture
-
-- **Broker** (`src/broker.ts`) - one per machine, auto-spawned on first session start. Socket Mode connection to Slack + in-memory local topic store. SSE broadcast to all local MCP instances.
-- **MCP Server** (`src/server.ts`) - one per Claude Code session. Connects to broker via SSE, pushes events to Claude via Channel protocol, exposes tools for outbound actions.
-- **Local topics** - stored in the broker process (in-memory). No Slack required. Exact-match wins in fuzzy lookup; archived topics are excluded from search by default.
-- **Topic filtering** - sessions only receive messages from topics they've joined. Broadcasts and new-topic notifications go to all connected sessions.
-- **Identity** - messages are prefixed `*[role]*:` in Slack threads. Local messages carry the role name only.
+The `bin` launcher prefers `src/` + `tsx` when available (hot source), and
+falls back to `dist/server.js`.
 
 ## Development
 
+From the repo root:
+
 ```bash
-yarn test        # 165 tests
-yarn tsc --noEmit  # type-check
-yarn build       # compile to dist/
+yarn test          # unit + workspace tests
+yarn test:integration  # integration tests (spawns a real broker)
+yarn typecheck     # tsc --noEmit across workspaces
+yarn lint          # eslint across the repo
+yarn build         # compile mcp_server to dist/
+yarn format:check  # prettier check
+npx convex dev     # local Convex dev (against your personal deployment)
 ```
 
 ## Releasing
 
-Releases are fully automatic. Every push to `main` runs the `Release` workflow, which:
+Releases are fully automatic. Every push to `main` runs the CI workflow,
+which path-filters changes:
 
-1. Computes the next version from commit messages since the last tag (`feat:` -> minor, everything else -> patch, `chore: bump version to` commits skipped).
-2. Runs typecheck, tests, and build.
-3. Publishes `@flatoutsolutions/cccollab` to GitHub Packages.
-4. Commits the bumped `package.json` back to `main` and tags it `vX.Y.Z`.
+- Changes under `convex/` trigger a `convex deploy` against the
+  production Convex deployment.
+- Changes under `mcp_server/` or `plugin/` trigger a version bump and
+  an `npm publish` to GitHub Packages, gated so the Convex deploy must
+  succeed first if both paths changed in the same push.
 
-Use [conventional commit](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit `version` in `package.json` by hand.
+Use [conventional commit](https://www.conventionalcommits.org/) prefixes
+(`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit
+`version` in `mcp_server/package.json` by hand.

@@ -19,8 +19,8 @@ are different and because Claude Code's Channel protocol emits Claude-Code-
 specific UI affordances (the `<channel source="cccollab" ...>` tag) that are
 not appropriate for a general-purpose HTTP MCP server.
 
-The **backend** can and should be shared: both the local stdio server's hosted
-transport (see `mcp_server/src/transport/hosted.ts`) and the future HTTP MCP
+The **backend** can and should be shared: both the local stdio server's remote
+transport (see `mcp_server/src/transport/remote.ts`) and the future HTTP MCP
 server will call the same Convex queries and mutations. Shared backend, two
 clients.
 
@@ -39,8 +39,11 @@ mcp_server/
 │   ├── transport/
 │   │   ├── index.ts                # Transport abstraction interface
 │   │   ├── local.ts                # Wraps the local broker HTTP+SSE
-│   │   └── hosted.ts               # Wraps the Convex client (subscriptions + mutations)
-│   ├── hosted/                     # Hosted-mode helpers: config file, auth flow, client
+│   │   ├── remote.ts               # Wraps the Convex client (subscriptions + mutations)
+│   │   ├── router.ts               # Per-call routing across enabled transports
+│   │   └── attach.ts               # Cold-start + hot-attach of non-local locations
+│   ├── remote/                     # Remote-mode helpers: Convex client factory, auth flow
+│   ├── config/                     # Unified config loader (user + project + env)
 │   └── tools/                      # Tool implementations, call through transports
 └── tests/
 ```
@@ -49,8 +52,16 @@ Runtime:
 
 - Claude Code starts it via stdio: `cccollab` binary.
 - It always starts a local broker (unchanged behaviour).
-- If `~/.cccollab/config.json` contains `hostedUrl` + `authToken`, it **also**
-  connects to the hosted Convex backend. Writes fan out to both; reads merge.
+- When `~/.cccollab/config.json` declares a non-local location under
+  `locations` (a Convex deployment URL plus persisted OAuth tokens), the
+  server **also** attaches a remote transport to that deployment. Operations
+  routed to that location flow over the remote transport; operations routed
+  to the reserved `local` location stay on the in-process broker.
+  Fan-out and merging happen per-call based on the location the tool names.
+- The `authenticate` tool performs Google OAuth and hot-attaches the remote
+  transport to the running session (no restart). On a `force: true` re-auth
+  the old transport is torn down (DM unsubscribe fired, `shutdown()` called,
+  ConvexClient websocket closed) before the new one is swapped in.
 - When only local is available, behaviour is identical to pre-CCC-3.
 
 ### Hosted HTTP MCP server (future - NOT in this story)
@@ -109,27 +120,31 @@ This constraint applies equally to both MCP servers: the HTTP MCP server will
 also be called by arbitrary external LLMs, so its tool surface must also be
 backwards-stable once published.
 
-### 3. Graceful degradation in the local server's hosted transport
+### 3. Graceful degradation in the local server's remote transport
 
-If the hosted transport receives an authentication error, a
-`FunctionNotFoundError`, or any schema-shape mismatch:
+If the remote transport receives an authentication error, a
+`FunctionNotFoundError`, or accumulates three failures within a minute:
 
-- Log a warning to `~/.cccollab/logs/<profile>.log`.
-- Disable the hosted transport for the remainder of the session
-  (`hostedEnabled = false`).
-- Keep the local broker transport running normally.
-- Surface the degraded state in `whoami` output so the user sees it
-  immediately.
+- Log a warning to stderr (surfaced into `~/.cccollab/logs/<profile>.log`
+  when the harness is configured to capture it).
+- Flip the transport's `enabled` flag to `false` for the remainder of the
+  session; subsequent tool calls routed to that location return a
+  "degraded" error instead of dispatching.
+- Keep the local broker transport (and any other remote transports)
+  running normally.
+- Surface the degraded state in `whoami`'s `locations` map so the user
+  sees it immediately and can re-authenticate or restart.
 
-A misbehaving backend never crashes the user's Claude Code session; at worst,
-hosted mode silently falls back to local mode.
+A misbehaving backend never crashes the user's Claude Code session; at
+worst, the affected remote location silently falls back and local mode
+keeps working.
 
 ### 4. Where a new Convex function goes
 
 A new Convex query or mutation **always** goes in `convex/`, never in
 `mcp_server/`. Both MCP servers share the same backend. If the change is
 client-only (e.g. fan-out logic, merge logic, auth token refresh), it goes in
-`mcp_server/src/transport/hosted.ts` or a sibling under `mcp_server/src/`.
+`mcp_server/src/transport/remote.ts` or a sibling under `mcp_server/src/`.
 
 ### 5. Where a new tool goes
 
