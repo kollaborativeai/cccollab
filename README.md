@@ -146,10 +146,16 @@ Because the file is committed to the repo, everyone who clones it lands in the s
 - **Topic filtering** - sessions only receive messages from topics they've joined. Broadcasts and new-topic notifications go to all connected sessions.
 - **Identity** - messages are prefixed `*[role]*:` in Slack threads. Local messages carry the role name only.
 
+## Hosted HTTP MCP server (external AI clients)
+
+A Convex-hosted MCP server lets external AI clients (Claude.ai, ChatGPT, Cursor, Gemini) connect to cccollab topics over OAuth 2.1. It lives under `convex/` and exposes three MCP tools: `list_topics`, `read_topic`, `send_message_to_topic`. Messages round-trip to Claude Code sessions via an optional broker bridge.
+
+See [`docs/CCC-22-http-mcp.md`](docs/CCC-22-http-mcp.md) for setup, the OAuth flow, and deployment.
+
 ## Development
 
 ```bash
-yarn test        # 165 tests
+yarn test        # 239 tests
 yarn tsc --noEmit  # type-check
 yarn build       # compile to dist/
 ```

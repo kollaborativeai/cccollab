@@ -27,7 +27,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepublishOnly": "yarn build",
-    "prepare": "husky"
+    "prepare": "husky",
+    "postinstall": "node scripts/gen-convex-stub.mjs",
+    "convex:stub": "node scripts/gen-convex-stub.mjs --force"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
