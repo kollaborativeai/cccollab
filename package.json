@@ -20,7 +20,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit && yarn workspaces foreach -A --no-private run typecheck",
-    "prepare": "husky"
+    "prepare": "husky",
+    "convex:stub": "node scripts/gen-convex-stub.mjs --force",
+    "postinstall": "node scripts/gen-convex-stub.mjs"
   },
   "dependencies": {
     "@auth/core": "^0.37.0",
