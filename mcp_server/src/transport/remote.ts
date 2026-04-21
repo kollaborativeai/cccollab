@@ -102,6 +102,14 @@ export class RemoteTransport implements Transport {
    *  source of truth lives server-side. */
   private readonly knownTopicIds = new Set<string>()
 
+  /** Highest `ts` (epoch ms) we've delivered to callers per topic. Used
+   *  to pass `sinceTs` to the reactive `listByTopic` query so the Convex
+   *  server side narrows results rather than replaying full topic
+   *  history on every subscribe. Persists across subscribe/unsubscribe
+   *  cycles so a reconnect after `leaveTopic`-then-`joinTopic` still
+   *  benefits from the narrower window. */
+  private readonly topicMaxTs = new Map<string, number>()
+
   constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
@@ -515,15 +523,23 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    let lastTs = 0
+    // Narrow the reactive window server-side: if we've previously
+    // delivered messages for this topic, ask Convex to skip anything at
+    // or before that watermark. On the first subscribe for a topic we
+    // leave `sinceTs` undefined so the query returns the initial
+    // history, same as before.
+    const startingTs = this.topicMaxTs.get(args.topicId)
+    const queryArgs: { topicId: string; sinceTs?: number } =
+      startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listByTopic),
-      { topicId: args.topicId },
+      queryArgs,
       (rows) => {
         const arr = rows as Array<{ fromSessionId: string; text: string; ts: number }>
         for (const row of arr) {
-          if (row.ts <= lastTs) continue
-          lastTs = row.ts
+          const prior = this.topicMaxTs.get(args.topicId) ?? 0
+          if (row.ts <= prior) continue
+          this.topicMaxTs.set(args.topicId, row.ts)
           onEvent({
             sender: row.fromSessionId,
             text: row.text,

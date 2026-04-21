@@ -28,7 +28,7 @@ import {
  * remote ids without pulling in real broker / Convex infra.
  */
 class FakeTransport implements Transport {
-  readonly source: 'local' | 'remote'
+  readonly source: string
   enabled = true
   private readonly topicIds = new Set<string>()
   private readonly channels = new Map<string, TransportChannel>()
@@ -97,7 +97,7 @@ class FakeTransport implements Transport {
   )
   deregisterSession = vi.fn(async (_args: { sessionName: string }) => {})
 
-  constructor(source: 'local' | 'remote') {
+  constructor(source: string) {
     this.source = source
   }
 
@@ -833,5 +833,147 @@ describe('Dual transport: config-driven startup', () => {
 
     // The last joined topic becomes active.
     expect(context.hasTopic()).toBe(true)
+  })
+})
+
+/**
+ * Regression: when the user only has a single non-`local`, non-`remote`
+ * location configured (e.g. `"flatout"`), `send_message_to_channel`
+ * without an explicit `location` must successfully route the message.
+ * The old `ActiveContext.getChannelLocation` hardcoded checks for
+ * `"local"` / `"remote"` and returned `undefined` for any other name,
+ * so the tool falsely claimed the user wasn't subscribed.
+ */
+describe('Dual transport: arbitrary location name routing', () => {
+  it('send_message_to_channel without explicit location succeeds when subscribed at an arbitrary location', async () => {
+    const flatout = new FakeTransport('flatout')
+    const deps = makeDeps([flatout])
+    // User is subscribed to "dev" at "flatout" (e.g. via cccollab.json
+    // auto-subscribe). No active channel is set yet, and the caller
+    // provides `channel: "dev"` without `location`.
+    deps.context.joinChannel('dev', 'cccollab.json', 'flatout')
+
+    const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'dev' }, deps))
+    expect(result).toEqual({ channel: 'dev', location: 'flatout' })
+    expect(flatout.broadcast).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev', text: 'hi' })
+  })
+
+  it('start_topic without explicit location uses the arbitrary location subscription', async () => {
+    const flatout = new FakeTransport('flatout')
+    const deps = makeDeps([flatout])
+    deps.context.joinChannel('dev', 'cccollab.json', 'flatout')
+
+    const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'planning', channel: 'dev' }, deps))
+    expect(result.id).toBeDefined()
+    expect(result.channel).toBe('dev')
+    expect(result.location).toBe('flatout')
+    expect(flatout.createTopic).toHaveBeenCalled()
+  })
+})
+
+/**
+ * Regression: when a process starts with remote tokens on disk but the
+ * session has not yet called `introduce`, `attachLocation` runs and
+ * registers the remote transport. That transport's
+ * `subscribeDirectMessages` returns a no-op (because `sessionId` is
+ * null). When `introduce` later fires, it must re-install the DM
+ * subscription so the session actually receives DMs.
+ *
+ * We exercise the `introduce` handler directly with a
+ * `FakeRemoteTransport`-shaped double whose first
+ * `subscribeDirectMessages` call mimics the no-op path. After the
+ * handler returns we expect a SECOND subscribe call (not just one).
+ */
+describe('DM subscription re-install on introduce', () => {
+  class ResubscribeFake extends FakeTransport {
+    readonly subscribeCalls: Array<(msg: import('../src/types.js').ParsedMessage) => void> = []
+    private readonly returnNoopOnFirstCall: boolean
+    noopUnsubscribeCalled = false
+    liveUnsubscribeCalled = false
+
+    constructor(source: string, returnNoopOnFirstCall = true) {
+      super(source)
+      this.returnNoopOnFirstCall = returnNoopOnFirstCall
+    }
+
+    subscribeDirectMessages(onEvent: (msg: import('../src/types.js').ParsedMessage) => void): () => void {
+      this.subscribeCalls.push(onEvent)
+      if (this.returnNoopOnFirstCall && this.subscribeCalls.length === 1) {
+        // Matches the real RemoteTransport's "sessionId is null"
+        // branch: we accept the callback arg but return an unsubscribe
+        // whose invocation is a no-op from the transport's point of
+        // view.
+        return () => {
+          this.noopUnsubscribeCalled = true
+        }
+      }
+      return () => {
+        this.liveUnsubscribeCalled = true
+      }
+    }
+  }
+
+  it('calls subscribeDirectMessages a second time after introduce, and the new subscription can receive DMs', async () => {
+    const fake = new ResubscribeFake('flatout')
+    // `makeDeps` eagerly sets a name on its SessionManager; we need the
+    // original "no introduce has happened" state to mirror the real
+    // startup, so build one explicitly here.
+    const session = new (await import('../src/session.js')).SessionManager({
+      username: 'tester',
+      cwd: '/tmp/proj',
+    })
+    const context = new ActiveContext()
+    const router = new TransportRouter([fake])
+
+    // Simulate the startup-side subscribe call that attachLocation
+    // would have made with a null sessionId. The fake's first call
+    // returns a no-op unsubscribe (reflecting the real bug).
+    const remoteUnsubscribes = new Map<string, () => void>()
+    const noopBus = {
+      push: vi.fn(async () => {}),
+    } as unknown as import('../src/message-bus.js').MessageBus
+    const firstUnsub = fake.subscribeDirectMessages((msg) => {
+      void noopBus.push(msg, 'flatout')
+    })
+    remoteUnsubscribes.set('flatout', firstUnsub)
+    expect(fake.subscribeCalls.length).toBe(1)
+
+    const identityDeps = {
+      session,
+      context,
+      router,
+      messageBus: noopBus,
+      remoteUnsubscribes,
+    }
+
+    // Introduce for the first time. The handler must fan out and then
+    // re-install the DM subscription since the prior subscribe was made
+    // before the session had a name.
+    await handleIdentityTool('introduce', { name: 'architect' }, identityDeps)
+
+    // Must-fix assertion: a second subscribe call happened.
+    expect(fake.subscribeCalls.length).toBe(2)
+    // And the old no-op unsubscribe was invoked as part of the swap.
+    expect(fake.noopUnsubscribeCalled).toBe(true)
+    // The tracked unsubscribe in the map now points at the new
+    // subscription's teardown.
+    remoteUnsubscribes.get('flatout')!()
+    expect(fake.liveUnsubscribeCalled).toBe(true)
+
+    // The freshly-installed subscription is live: simulate a DM arrival
+    // and verify it reaches the bus.
+    const liveCallback = fake.subscribeCalls[1]!
+    liveCallback({
+      sender: 'alice',
+      text: 'hello',
+      ts: '2026-01-01T00:00:00Z',
+      channel: 'direct',
+      channelName: 'direct',
+      threadTs: undefined,
+    })
+    const busPush = (noopBus as unknown as { push: ReturnType<typeof vi.fn> }).push
+    expect(busPush).toHaveBeenCalledTimes(1)
+    const [, sourceArg] = busPush.mock.calls[0] as [unknown, string]
+    expect(sourceArg).toBe('flatout')
   })
 })

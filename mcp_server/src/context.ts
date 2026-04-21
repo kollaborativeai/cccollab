@@ -1,4 +1,4 @@
-import type { ChannelLocation } from './transport/index.js'
+import { LOCAL_LOCATION, type ChannelLocation } from './transport/index.js'
 
 export type ChannelSource = 'manual' | 'fallback' | 'env' | 'cccollab.json'
 
@@ -128,14 +128,18 @@ export class ActiveContext {
     return undefined
   }
 
-  /** Returns the location of a subscribed channel. When the same name
-   *  is subscribed at both locations, returns `'local'` first
-   *  (deterministic tie-break matching the routing preference in
-   *  `list_sessions` / DM routing). */
+  /** Returns the location of a subscribed channel. `ChannelLocation` is
+   *  a free-form string - the user may configure arbitrary names
+   *  (`"flatout"`, `"acme"`) alongside or instead of the reserved
+   *  `"local"`. We check `"local"` first as a deterministic tie-break
+   *  (matching the routing preference in `list_sessions` / DM routing),
+   *  then fall back to whichever subscription has this channel name. */
   getChannelLocation(name: string): ChannelLocation | undefined {
     const channel = normalizeChannelName(name)
-    if (this.subscribed.has(channelKey(channel, 'local'))) return 'local'
-    if (this.subscribed.has(channelKey(channel, 'remote'))) return 'remote'
+    if (this.subscribed.has(channelKey(channel, LOCAL_LOCATION))) return LOCAL_LOCATION
+    for (const entry of this.subscribed.values()) {
+      if (entry.name === channel) return entry.location
+    }
     return undefined
   }
 

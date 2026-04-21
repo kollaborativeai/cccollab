@@ -77,11 +77,25 @@ function readExisting(): { locations?: Record<string, LocationConfig>; [key: str
     const validated = CccollabConfigSchema.parse(parsed)
     // Cast to the looser shape we merge against.
     return validated as { locations?: Record<string, LocationConfig>; [key: string]: unknown }
-  } catch {
-    // Corrupt or schema-violating user-level file: start fresh so
-    // `saveLocationAuth` still succeeds. The corrupt content is
-    // overwritten atomically below. A future iteration could rename
-    // the bad file aside for forensics.
+  } catch (err) {
+    // Corrupt or schema-violating user-level file. Preserve the bad
+    // content for forensics by renaming it to a timestamped sibling
+    // before the caller's `saveLocationAuth` overwrites the path. The
+    // backup rename is best-effort: if it fails (permissions, missing
+    // directory, etc.) we still fall through to the `{}` baseline so the
+    // save path stays robust. The user gets one console.error line so
+    // the incident isn't completely silent.
+    const backupPath = `${CCCOLLAB_CONFIG_FILE}.bak.${Date.now()}`
+    try {
+      renameSync(CCCOLLAB_CONFIG_FILE, backupPath)
+      process.stderr.write(
+        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backed up to ${backupPath}\n`,
+      )
+    } catch (backupErr) {
+      process.stderr.write(
+        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backup also failed (${backupErr instanceof Error ? backupErr.message : String(backupErr)})\n`,
+      )
+    }
     return {}
   }
 }

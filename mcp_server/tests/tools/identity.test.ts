@@ -125,6 +125,73 @@ describe('Identity Tools', () => {
         expect(result).toContain('Remote mode is not configured')
         expect(result).toContain('CCCOLLAB_REMOTE_URL')
       })
+
+      it('short-circuits with the signed-in email when the location is already authenticated and userEmail is known', async () => {
+        const { RemoteTransport } = await import('../../src/transport/remote.js')
+        const stubClient = {
+          query: vi.fn(async () => undefined),
+          mutation: vi.fn(async () => undefined),
+          onUpdate: vi.fn(() => () => {}),
+          setAuth: vi.fn(),
+          close: vi.fn(async () => {}),
+        }
+        const transport = new RemoteTransport({
+          client: stubClient as unknown as import('convex/browser').ConvexClient,
+          source: 'flatout',
+          log: () => {},
+        })
+        const customDeps: IdentityToolDeps = {
+          ...deps,
+          router: new TransportRouter([transport]),
+          locations: [
+            {
+              name: 'flatout',
+              isLocal: false,
+              url: 'https://example.convex.cloud',
+              accessToken: 'a',
+              refreshToken: 'r',
+              userEmail: 'stefan@flatout.solutions',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
+        expect(result).toContain('Already authenticated to "flatout"')
+        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+        expect(result).toContain('Pass force: true to re-authenticate.')
+      })
+
+      it('short-circuits without an email suffix when userEmail is not known for the location', async () => {
+        const { RemoteTransport } = await import('../../src/transport/remote.js')
+        const stubClient = {
+          query: vi.fn(async () => undefined),
+          mutation: vi.fn(async () => undefined),
+          onUpdate: vi.fn(() => () => {}),
+          setAuth: vi.fn(),
+          close: vi.fn(async () => {}),
+        }
+        const transport = new RemoteTransport({
+          client: stubClient as unknown as import('convex/browser').ConvexClient,
+          source: 'flatout',
+          log: () => {},
+        })
+        const customDeps: IdentityToolDeps = {
+          ...deps,
+          router: new TransportRouter([transport]),
+          locations: [
+            {
+              name: 'flatout',
+              isLocal: false,
+              url: 'https://example.convex.cloud',
+              accessToken: 'a',
+              refreshToken: 'r',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
+        expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
+      })
     })
   })
 })

@@ -105,4 +105,27 @@ describe('saveLocationAuth', () => {
     })
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(true)
   })
+
+  it('preserves a corrupt prior config as a timestamped backup before overwriting', async () => {
+    // Write a file that passes JSON.parse but fails the zod schema
+    // (a zod failure should also trigger the backup path).
+    const dir = (await import('node:path')).dirname(CCCOLLAB_CONFIG_FILE)
+    const { readdirSync } = await import('node:fs')
+    writeFileSync(CCCOLLAB_CONFIG_FILE, '{this is not valid json', { mode: 0o600 })
+
+    saveLocationAuth('flatout', {
+      url: 'https://a.convex.cloud',
+      accessToken: 'new-token',
+      refreshToken: 'new-refresh',
+    })
+
+    // New file is healthy.
+    const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
+    expect(content.locations.flatout.accessToken).toBe('new-token')
+
+    // A backup file exists alongside.
+    const entries = readdirSync(dir)
+    const backups = entries.filter((e) => e.startsWith('config.json.bak.'))
+    expect(backups.length).toBeGreaterThanOrEqual(1)
+  })
 })

@@ -80,6 +80,43 @@ export async function handleIdentityTool(
         }
       }
 
+      // Re-install DM subscriptions on every non-local transport. If a
+      // remote transport was constructed at startup BEFORE the session
+      // had a name (tokens present, `introduce` not yet called), its
+      // first `subscribeDirectMessages` call returned a no-op because
+      // `sessionId` was still null. Now that `introduce` has fanned out
+      // and sessionIds are live, re-subscribe so the DM inbox actually
+      // flows. Idempotent on the Convex side (same reactive query); the
+      // MessageBus dedup cache covers any ts overlap.
+      if (deps.messageBus && deps.remoteUnsubscribes) {
+        for (const transport of deps.router.all()) {
+          if (transport.source === LOCAL_LOCATION) continue
+          if (!hasDirectMessageSubscription(transport)) continue
+          const prior = deps.remoteUnsubscribes.get(transport.source)
+          if (prior !== undefined) {
+            try {
+              prior()
+            } catch {
+              // Best-effort; the prior callback was almost certainly a
+              // no-op captured when sessionId was null. Proceed.
+            }
+            deps.remoteUnsubscribes.delete(transport.source)
+          }
+          try {
+            const bus = deps.messageBus
+            const unsub = transport.subscribeDirectMessages((msg) => {
+              void bus.push(msg, transport.source)
+            })
+            deps.remoteUnsubscribes.set(transport.source, unsub)
+          } catch (err) {
+            // Non-fatal: log but don't block introduce.
+            process.stderr.write(
+              `[cccollab] DM re-subscription failed for "${transport.source}": ${err instanceof Error ? err.message : String(err)}\n`,
+            )
+          }
+        }
+      }
+
       return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
     }
     case 'whoami': {
@@ -126,6 +163,18 @@ export async function handleIdentityTool(
     default:
       throw new Error(`Unknown identity tool: ${name}`)
   }
+}
+
+/**
+ * Type guard: does this transport expose a DM reactive subscription?
+ * Mirrors the helper in `transport/attach.ts`; duplicated here because
+ * the re-subscription path in `introduce` needs the same narrowing
+ * without pulling the attach module into the identity tool's tree.
+ */
+function hasDirectMessageSubscription(
+  transport: Transport,
+): transport is Transport & { subscribeDirectMessages: RemoteTransport['subscribeDirectMessages'] } {
+  return typeof (transport as { subscribeDirectMessages?: unknown }).subscribeDirectMessages === 'function'
 }
 
 /**
@@ -196,7 +245,8 @@ async function handleAuthenticate(
   // enabled, short-circuit: tokens are already live.
   const existingTransport: Transport | undefined = deps.router.all().find((t) => t.source === targetName)
   if (!force && existingTransport?.enabled === true) {
-    return `Already authenticated to "${targetName}". Pass force: true to re-authenticate.`
+    const asEmail = locationInfo?.userEmail ? ` (signed in as ${locationInfo.userEmail})` : ''
+    return `Already authenticated to "${targetName}"${asEmail}. Pass force: true to re-authenticate.`
   }
 
   let authResult: { locationName: string; url: string; userEmail?: string }

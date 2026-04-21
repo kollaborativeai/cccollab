@@ -136,3 +136,58 @@ describe('RemoteTransport graceful degradation', () => {
     expect(transport.degradation).toMatch(/authentication failed/i)
   })
 })
+
+/**
+ * `subscribeTopicMessages` should pass a `sinceTs` to the reactive
+ * `listByTopic` query on re-subscribe so Convex narrows results to
+ * messages newer than what we've already delivered. The per-topic
+ * watermark (`topicMaxTs`) must persist across unsubscribe/resubscribe
+ * so a reconnect after leave-topic/join-topic still benefits.
+ */
+describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
+  it('omits sinceTs on first subscribe and passes the running max on a resubscribe', () => {
+    // Capture every `onUpdate` call's args so we can assert the second
+    // subscribe received sinceTs === the max ts delivered by the first.
+    const onUpdateCalls: Array<{ query: unknown; args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn((query: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ query, args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: Array<{ ts: string; text: string }> = []
+    const onEvent = (msg: { ts: string; text: string }) => delivered.push(msg)
+
+    const unsub1 = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
+    // Simulate Convex delivering two messages.
+    callbacks[0]!([
+      { fromSessionId: 'alice', text: 'first', ts: 1_700_000_100_000 },
+      { fromSessionId: 'alice', text: 'second', ts: 1_700_000_200_000 },
+    ])
+    expect(delivered).toHaveLength(2)
+    expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1' })
+
+    unsub1()
+
+    // Resubscribe: sinceTs must be the highest ts seen so far.
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
+    expect(onUpdateCalls[1]!.args).toEqual({ topicId: 't1', sinceTs: 1_700_000_200_000 })
+
+    // A message with a newer ts on the resubscribed stream advances the
+    // watermark; a message at or below the prior watermark is filtered
+    // client-side anyway (client/server belt-and-braces).
+    callbacks[1]!([
+      { fromSessionId: 'alice', text: 'third', ts: 1_700_000_300_000 },
+      { fromSessionId: 'alice', text: 'dup', ts: 1_700_000_200_000 },
+    ])
+    expect(delivered).toHaveLength(3)
+    expect(delivered[2]!.text).toBe('third')
+  })
+})
