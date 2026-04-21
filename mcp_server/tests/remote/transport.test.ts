@@ -219,9 +219,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     const delivered: Array<{ text: string }> = []
-    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) =>
-      delivered.push({ text: msg.text }),
-    )
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push({ text: msg.text }))
 
     // Two inserts in the same millisecond.
     callbacks[0]!([
@@ -250,9 +248,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     const delivered: Array<{ text: string }> = []
-    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) =>
-      delivered.push({ text: msg.text }),
-    )
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push({ text: msg.text }))
 
     callbacks[0]!([{ _id: 'msg_1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 }])
     // Second tick: Convex re-sends all rows plus a new one.

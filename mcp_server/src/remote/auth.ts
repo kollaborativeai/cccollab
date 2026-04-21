@@ -152,9 +152,7 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
   let userEmail: string | undefined
   try {
     client.setAuth(second.tokens.token)
-    const profile = (await client.query(WHOAMI_QUERY, {})) as
-      | { userId?: string; email?: string }
-      | null
+    const profile = (await client.query(WHOAMI_QUERY, {})) as { userId?: string; email?: string } | null
     if (profile) {
       userId = profile.userId
       userEmail = profile.email
