@@ -17,8 +17,10 @@ import { v } from 'convex/values'
  * (Convex Auth user) via the OAuth authorization flow.
  *
  * Invariant: at most one row per `clientId`. Enforced at the mutation layer
- * (`by_clientId` lookup-then-insert); IDs are 256-bit random tokens so
- * collisions are astronomically unlikely, but the uniqueness is structural.
+ * (`by_clientId` lookup-then-insert); IDs are 128-bit random tokens (16
+ * random bytes, base64url-encoded) so collisions are astronomically
+ * unlikely, but the uniqueness is structural. Access + refresh tokens use
+ * 256-bit tokens (32 random bytes); see `oauthAccessTokens` / `oauthRefreshTokens`.
  */
 export const oauthClientsTable = defineTable({
   clientId: v.string(),

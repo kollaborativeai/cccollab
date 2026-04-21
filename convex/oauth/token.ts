@@ -4,7 +4,7 @@ import type { GenericActionCtx } from 'convex/server'
 import { internal } from '../_generated/api'
 import type { DataModel } from '../_generated/dataModel'
 import { action } from '../_generated/server'
-import { randomToken, sha256Base64Url, timingSafeEqual, verifyPkceS256 } from '../lib/crypto'
+import { randomToken, sha256Base64Url, timingSafeEqual } from '../lib/crypto'
 import { ACCESS_TOKEN_TTL_MS } from '../lib/time'
 
 /**
@@ -65,23 +65,27 @@ export const exchangeAuthCode = action({
   },
   handler: async (ctx, args): Promise<TokenResponse> => {
     await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
-    const codeRow = await ctx.runMutation(internal.oauth.tokens.consumeAuthCode, { code: args.code })
-    if (!codeRow) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'invalid or expired code' })
-    }
-    if (codeRow.clientId !== args.clientId) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'client_id mismatch' })
-    }
-    if (codeRow.redirectUri !== args.redirectUri) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'redirect_uri mismatch' })
-    }
-    const ok = await verifyPkceS256({
-      verifier: args.codeVerifier,
-      challenge: codeRow.codeChallenge,
+
+    // All validation + consume happens atomically in one mutation. A
+    // typo in redirect_uri or code_verifier does NOT burn the code —
+    // the client can retry. Only successful validation marks it used.
+    const codeRow = await ctx.runMutation(internal.oauth.tokens.validateAndConsumeAuthCode, {
+      code: args.code,
+      clientId: args.clientId,
+      redirectUri: args.redirectUri,
+      codeVerifier: args.codeVerifier,
     })
-    if (!ok) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'pkce verifier mismatch' })
-    }
+
+    // Re-authorize semantics: if this same user has previously issued
+    // tokens to this same client, revoke the old ones before minting new
+    // ones. A successful full-flow authorize is the moment of highest
+    // certainty that the user wants to start fresh; letting old tokens
+    // stay valid alongside would leave a leaked-but-forgotten previous
+    // token usable for up to the 1h access-token TTL.
+    await ctx.runMutation(internal.oauth.tokens.revokeExistingTokens, {
+      userId: codeRow.userId,
+      clientId: codeRow.clientId,
+    })
 
     const sessionId = await ctx.runMutation(internal.oauth.tokens.getOrCreateExternalSession, {
       userId: codeRow.userId,

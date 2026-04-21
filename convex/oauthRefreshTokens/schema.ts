@@ -22,4 +22,6 @@ export const oauthRefreshTokensTable = defineTable({
   scope: v.string(),
   expiresAt: v.number(),
   revoked: v.boolean(),
-}).index('by_token', ['token'])
+})
+  .index('by_token', ['token'])
+  .index('by_userId_and_clientId', ['userId', 'clientId'])

@@ -31,7 +31,27 @@ export type JsonRpcResponse = {
 
 export const SERVER_INFO = { name: 'cccollab', version: '1.0.0' }
 export const SERVER_CAPABILITIES = { tools: { listChanged: false } }
-export const PROTOCOL_VERSION = '2025-06-18'
+
+/**
+ * Versions we know how to speak, newest first. MCP `initialize` expects the
+ * server to echo a version the client can handle — if the client's
+ * requested version is in this list, we echo it verbatim; otherwise we
+ * echo our newest and let the client decide whether to proceed.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'] as const
+export const PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+
+function negotiateProtocolVersion(params: unknown): string {
+  if (typeof params !== 'object' || params === null) return PROTOCOL_VERSION
+  const requested = (params as { protocolVersion?: unknown }).protocolVersion
+  if (typeof requested === 'string' && (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)) {
+    return requested
+  }
+  // Unknown version: respond with our newest. Clients that enforce strict
+  // version matching will reject; clients that best-effort-accept will
+  // continue. Either outcome is preferable to guessing.
+  return PROTOCOL_VERSION
+}
 
 export type McpIdentity = {
   userId: Id<'users'>
@@ -59,7 +79,7 @@ export async function dispatchMcp(
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: PROTOCOL_VERSION,
+          protocolVersion: negotiateProtocolVersion(request.params),
           serverInfo: SERVER_INFO,
           capabilities: SERVER_CAPABILITIES,
         },

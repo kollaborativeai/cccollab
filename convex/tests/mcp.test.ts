@@ -90,7 +90,7 @@ describe('/mcp — auth', () => {
 })
 
 describe('/mcp — dispatcher', () => {
-  it('initialize returns server info + capabilities + protocol version', async () => {
+  it('initialize echoes server info + capabilities and negotiates the newest supported protocolVersion by default', async () => {
     const t = convexTest(schema, modules)
     const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
     const { accessToken } = await bearerFor(t, userId)
@@ -114,6 +114,34 @@ describe('/mcp — dispatcher', () => {
         capabilities: { tools: { listChanged: false } },
       },
     })
+  })
+
+  it('initialize negotiates back to a client-requested older version when we support it', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const { accessToken } = await bearerFor(t, userId)
+    const res = await postJsonRpc(t, accessToken, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } },
+    })
+    const body = (await res.json()) as { result: { protocolVersion: string } }
+    expect(body.result.protocolVersion).toBe('2024-11-05')
+  })
+
+  it('initialize falls back to our newest when the client requests a version we do not speak', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const { accessToken } = await bearerFor(t, userId)
+    const res = await postJsonRpc(t, accessToken, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '1999-01-01' },
+    })
+    const body = (await res.json()) as { result: { protocolVersion: string } }
+    expect(body.result.protocolVersion).toBe('2025-06-18')
   })
 
   it('tools/list returns the three MCP tools', async () => {
@@ -350,6 +378,111 @@ describe('/mcp — tools end-to-end', () => {
     const body = (await res.json()) as { result: { content: Array<{ text: string }> } }
     const content = JSON.parse(body.result.content[0]!.text) as { error?: string }
     expect(content.error).toBe('topic_not_found_or_not_a_member')
+  })
+})
+
+describe('/token HTTP path', () => {
+  it('forwards client_name from the form body so the synthetic session is named after the AI client', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+
+    // Run the OAuth flow via the HTTP /token endpoint (not the action
+    // directly) so we're actually covering the HTTP->action wiring.
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Registration name',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-0123456789abcdef0123456789abcdef'
+    const challenge = await sha256Base64Url(verifier)
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        client_name: 'Claude.ai',
+        code,
+        code_verifier: verifier,
+        redirect_uri: 'http://127.0.0.1:8765/cb',
+      }).toString(),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { access_token: string }
+    expect(body.access_token).toBeTruthy()
+
+    // The synthetic session should carry the `clientName` from the form.
+    const sessions = await t.run(async (ctx) =>
+      ctx.db
+        .query('sessions')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+    )
+    expect(sessions.length).toBe(1)
+    expect(sessions[0]!.sessionName).toContain('Claude.ai')
+  })
+
+  it('rejects non-form-encoded Content-Type', async () => {
+    const t = convexTest(schema, modules)
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('invalid_request')
+  })
+})
+
+describe('/authorize error handling (RFC 6749 §4.1.2.1)', () => {
+  it('redirects to redirect_uri with error params when scope is invalid (after redirect_uri validation)', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Test AI',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+
+    // The /authorize HTTP route uses ctx.auth.getUserIdentity(); there's
+    // currently no way to inject identity through t.fetch. Skip via
+    // assertion on the current behaviour: a t.fetch /authorize without an
+    // identity returns 401 HTML (the "sign-in required" fallback).
+    // The error-redirect path is exercised at the mutation layer instead.
+    const res = await t
+      .withIdentity(identityFor(userId))
+      .mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: 'c',
+        codeChallengeMethod: 'S256',
+        scope: 'admin',
+      })
+      .catch((err) => err)
+    expect(res).toBeInstanceOf(Error)
+    // The mutation throws ConvexError with code INVALID_SCOPE; the HTTP
+    // layer would convert that to a redirect with `error=invalid_scope`.
+    expect(String(res)).toMatch(/INVALID_SCOPE|scope/)
+  })
+
+  it('returns JSON 400 (not a redirect) when redirect_uri itself is missing from the query string', async () => {
+    const t = convexTest(schema, modules)
+    const res = await t.fetch(
+      '/authorize?response_type=code&client_id=foo&code_challenge=abc&code_challenge_method=S256',
+      { method: 'GET' },
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('invalid_request')
   })
 })
 

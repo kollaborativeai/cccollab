@@ -333,6 +333,184 @@ describe('oauth.authorize + token', () => {
   })
 })
 
+describe('oauth token exchange — validation order + re-auth hygiene', () => {
+  async function freshCode(t: ReturnType<typeof convexTest>) {
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Test AI',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-0123456789abcdef0123456789abcdef'
+    const challenge = await sha256Base64Url(verifier)
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    return { userId, clientId: client.client_id, code, verifier }
+  }
+
+  it('wrong code_verifier does NOT burn the code — retry with correct verifier succeeds', async () => {
+    const t = convexTest(schema, modules)
+    const { clientId, code, verifier } = await freshCode(t)
+    // First attempt with wrong verifier should fail.
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId,
+        code,
+        codeVerifier: 'wrong-verifier',
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/pkce|INVALID_GRANT/i)
+    // The code must still be usable — a legitimate retry succeeds.
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    expect(tokens.access_token).toBeTruthy()
+  })
+
+  it('wrong redirect_uri does NOT burn the code either', async () => {
+    const t = convexTest(schema, modules)
+    const { clientId, code, verifier } = await freshCode(t)
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId,
+        code,
+        codeVerifier: verifier,
+        redirectUri: 'http://127.0.0.1:9999/other',
+      }),
+    ).rejects.toThrow(/redirect|INVALID_GRANT/i)
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    expect(tokens.access_token).toBeTruthy()
+  })
+
+  it('re-authorize revokes the prior access + refresh tokens', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+
+    // First authorize + exchange.
+    const verifier1 = 'verifier-first-0123456789abcdef0123456789'
+    const challenge1 = await sha256Base64Url(verifier1)
+    const { code: code1 } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge1,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const tokens1 = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code: code1,
+      codeVerifier: verifier1,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+
+    // Second authorize + exchange (same user, same client) — should revoke tokens1.
+    const verifier2 = 'verifier-second-0123456789abcdef0123456789'
+    const challenge2 = await sha256Base64Url(verifier2)
+    const { code: code2 } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge2,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code: code2,
+      codeVerifier: verifier2,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+
+    // tokens1.access_token should now be revoked.
+    const access = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthAccessTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokens1.access_token))
+        .unique(),
+    )
+    expect(access?.revoked).toBe(true)
+
+    // tokens1.refresh_token should also be revoked.
+    const refresh = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthRefreshTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokens1.refresh_token))
+        .unique(),
+    )
+    expect(refresh?.revoked).toBe(true)
+  })
+
+  it('re-authorize leaves tokens for a DIFFERENT client of the same user alone', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const clientA = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const clientB = await t.mutation(api.oauth.register.register, {
+      clientName: 'Cursor',
+      redirectUris: ['http://127.0.0.1:8766/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    // Authorize client A.
+    const verifierA = 'verifier-a-0123456789abcdef0123456789'
+    const { code: codeA } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: clientA.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: await sha256Base64Url(verifierA),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const tokensA = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: clientA.client_id,
+      code: codeA,
+      codeVerifier: verifierA,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    // Now authorize client B (different client, same user) — tokensA must remain valid.
+    const verifierB = 'verifier-b-0123456789abcdef0123456789'
+    const { code: codeB } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: clientB.client_id,
+      redirectUri: 'http://127.0.0.1:8766/cb',
+      codeChallenge: await sha256Base64Url(verifierB),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: clientB.client_id,
+      code: codeB,
+      codeVerifier: verifierB,
+      redirectUri: 'http://127.0.0.1:8766/cb',
+    })
+
+    const accessA = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthAccessTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokensA.access_token))
+        .unique(),
+    )
+    expect(accessA?.revoked).toBe(false)
+  })
+})
+
 describe('oauth metadata', () => {
   it('authServerMetadata reflects baseUrl across endpoints', async () => {
     const { authServerMetadata } = await import('../oauth/metadata')

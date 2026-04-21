@@ -85,6 +85,9 @@ http.route({
     const scope = url.searchParams.get('scope') ?? 'cccollab:topics.rw'
     const state = url.searchParams.get('state') ?? ''
 
+    // Pre-redirect-validation errors return a JSON 400 — we can't trust
+    // the supplied redirect_uri yet, so we can't bounce the user-agent to
+    // it (RFC 6749 §4.1.2.1, last paragraph).
     if (responseType !== 'code') return errorResponse(400, 'unsupported_response_type')
     if (!clientId || !redirectUri || !codeChallenge || codeChallengeMethod !== 'S256') {
       return errorResponse(
@@ -92,6 +95,26 @@ http.route({
         'invalid_request',
         'client_id, redirect_uri, code_challenge, code_challenge_method=S256 required',
       )
+    }
+
+    /**
+     * Redirect the user-agent back to the client's redirect_uri with
+     * OAuth-2.1 `error` / `error_description` / `state` query params.
+     * Per RFC 6749 §4.1.2.1, this is the required shape for reporting
+     * errors that occur AFTER the server has validated the redirect_uri
+     * (the "user-agent-based error" form). `state` is echoed back
+     * verbatim so the client can correlate with its original request.
+     */
+    const redirectError = (oauthError: string, description?: string): Response => {
+      try {
+        const target = new URL(redirectUri)
+        target.searchParams.set('error', oauthError)
+        if (description) target.searchParams.set('error_description', description)
+        if (state) target.searchParams.set('state', state)
+        return Response.redirect(target.toString(), 302)
+      } catch {
+        return errorResponse(400, oauthError, description)
+      }
     }
 
     let code: string
@@ -110,15 +133,7 @@ http.route({
         const errCode =
           typeof data === 'object' && data !== null && 'code' in data
             ? String((data as { code: unknown }).code)
-            : 'invalid_request'
-        if (errCode === 'UNAUTHENTICATED') {
-          return new Response(
-            '<html><body><h2>Sign in required</h2>' +
-              '<p>Authenticate with your cccollab account and retry the authorization request.</p>' +
-              '</body></html>',
-            { status: 401, headers: { 'Content-Type': 'text/html' } },
-          )
-        }
+            : 'SERVER_ERROR'
         const errMsg =
           typeof data === 'object' &&
           data !== null &&
@@ -126,9 +141,43 @@ http.route({
           typeof (data as { message: unknown }).message === 'string'
             ? (data as { message: string }).message
             : err.message
-        return errorResponse(400, errCode.toLowerCase(), errMsg)
+        if (errCode === 'UNAUTHENTICATED') {
+          // Bounce through Convex Auth's Google sign-in, then return here.
+          // `convex/redirect.ts`'s `isAllowedRedirect` accepts our own
+          // /authorize URL on the deployment origin, so the bounce-back is
+          // permitted. If `signIn` itself errors (e.g. Google OAuth not
+          // configured locally), fall through to the HTML fallback.
+          try {
+            const signInResult = (await ctx.runAction(api.auth.signIn, {
+              provider: 'google',
+              params: { redirectTo: req.url },
+            })) as { redirect?: string } | undefined
+            if (signInResult && typeof signInResult.redirect === 'string') {
+              return Response.redirect(signInResult.redirect, 302)
+            }
+          } catch {
+            /* fall through */
+          }
+          return new Response(
+            '<html><body><h2>Sign in required</h2>' +
+              '<p>Authenticate with your cccollab account and retry the authorization request.</p>' +
+              '</body></html>',
+            { status: 401, headers: { 'Content-Type': 'text/html' } },
+          )
+        }
+        // The redirect_uri + response_type have already been validated above,
+        // so from here we MUST report errors via redirect per RFC 6749 §4.1.2.1.
+        const oauthError =
+          errCode === 'UNKNOWN_CLIENT' || errCode === 'INVALID_REDIRECT_URI'
+            ? 'unauthorized_client'
+            : errCode === 'INVALID_SCOPE'
+              ? 'invalid_scope'
+              : errCode === 'INVALID_REQUEST'
+                ? 'invalid_request'
+                : 'server_error'
+        return redirectError(oauthError, errMsg)
       }
-      return errorResponse(500, 'server_error', err instanceof Error ? err.message : 'error')
+      return redirectError('server_error', err instanceof Error ? err.message : 'error')
     }
 
     const redirect = new URL(redirectUri)
@@ -156,6 +205,10 @@ http.route({
     const grantType = form.get('grant_type')
     const clientId = form.get('client_id') ?? ''
     const clientSecret = form.get('client_secret') ?? undefined
+    // Optional `client_name` is stored as part of the synthetic session
+    // created on first token exchange; falling through without it would
+    // produce "External MCP client (external/<id>)" for every AI client.
+    const clientName = form.get('client_name') ?? undefined
 
     if (grantType === 'authorization_code') {
       const code = form.get('code') ?? ''
@@ -165,6 +218,7 @@ http.route({
         const tokens = await ctx.runAction(api.oauth.token.exchangeAuthCode, {
           clientId,
           clientSecret,
+          clientName,
           code,
           codeVerifier,
           redirectUri,
