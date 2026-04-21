@@ -5,6 +5,9 @@
       "channels": {
         "cccollab-test": { "active": true }
       }
+    },
+    "flatout-dev": {
+      "url": "https://wonderful-narwhal-409.convex.cloud"
     }
   }
 }
