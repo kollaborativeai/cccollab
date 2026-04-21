@@ -35,20 +35,26 @@ export const storeAuthCode = internalMutation({
  * exchange in ONE Convex transaction:
  *
  *   1. validate the code (existence, not-yet-used, not-expired, clientId,
- *      redirectUri, PKCE challenge comparison)
- *   2. mark the code `used`
- *   3. revoke every non-revoked access + refresh token for (userId, clientId)
- *   4. get-or-create the synthetic session for (userId, clientId)
- *   5. insert the new access + refresh token rows
+ *      redirectUri, PKCE challenge comparison) — read-only
+ *   2. read the (userId, clientId) grant sentinel — still read-only, so
+ *      any throw here (e.g. a pathological two-rows case) rolls back
+ *      with the code still usable for a legitimate retry
+ *   3. mark the code `used`
+ *   4. write the grant sentinel (insert-or-patch) — forces concurrent
+ *      exchanges to conflict and retry
+ *   5. revoke every non-revoked access + refresh token for (userId, clientId)
+ *   6. get-or-create the synthetic session for (userId, clientId)
+ *   7. insert the new access + refresh token rows
  *
- * Steps 2–5 are in the same transaction as step 1. This is the ONLY shape
- * that closes the concurrent-double-authorize race. Earlier versions split
- * the token inserts out into separate mutations; under that shape two
- * parallel exchanges for different codes but the same (userId, clientId)
- * could each see an empty token table at revoke-time, neither revoke the
- * other, and both produce valid tokens. Keeping all writes in one
- * transaction + reading the table before inserting is what guarantees
- * Convex OCC will force a conflict-and-retry for the later flow.
+ * Steps 3–7 are in the same transaction as steps 1–2. This is the ONLY
+ * shape that closes the concurrent-double-authorize race. Earlier
+ * versions split the token inserts out into separate mutations; under
+ * that shape two parallel exchanges for different codes but the same
+ * (userId, clientId) could each see an empty token table at revoke-time,
+ * neither revoke the other, and both produce valid tokens. Keeping all
+ * writes in one transaction + reading+writing a shared grant sentinel
+ * is what guarantees Convex OCC will force a conflict-and-retry for the
+ * later flow.
  *
  * **Why `expectedChallenge` is pre-computed by the caller**: `crypto.subtle.digest`
  * is NOT available in the Convex mutation isolate. Only the action runtime
@@ -116,23 +122,35 @@ export const exchangeCodeForTokens = internalMutation({
       throw new ConvexError({ code: 'PKCE_MISMATCH', message: 'code_verifier does not match stored challenge' })
     }
 
-    // 2. Consume the code.
-    await ctx.db.patch(row._id, { used: true })
-
-    // 3. Read-and-patch the (userId, clientId) grant sentinel row. This
-    //    is the ONLY thing that forces real OCC on concurrent exchanges:
-    //    Convex OCC is document-keyed, not range-keyed, so reading an
-    //    empty tokens-by-(userId, clientId) index adds nothing to the
-    //    read set and two parallel flows won't conflict on that alone.
-    //    Reading and writing a shared document per (userId, clientId)
-    //    makes both concurrent mutations register the same document ID
-    //    in their read+write sets; the later mutation's commit detects
-    //    the conflict, retries, and observes the earlier flow's tokens.
-    const grantNow = nowMs()
+    // 2. Read the (userId, clientId) grant sentinel row BEFORE we mutate
+    //    anything. Two reasons for this order:
+    //
+    //    (a) OCC: the sentinel read is what puts the grant document (or
+    //        the empty index range, for the first-time exchange) into
+    //        this mutation's read set. Convex then detects the conflict
+    //        when any concurrent flow writes to the same grant row or
+    //        the same index range, forces a retry, and the retry
+    //        observes the earlier flow's tokens in step 4 below.
+    //
+    //    (b) Fail-safe: `.unique()` can throw (e.g., if a past bug ever
+    //        produced two grant rows for the same (userId, clientId)).
+    //        Reading first — before the irreversible `used: true` patch
+    //        below — means a throw at this step cleanly rolls back the
+    //        whole transaction and the auth code stays usable for a
+    //        legitimate retry. Reading last would burn the code on any
+    //        sentinel failure.
     const existingGrant = await ctx.db
       .query('oauthGrants')
       .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
       .unique()
+
+    // 3. Consume the code. From here on, every step is a write.
+    await ctx.db.patch(row._id, { used: true })
+
+    // 4. Write the grant sentinel so any concurrent exchange for the
+    //    same (userId, clientId) conflicts on this row (or on the empty
+    //    index range, for first-time exchanges) and retries.
+    const grantNow = nowMs()
     if (existingGrant) {
       await ctx.db.patch(existingGrant._id, {
         version: existingGrant.version + 1,
@@ -147,8 +165,8 @@ export const exchangeCodeForTokens = internalMutation({
       })
     }
 
-    // 4. Revoke existing tokens for (userId, clientId). After the OCC
-    //    retry forced by step 3, the later flow will observe the earlier
+    // 5. Revoke existing tokens for (userId, clientId). After an OCC
+    //    retry forced by step 4, the later flow will observe the earlier
     //    flow's rows and patch them revoked here.
     let accessRevoked = 0
     const accessRows = await ctx.db
@@ -171,7 +189,7 @@ export const exchangeCodeForTokens = internalMutation({
       refreshRevoked++
     }
 
-    // 5. Get-or-create the synthetic external session for (userId, clientId).
+    // 6. Get-or-create the synthetic external session for (userId, clientId).
     //    Stable naming means re-authorize reuses the session; history
     //    persists across rotations. This is intentional for the CCC-22
     //    MVP — a future /revoke endpoint would need to decide whether to
@@ -197,7 +215,7 @@ export const exchangeCodeForTokens = internalMutation({
       })
     }
 
-    // 6. Issue the new access + refresh token rows. Both inserts happen in
+    // 7. Issue the new access + refresh token rows. Both inserts happen in
     //    THIS transaction so a crash / error between them is impossible.
     await ctx.db.insert('oauthAccessTokens', {
       token: args.accessToken,

@@ -538,6 +538,136 @@ describe('oauth token exchange — validation order + re-auth hygiene', () => {
     expect(validCount).toBe(1)
   })
 
+  it('exchange writes an oauthGrants sentinel row (userId, clientId, version=1)', async () => {
+    // The grant-sentinel row is what forces Convex OCC to conflict on
+    // concurrent exchanges for the same (userId, clientId). If this
+    // row isn't being written, the race defence isn't really in place.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-grant-0123456789abcdef0123456789'
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: await sha256Base64Url(verifier),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+
+    const grants = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthGrants')
+        .withIndex('by_userId_and_clientId', (q) => q.eq('userId', userId).eq('clientId', client.client_id))
+        .collect(),
+    )
+    expect(grants.length).toBe(1)
+    expect(grants[0]!.version).toBe(1)
+    expect(grants[0]!.lastRotatedAt).toBeGreaterThan(0)
+  })
+
+  it('re-authorize bumps the oauthGrants version instead of inserting a second row', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const exchangeOnce = async (seed: string) => {
+      const verifier = `verifier-${seed}-0123456789abcdef0123456789`
+      const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: await sha256Base64Url(verifier),
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      })
+      await t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code,
+        codeVerifier: verifier,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      })
+    }
+    await exchangeOnce('one')
+    await exchangeOnce('two')
+    await exchangeOnce('three')
+
+    const grants = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthGrants')
+        .withIndex('by_userId_and_clientId', (q) => q.eq('userId', userId).eq('clientId', client.client_id))
+        .collect(),
+    )
+    expect(grants.length).toBe(1)
+    expect(grants[0]!.version).toBe(3)
+  })
+
+  it('refresh bumps the oauthGrants version', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-refresh-0123456789abcdef0123456789'
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: await sha256Base64Url(verifier),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    await t.action(api.oauth.token.refreshAccessToken, {
+      clientId: client.client_id,
+      refreshToken: tokens.refresh_token,
+    })
+
+    const grants = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthGrants')
+        .withIndex('by_userId_and_clientId', (q) => q.eq('userId', userId).eq('clientId', client.client_id))
+        .collect(),
+    )
+    expect(grants.length).toBe(1)
+    expect(grants[0]!.version).toBe(2)
+  })
+
+  it('wrong code_verifier does NOT create a grant row (transaction rollback)', async () => {
+    // If validation throws, the grant-sentinel write MUST roll back too.
+    // Otherwise a wrong-verifier attempt would pollute the grant table
+    // and make telemetry on "last rotated" lie.
+    const t = convexTest(schema, modules)
+    const { clientId, code } = await freshCode(t)
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId,
+        code,
+        codeVerifier: 'wrong-verifier',
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/pkce|INVALID_GRANT/i)
+    const grants = await t.run(async (ctx) => ctx.db.query('oauthGrants').collect())
+    expect(grants.length).toBe(0)
+  })
+
   it('re-authorize leaves tokens for a DIFFERENT client of the same user alone', async () => {
     const t = convexTest(schema, modules)
     const userId = await seedUser(t, 'alice@flatout.solutions')
