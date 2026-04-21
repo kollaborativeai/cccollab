@@ -158,10 +158,21 @@ http.route({
           } catch {
             /* fall through */
           }
+          // Preserve the original /authorize URL (which carries the
+          // client's `state` param for CSRF correlation) as a "Try
+          // again" link so the user can resume after signing in through
+          // some other path. Escape the URL for safe embedding in HTML.
+          const escapedUrl = req.url
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#x27;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
           return new Response(
-            '<html><body><h2>Sign in required</h2>' +
-              '<p>Authenticate with your cccollab account and retry the authorization request.</p>' +
-              '</body></html>',
+            `<html><body><h2>Sign in required</h2>` +
+              `<p>Authenticate with your cccollab account, then retry your authorization request.</p>` +
+              `<p><a href="${escapedUrl}">Retry this authorization</a></p>` +
+              `</body></html>`,
             { status: 401, headers: { 'Content-Type': 'text/html' } },
           )
         }

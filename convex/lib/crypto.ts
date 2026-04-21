@@ -1,9 +1,16 @@
 /**
  * Small crypto helpers used by the OAuth 2.1 authorization server and
- * MCP bearer-token validation. Everything here uses the Web Crypto API
- * (`crypto.getRandomValues`, `crypto.subtle.digest`) which is available
- * in the Convex runtime, Node >= 16, and Edge runtimes — the same three
- * surfaces our convex-test + production deploy + CI have to run on.
+ * MCP bearer-token validation.
+ *
+ * Runtime note: `crypto.getRandomValues` is available in both Convex
+ * mutations and actions. `crypto.subtle.digest` is ONLY available in
+ * actions, NOT mutations — the mutation isolate doesn't expose the
+ * SubtleCrypto API. So `sha256Base64Url` callers must run in an action
+ * context, and mutations that need to verify PKCE receive the
+ * pre-computed hash as a string (see `exchangeCodeForTokens`).
+ *
+ * `timingSafeEqual` is used by both mutations and actions and operates on
+ * ASCII-only strings in practice (base64url-encoded hashes + challenges).
  */
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -13,32 +20,28 @@ function toBase64Url(bytes: Uint8Array): string {
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-/** 256-bit random token, encoded as url-safe base64 (43 chars for 32 bytes). */
+/** Random token of `byteLength` random bytes, encoded as url-safe base64.
+ *  Default 32 bytes = 256 bits of entropy = 43 base64url chars.
+ *  Callable from both actions and mutations. */
 export function randomToken(byteLength = 32): string {
   const bytes = new Uint8Array(byteLength)
   crypto.getRandomValues(bytes)
   return toBase64Url(bytes)
 }
 
-/** SHA-256 of `input` (UTF-8), encoded as url-safe base64. */
+/** SHA-256 of `input` (UTF-8), encoded as url-safe base64.
+ *  **Must be called from an action context** — `crypto.subtle` is not
+ *  available in the Convex mutation isolate. */
 export async function sha256Base64Url(input: string): Promise<string> {
   const data = new TextEncoder().encode(input)
   const digest = await crypto.subtle.digest('SHA-256', data)
   return toBase64Url(new Uint8Array(digest))
 }
 
-/**
- * PKCE S256 verifier check. Returns true iff
- * `base64url(sha256(verifier)) === challenge`. Comparison is constant-time
- * across both equal and unequal lengths to avoid leaking the stored
- * challenge's length via timing.
- */
-export async function verifyPkceS256(args: { verifier: string; challenge: string }): Promise<boolean> {
-  const expected = await sha256Base64Url(args.verifier)
-  return timingSafeEqual(expected, args.challenge)
-}
-
-/** Constant-time string equality; iterates max length, XORs lengths. */
+/** Constant-time string equality over ASCII strings. Iterates `max(|a|,|b|)`
+ *  and XORs lengths in so both the length-equal and length-unequal paths
+ *  take the same time. Used for PKCE challenge and client-secret hash
+ *  comparisons — both are base64url-encoded so ASCII-only by construction. */
 export function timingSafeEqual(a: string, b: string): boolean {
   const len = Math.max(a.length, b.length)
   let diff = a.length ^ b.length

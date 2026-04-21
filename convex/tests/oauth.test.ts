@@ -457,6 +457,78 @@ describe('oauth token exchange — validation order + re-auth hygiene', () => {
     expect(refresh?.revoked).toBe(true)
   })
 
+  it('parallel exchanges for different codes / same (userId, clientId) do not both produce valid tokens', async () => {
+    // Regression guard for the concurrent-authorize race: before the
+    // atomic-mutation fix, two parallel exchangeAuthCode calls (each
+    // consuming its own code for the same user + client) could each see
+    // an empty oauthAccessTokens index at revoke-time and both emit
+    // valid tokens. The fix keeps consume + revoke + insert inside one
+    // Convex transaction so OCC forces the second flow to conflict and
+    // retry — on retry, it sees the first flow's newly-inserted tokens
+    // and revokes them as part of its own revoke step.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    // Mint two auth codes concurrently.
+    const verifier1 = 'verifier-aaa-0123456789abcdef0123456789'
+    const verifier2 = 'verifier-bbb-0123456789abcdef0123456789'
+    const [auth1, auth2] = await Promise.all([
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: await sha256Base64Url(verifier1),
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: await sha256Base64Url(verifier2),
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+    ])
+
+    // Exchange both codes concurrently.
+    const [tokens1, tokens2] = await Promise.all([
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code: auth1.code,
+        codeVerifier: verifier1,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code: auth2.code,
+        codeVerifier: verifier2,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ])
+
+    // The invariant: at most one of the two emitted access tokens is
+    // still valid after both flows finish. The later-committing mutation
+    // observes the earlier's tokens during its revoke step and marks
+    // them revoked.
+    const access1 = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthAccessTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokens1.access_token))
+        .unique(),
+    )
+    const access2 = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthAccessTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokens2.access_token))
+        .unique(),
+    )
+    const validCount = [access1, access2].filter((r) => r && !r.revoked).length
+    expect(validCount).toBe(1)
+  })
+
   it('re-authorize leaves tokens for a DIFFERENT client of the same user alone', async () => {
     const t = convexTest(schema, modules)
     const userId = await seedUser(t, 'alice@flatout.solutions')

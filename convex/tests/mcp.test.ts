@@ -382,6 +382,77 @@ describe('/mcp — tools end-to-end', () => {
 })
 
 describe('/token HTTP path', () => {
+  it('forwards code_verifier from the form body — a typo here would silently fail PKCE for every client', async () => {
+    // Regression guard: http.ts reads `code_verifier` via form.get('code_verifier')
+    // with a `?? ''` fallback. A typo in the form key name would produce an
+    // empty verifier, which then hashes to the SHA-256 of "" and never matches
+    // any real challenge → every client's PKCE silently fails. This test
+    // drives the full HTTP path with a real verifier.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Test AI',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-0123456789abcdef0123456789abcdef'
+    const challenge = await sha256Base64Url(verifier)
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        redirect_uri: 'http://127.0.0.1:8765/cb',
+      }).toString(),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { access_token: string }
+    expect(body.access_token.length).toBeGreaterThan(20)
+  })
+
+  it('rejects /token with a missing code_verifier via invalid_grant (PKCE fails)', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Test AI',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-0123456789abcdef0123456789abcdef'
+    const challenge = await sha256Base64Url(verifier)
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    // Omit code_verifier entirely.
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: client.client_id,
+        code,
+        redirect_uri: 'http://127.0.0.1:8765/cb',
+      }).toString(),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('invalid_grant')
+  })
+
   it('forwards client_name from the form body so the synthetic session is named after the AI client', async () => {
     const t = convexTest(schema, modules)
     const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')

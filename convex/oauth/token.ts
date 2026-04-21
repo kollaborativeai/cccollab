@@ -66,53 +66,41 @@ export const exchangeAuthCode = action({
   handler: async (ctx, args): Promise<TokenResponse> => {
     await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
 
-    // PKCE hash is computed in the action: `crypto.subtle.digest` is not
-    // available in the Convex mutation isolate, only in the action
-    // runtime. We pre-hash the verifier here and hand the mutation a
-    // string to constant-time compare against the stored challenge.
+    // PKCE hash + random token generation happen in the action:
+    // `crypto.subtle.digest` is not available in the Convex mutation
+    // isolate; the action runtime is the only one with full Web Crypto.
+    // `crypto.getRandomValues` IS available in mutations, but the action
+    // holds the tokens to return to the HTTP client anyway, so we
+    // generate them here and hand them to the mutation as opaque
+    // strings. That keeps the mutation free of any CSPRNG dependency.
     const expectedChallenge = await sha256Base64Url(args.codeVerifier)
+    const accessToken = randomToken(32)
+    const refreshToken = randomToken(32)
 
     // ONE atomic mutation does: validate + consume + revoke prior tokens
-    // for (userId, clientId) + get-or-create synthetic session. Running
-    // all four in a single Convex transaction closes the concurrent-
-    // authorize race that would otherwise let two parallel flows leave
-    // overlapping valid token pairs behind.
-    //
-    // On any validation failure (INVALID_AUTH_CODE, CLIENT_ID_MISMATCH,
-    // REDIRECT_URI_MISMATCH, PKCE_MISMATCH), the mutation throws before
-    // patching `used: true`, so the caller can retry with the correct
-    // parameters. The HTTP layer normalises all of these to OAuth
-    // `invalid_grant` on the wire per RFC 6749 §5.2.
-    const prep = await ctx.runMutation(internal.oauth.tokens.consumeCodeAndPrepareSession, {
+    // for (userId, clientId) + get-or-create synthetic session + insert
+    // the two new token rows. Keeping every read + write in a single
+    // Convex transaction is what guarantees OCC serialises two parallel
+    // authorize flows for the same (userId, clientId) — the later flow's
+    // revoke step observes the earlier flow's newly-inserted tokens and
+    // revokes them, or the two conflict on the shared index and the
+    // later retries with the earlier's writes visible.
+    const result = await ctx.runMutation(internal.oauth.tokens.exchangeCodeForTokens, {
       code: args.code,
       clientId: args.clientId,
       clientName: args.clientName ?? 'External MCP client',
       redirectUri: args.redirectUri,
       expectedChallenge,
+      accessToken,
+      refreshToken,
     })
 
-    const accessToken = randomToken(32)
-    const refreshToken = randomToken(32)
-    await ctx.runMutation(internal.oauth.tokens.issueAccessToken, {
-      token: accessToken,
-      clientId: prep.code.clientId,
-      userId: prep.code.userId,
-      sessionId: prep.sessionId,
-      scope: prep.code.scope,
-    })
-    await ctx.runMutation(internal.oauth.tokens.issueRefreshToken, {
-      token: refreshToken,
-      clientId: prep.code.clientId,
-      userId: prep.code.userId,
-      sessionId: prep.sessionId,
-      scope: prep.code.scope,
-    })
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
       token_type: 'Bearer',
       expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-      scope: prep.code.scope,
+      scope: result.scope,
     }
   },
 })
@@ -125,38 +113,21 @@ export const refreshAccessToken = action({
   },
   handler: async (ctx, args): Promise<TokenResponse> => {
     await assertClientAuth(ctx, args.clientId, args.clientSecret ?? null)
-    const row = await ctx.runMutation(internal.oauth.tokens.consumeRefreshToken, {
-      token: args.refreshToken,
-    })
-    if (!row) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'invalid or expired refresh_token' })
-    }
-    if (row.clientId !== args.clientId) {
-      throw new ConvexError({ code: 'INVALID_GRANT', message: 'client_id mismatch' })
-    }
-
     const accessToken = randomToken(32)
-    const refreshToken = randomToken(32)
-    await ctx.runMutation(internal.oauth.tokens.issueAccessToken, {
-      token: accessToken,
-      clientId: row.clientId,
-      userId: row.userId,
-      sessionId: row.sessionId,
-      scope: row.scope,
-    })
-    await ctx.runMutation(internal.oauth.tokens.issueRefreshToken, {
-      token: refreshToken,
-      clientId: row.clientId,
-      userId: row.userId,
-      sessionId: row.sessionId,
-      scope: row.scope,
+    const newRefreshToken = randomToken(32)
+    // Atomic: consume old refresh token + insert new pair in one tx.
+    const result = await ctx.runMutation(internal.oauth.tokens.rotateRefreshToken, {
+      oldRefreshToken: args.refreshToken,
+      clientId: args.clientId,
+      accessToken,
+      refreshToken: newRefreshToken,
     })
     return {
       access_token: accessToken,
-      refresh_token: refreshToken,
+      refresh_token: newRefreshToken,
       token_type: 'Bearer',
       expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-      scope: row.scope,
+      scope: result.scope,
     }
   },
 })
