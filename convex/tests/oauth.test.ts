@@ -1,0 +1,355 @@
+import { describe, it, expect } from 'vitest'
+import { convexTest } from 'convex-test'
+
+import { api } from '../_generated/api'
+import schema from '../schema'
+import { sha256Base64Url } from '../lib/crypto'
+import { identityFor, seedUser } from './helpers'
+
+const modules = import.meta.glob('../**/*.ts')
+
+describe('oauth.register', () => {
+  it('registers a public client and returns client_id', async () => {
+    const t = convexTest(schema, modules)
+    const result = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/callback'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    expect(result.client_id).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(result.client_name).toBe('Claude.ai')
+    expect(result.redirect_uris).toEqual(['http://127.0.0.1:8765/callback'])
+    expect(result.token_endpoint_auth_method).toBe('none')
+    expect(result.client_secret).toBeUndefined()
+  })
+
+  it('registers a confidential client and returns client_secret (once)', async () => {
+    const t = convexTest(schema, modules)
+    const result = await t.mutation(api.oauth.register.register, {
+      clientName: 'Confidential AI',
+      redirectUris: ['https://app.example.com/cb'],
+      tokenEndpointAuthMethod: 'client_secret_post',
+    })
+    expect(result.client_secret).toBeDefined()
+    expect(result.client_secret!.length).toBeGreaterThan(20)
+  })
+
+  it('rejects empty redirect_uris list', async () => {
+    const t = convexTest(schema, modules)
+    await expect(
+      t.mutation(api.oauth.register.register, {
+        clientName: 'x',
+        redirectUris: [],
+        tokenEndpointAuthMethod: 'none',
+      }),
+    ).rejects.toThrow(/INVALID_CLIENT_METADATA|redirect_uris/)
+  })
+
+  it('rejects non-https non-loopback redirect_uri', async () => {
+    const t = convexTest(schema, modules)
+    await expect(
+      t.mutation(api.oauth.register.register, {
+        clientName: 'x',
+        redirectUris: ['http://evil.example.com/cb'],
+        tokenEndpointAuthMethod: 'none',
+      }),
+    ).rejects.toThrow(/https|127\.0\.0\.1/)
+  })
+
+  it('rejects redirect_uri with a userinfo component', async () => {
+    const t = convexTest(schema, modules)
+    await expect(
+      t.mutation(api.oauth.register.register, {
+        clientName: 'x',
+        redirectUris: ['http://attacker.com@127.0.0.1:1234/cb'],
+        tokenEndpointAuthMethod: 'none',
+      }),
+    ).rejects.toThrow(/userinfo/)
+  })
+
+  it('rejects localhost in redirect_uri (explicit 127.0.0.1 only)', async () => {
+    const t = convexTest(schema, modules)
+    await expect(
+      t.mutation(api.oauth.register.register, {
+        clientName: 'x',
+        redirectUris: ['http://localhost:8765/cb'],
+        tokenEndpointAuthMethod: 'none',
+      }),
+    ).rejects.toThrow(/127\.0\.0\.1/)
+  })
+})
+
+describe('oauth.authorize + token', () => {
+  async function setupClient(t: ReturnType<typeof convexTest>, method: 'none' | 'client_secret_post' = 'none') {
+    return await t.mutation(api.oauth.register.register, {
+      clientName: 'Test AI',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: method,
+    })
+  }
+
+  async function issueCode(
+    t: ReturnType<typeof convexTest>,
+    userId: Awaited<ReturnType<typeof seedUser>>,
+    clientId: string,
+    verifier: string,
+  ) {
+    const challenge = await sha256Base64Url(verifier)
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    return code
+  }
+
+  it('full flow: register -> authorize -> exchange -> refresh', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t)
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    expect(tokens.token_type).toBe('Bearer')
+    expect(tokens.access_token.length).toBeGreaterThan(20)
+    expect(tokens.refresh_token.length).toBeGreaterThan(20)
+    expect(tokens.scope).toBe('cccollab:topics.rw')
+
+    const refreshed = await t.action(api.oauth.token.refreshAccessToken, {
+      clientId: client.client_id,
+      refreshToken: tokens.refresh_token,
+    })
+    expect(refreshed.access_token).not.toBe(tokens.access_token)
+    expect(refreshed.refresh_token).not.toBe(tokens.refresh_token)
+
+    // Original refresh token is now revoked
+    await expect(
+      t.action(api.oauth.token.refreshAccessToken, {
+        clientId: client.client_id,
+        refreshToken: tokens.refresh_token,
+      }),
+    ).rejects.toThrow(/revoked|invalid|expired/i)
+  })
+
+  it('authorize requires an authenticated user', async () => {
+    const t = convexTest(schema, modules)
+    const client = await setupClient(t)
+    // Not calling `withIdentity` — the mutation should reject.
+    await expect(
+      t.mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: 'challenge',
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+    ).rejects.toThrow(/UNAUTHENTICATED/)
+  })
+
+  it('authorize rejects unknown client_id', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    await expect(
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: 'ghost',
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: 'x',
+        codeChallengeMethod: 'S256',
+        scope: 'cccollab:topics.rw',
+      }),
+    ).rejects.toThrow(/UNKNOWN_CLIENT/)
+  })
+
+  it('authorize rejects unknown scope', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t)
+    await expect(
+      t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+        clientId: client.client_id,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+        codeChallenge: 'x',
+        codeChallengeMethod: 'S256',
+        scope: 'admin',
+      }),
+    ).rejects.toThrow(/INVALID_SCOPE|scope/)
+  })
+
+  it('token exchange rejects mismatched PKCE verifier', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t)
+    const code = await issueCode(t, userId, client.client_id, 'right-verifier')
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code,
+        codeVerifier: 'wrong-verifier',
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/pkce|verifier|INVALID_GRANT/i)
+  })
+
+  it('token exchange rejects code being used twice', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t)
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code,
+        codeVerifier: verifier,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/invalid|expired|INVALID_GRANT/i)
+  })
+
+  it('confidential client rejects missing client_secret', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t, 'client_secret_post')
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        code,
+        codeVerifier: verifier,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/client_secret|INVALID_CLIENT/)
+  })
+
+  it('confidential client rejects wrong client_secret', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t, 'client_secret_post')
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    await expect(
+      t.action(api.oauth.token.exchangeAuthCode, {
+        clientId: client.client_id,
+        clientSecret: 'wrong-secret-value',
+        code,
+        codeVerifier: verifier,
+        redirectUri: 'http://127.0.0.1:8765/cb',
+      }),
+    ).rejects.toThrow(/client_secret|INVALID_CLIENT/)
+  })
+
+  it('confidential client accepts correct client_secret', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await setupClient(t, 'client_secret_post')
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      clientSecret: client.client_secret,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    expect(tokens.access_token.length).toBeGreaterThan(20)
+  })
+
+  it('token exchange creates a synthetic session bound to the user', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await setupClient(t)
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      clientName: 'Claude.ai',
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    const sessions = await t.run(async (ctx) =>
+      ctx.db
+        .query('sessions')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+    )
+    expect(sessions.length).toBe(1)
+    expect(sessions[0]!.sessionName).toContain('Claude.ai')
+    expect(sessions[0]!.sessionName).toContain('external')
+  })
+
+  it('refresh reuses the same synthetic session across rotations', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions', 'Alice')
+    const client = await setupClient(t)
+    const verifier = 'verifier-abcdef0123456789abcdef0123456789'
+    const code = await issueCode(t, userId, client.client_id, verifier)
+    const tokens = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      clientName: 'Claude.ai',
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+    await t.action(api.oauth.token.refreshAccessToken, {
+      clientId: client.client_id,
+      refreshToken: tokens.refresh_token,
+    })
+    const sessions = await t.run(async (ctx) =>
+      ctx.db
+        .query('sessions')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+    )
+    expect(sessions.length).toBe(1)
+  })
+
+  it('token endpoint rejects non-form-encoded Content-Type (via HTTP route)', async () => {
+    // Smoke-test the content-type check by exercising the HTTP action directly.
+    const t = convexTest(schema, modules)
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'authorization_code' }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string; error_description?: string }
+    expect(body.error).toBe('invalid_request')
+  })
+})
+
+describe('oauth metadata', () => {
+  it('authServerMetadata reflects baseUrl across endpoints', async () => {
+    const { authServerMetadata } = await import('../oauth/metadata')
+    const m = authServerMetadata('https://example.com')
+    expect(m.issuer).toBe('https://example.com')
+    expect(m.authorization_endpoint).toBe('https://example.com/authorize')
+    expect(m.token_endpoint).toBe('https://example.com/token')
+    expect(m.registration_endpoint).toBe('https://example.com/register')
+    expect(m.code_challenge_methods_supported).toEqual(['S256'])
+    expect(m.scopes_supported).toContain('cccollab:topics.rw')
+  })
+
+  it('protectedResourceMetadata points at /mcp', async () => {
+    const { protectedResourceMetadata } = await import('../oauth/metadata')
+    const m = protectedResourceMetadata('https://example.com')
+    expect(m.resource).toBe('https://example.com/mcp')
+    expect(m.authorization_servers).toEqual(['https://example.com'])
+    expect(m.bearer_methods_supported).toEqual(['header'])
+  })
+})

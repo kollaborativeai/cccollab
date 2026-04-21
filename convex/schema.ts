@@ -23,6 +23,10 @@ import { defineSchema } from 'convex/server'
 import { channelMembersTable } from './channelMembers/schema'
 import { channelsTable } from './channels/schema'
 import { messagesTable } from './messages/schema'
+import { oauthAccessTokensTable } from './oauthAccessTokens/schema'
+import { oauthAuthCodesTable } from './oauthAuthCodes/schema'
+import { oauthClientsTable } from './oauthClients/schema'
+import { oauthRefreshTokensTable } from './oauthRefreshTokens/schema'
 import { sessionChannelsTable } from './sessionChannels/schema'
 import { sessionsTable } from './sessions/schema'
 import { topicMembersTable } from './topicMembers/schema'
@@ -41,4 +45,10 @@ export default defineSchema({
   topics: topicsTable,
   topicMembers: topicMembersTable,
   messages: messagesTable,
+
+  // CCC-22 OAuth 2.1 authorization-server tables (external AI clients).
+  oauthClients: oauthClientsTable,
+  oauthAuthCodes: oauthAuthCodesTable,
+  oauthAccessTokens: oauthAccessTokensTable,
+  oauthRefreshTokens: oauthRefreshTokensTable,
 })
