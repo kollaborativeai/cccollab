@@ -21,20 +21,16 @@ import type { Transport } from './index.js'
  * without standing up a real Convex client.
  */
 export interface AttachCtx {
-  /** cwd at the time of the attach. Threaded through so the hot-attach
-   *  path can re-run `resolveConfig` against the same base. */
-  cwd: string
-  /** Environment variables used when re-resolving the config. Tests pass
-   *  `{}`; production passes `process.env`. */
-  env: NodeJS.ProcessEnv
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
   messageBus: MessageBus
-  /** Mutable list of DM-subscription unsubscribe callbacks. Shared with
-   *  `server.ts`'s shutdown hook so every hot-attached transport is
-   *  torn down on SIGTERM / stdin close / etc. */
-  remoteUnsubscribes: Array<() => void>
+  /** Mutable map of DM-subscription unsubscribe callbacks, keyed by
+   *  location name. `server.ts`'s shutdown hook drains the whole map on
+   *  SIGTERM / stdin close; `attachLocation`'s replace-in-place path
+   *  looks up the old entry by location name and invokes it before
+   *  swapping the new transport in. One subscription per location. */
+  remoteUnsubscribes: Map<string, () => void>
   /** Snapshot view of the resolved config at the time the context was
    *  built. `server.ts` passes this from its `resolveConfig` result;
    *  the hot-attach path re-resolves before calling. */
@@ -138,10 +134,31 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   }
 
   // Step 4 + 5: if something else holds this name in the router, tear
-  // it down first. Shutdown of the old transport is best-effort; its
-  // deregisterSession should never throw (per the Transport contract).
+  // it down first. Order matters:
+  //   (a) invoke the prior transport's stored DM unsubscribe - this
+  //       closes out the reactive subscription and releases the
+  //       MessageBus callback reference.
+  //   (b) call its `deregisterSession` so the backend stops attributing
+  //       messages to a stale session id.
+  //   (c) call its `shutdown()` so the underlying ConvexClient websocket
+  //       is closed and any in-flight callbacks stop firing.
+  //
+  // Each step is best-effort; an error in one must not block the next
+  // because the overall goal is "no live references to the prior
+  // transport survive this function."
   const prior = ctx.router.unregister(name)
   if (prior) {
+    const priorUnsub = ctx.remoteUnsubscribes.get(name)
+    if (priorUnsub !== undefined) {
+      ctx.remoteUnsubscribes.delete(name)
+      try {
+        priorUnsub()
+      } catch (err) {
+        logError(
+          `Prior transport DM unsubscribe failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
     if (ctx.session.hasName()) {
       try {
         await prior.deregisterSession({ sessionName: ctx.session.displayName })
@@ -149,21 +166,25 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
         // best-effort teardown; continue
       }
     }
-    // Nothing else on the prior transport to clean up here - the DM
-    // unsubscribes live in `remoteUnsubscribes` and are invoked at
-    // process shutdown. We can't cheaply identify which slot belonged
-    // to the prior transport; leaving them in place is safe because the
-    // client underneath is now idle.
+    if (typeof prior.shutdown === 'function') {
+      try {
+        await prior.shutdown()
+      } catch (err) {
+        logError(`Prior transport shutdown failed for "${name}": ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
   }
   ctx.router.register(transport)
 
-  // Step 6: DM subscription, if this transport supports one.
+  // Step 6: DM subscription, if this transport supports one. The map is
+  // keyed by location name so a subsequent re-attach can find and tear
+  // down this subscription cleanly.
   if (hasDirectMessageSubscription(transport)) {
     try {
       const unsub = transport.subscribeDirectMessages((msg) => {
         void ctx.messageBus.push(msg, transport.source)
       })
-      ctx.remoteUnsubscribes.push(unsub)
+      ctx.remoteUnsubscribes.set(name, unsub)
     } catch (err) {
       // A transport that advertises the subscription method but throws
       // on the first call is unusual; log and continue so the rest of

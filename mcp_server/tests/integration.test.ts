@@ -306,4 +306,58 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       B.listener.stop()
     }
   }, 15_000)
+
+  /**
+   * Two-session acceptance-criterion scenario expressed as an
+   * integration test: two independent MCP-tool-surface harnesses share
+   * one broker, go through introduce -> join_channel -> start_topic ->
+   * join_topic -> send_message_to_topic, and the receiving session
+   * observes the message via its MessageBus stub. This is the
+   * equivalent of running `./test/start.sh left` and `./test/start.sh
+   * right` by hand: both sessions coordinate through the same broker
+   * and a topic message sent by one is picked up by the other.
+   */
+  it('two sessions share a topic and exchange a message end-to-end', async () => {
+    const LEFT = await makeSession('two-session-left', brokerPort)
+    const RIGHT = await makeSession('two-session-right', brokerPort)
+    try {
+      // Both join the same channel so the topic is reachable from both
+      // sides. The broker scopes topic visibility by channel membership.
+      await handleChannelTool('join_channel', { name: 'cccollab-test' }, LEFT.channelDeps)
+      await handleChannelTool('join_channel', { name: 'cccollab-test' }, RIGHT.channelDeps)
+
+      // LEFT creates the topic, RIGHT joins it by name.
+      const started = JSON.parse(
+        await handleTopicTool('start_topic', { topic: 'two-session-topic', channel: 'cccollab-test' }, LEFT.topicDeps),
+      )
+      const topicId = started.id as string
+      expect(started.name).toBe('two-session-topic')
+
+      await handleTopicTool('join_topic', { topic: 'two-session-topic' }, RIGHT.topicDeps)
+
+      LEFT.received.length = 0
+      RIGHT.received.length = 0
+
+      // LEFT sends; RIGHT must observe the message via the broker's
+      // topic fan-out and the SSE listener that feeds MessageBus.
+      await handleTopicTool(
+        'send_message_to_topic',
+        { text: 'hello from left', topic: 'two-session-topic' },
+        LEFT.topicDeps,
+      )
+
+      await waitUntil(
+        () => (RIGHT.received.some((m) => m.text === 'hello from left' && m.threadTs === topicId) ? true : null),
+        3000,
+      )
+      // Exactly the message we sent, attributed to the correct topic.
+      const match = RIGHT.received.find((m) => m.text === 'hello from left')
+      expect(match).toBeDefined()
+      expect(match?.threadTs).toBe(topicId)
+      expect(match?.channel).toBe('cccollab-test')
+    } finally {
+      LEFT.listener.stop()
+      RIGHT.listener.stop()
+    }
+  }, 15_000)
 })

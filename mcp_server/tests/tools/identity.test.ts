@@ -106,6 +106,14 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.error).toContain('introduce')
       })
+
+      it('includes the locations map with the local transport enabled by default', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations).toEqual({ local: { enabled: true } })
+      })
     })
 
     describe('authenticate', () => {

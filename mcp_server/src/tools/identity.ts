@@ -23,10 +23,13 @@ export interface IdentityToolDeps {
    *  exercise the hot-attach path can continue to construct deps
    *  without a bus. */
   messageBus?: MessageBus
-  /** Shared list of unsubscribe callbacks. The hot-attach path pushes
-   *  the new transport's DM unsubscribe onto this array so `server.ts`'s
-   *  shutdown hook runs it alongside the ones wired at startup. */
-  remoteUnsubscribes?: Array<() => void>
+  /** Shared map of DM-unsubscribe callbacks keyed by location name. The
+   *  hot-attach path stores the new transport's DM unsubscribe under
+   *  its location name so `server.ts`'s shutdown hook runs it alongside
+   *  the ones wired at startup; a subsequent re-attach (force
+   *  re-authenticate) can look the entry up by name and invoke it
+   *  before swapping in the replacement transport. */
+  remoteUnsubscribes?: Map<string, () => void>
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -94,9 +97,10 @@ export async function handleIdentityTool(
         source: c.source,
       }))
 
-      // Expose remote-transport state so the user sees degradation
-      // immediately rather than discovering it through a silent stall.
-      const remoteState = buildRemoteState(deps.router)
+      // Expose every transport's runtime state so the user sees
+      // degradation on any location (not just "the first non-local")
+      // without having to chase it through a silent stall.
+      const locationStates = buildLocationStates(deps.router)
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -112,7 +116,7 @@ export async function handleIdentityTool(
             }
           : {}),
         subscribedChannels,
-        ...(remoteState ? { remote: remoteState } : {}),
+        locations: locationStates,
       })
     }
     case 'authenticate': {
@@ -124,19 +128,27 @@ export async function handleIdentityTool(
   }
 }
 
-function buildRemoteState(router: TransportRouter): Record<string, unknown> | null {
-  if (!router.hasRemoteConfigured()) return null
-  // Report the first non-local transport's state. In the multi-location
-  // world a richer shape (per-location status map) makes sense; keep
-  // the single-flag shape today so `whoami` stays readable.
-  const remote = router.all().find((t) => t.source !== LOCAL_LOCATION) as RemoteTransport | undefined
-  if (!remote) return { configured: false, enabled: false }
-  return {
-    configured: true,
-    location: remote.source,
-    enabled: remote.enabled,
-    ...(remote.degradation ? { degradation: remote.degradation } : {}),
+/**
+ * Build the per-location status map for `whoami`. Every transport in
+ * the router contributes an entry keyed by its source (location name),
+ * including the reserved `"local"` location, so callers can tell at a
+ * glance which transports are live and which have self-disabled.
+ *
+ * `degradation` is only set on transports that expose it (the remote
+ * transport carries it for auth / function-not-found / repeated-failure
+ * cases). The local transport has no degradation surface.
+ */
+function buildLocationStates(router: TransportRouter): Record<string, { enabled: boolean; degradation?: string }> {
+  const out: Record<string, { enabled: boolean; degradation?: string }> = {}
+  for (const transport of router.all()) {
+    const maybeDegraded = transport as Partial<RemoteTransport>
+    const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+    out[transport.source] = {
+      enabled: transport.enabled,
+      ...(degradation ? { degradation } : {}),
+    }
   }
+  return out
 }
 
 async function handleAuthenticate(
@@ -235,8 +247,6 @@ async function handleAuthenticate(
   }
 
   const ctx: AttachCtx = {
-    cwd,
-    env,
     session: deps.session,
     context: deps.context,
     router: deps.router,

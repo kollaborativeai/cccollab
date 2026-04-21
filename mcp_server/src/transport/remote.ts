@@ -84,6 +84,16 @@ export class RemoteTransport implements Transport {
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
   private readonly log: (message: string) => void
+  /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
+   *  subsequent subscribe calls return a no-op unsubscribe. */
+  private shutdownStarted = false
+  /** Every unsubscribe callback returned by this transport's own
+   *  `subscribe*` methods. On shutdown we invoke all of them before
+   *  closing the underlying ConvexClient so no callback is still in
+   *  flight when the websocket disappears. DM unsubscribes handed out
+   *  to `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
+   *  call is sufficient even if the caller forgets the external list. */
+  private readonly trackedUnsubscribes = new Set<() => void>()
 
   /** Topic ids we've seen from the remote backend (via listJoinedForUser
    *  at startup, plus any we subsequently joined/created). Used by
@@ -462,9 +472,9 @@ export class RemoteTransport implements Transport {
    * message into `onEvent`. Idempotent: returns an unsubscribe fn.
    */
   subscribeDirectMessages(onEvent: (msg: ParsedMessage) => void): () => void {
-    if (this.sessionId === null) return () => {}
+    if (this.sessionId === null || this.shutdownStarted) return () => {}
     let lastTs = 0
-    const unsubscribe = this.client.onUpdate(
+    const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listDirectMessagesForSession),
       { sessionId: this.sessionId },
       (rows) => {
@@ -491,7 +501,7 @@ export class RemoteTransport implements Transport {
         this.registerFailure('subscribeDirectMessages', err)
       },
     )
-    return () => unsubscribe()
+    return this.trackUnsubscribe(() => rawUnsubscribe())
   }
 
   /**
@@ -504,9 +514,9 @@ export class RemoteTransport implements Transport {
     args: { topicId: string; channelName: string },
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
-    if (!this.enabled) return () => {}
+    if (!this.enabled || this.shutdownStarted) return () => {}
     let lastTs = 0
-    const unsubscribe = this.client.onUpdate(
+    const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listByTopic),
       { topicId: args.topicId },
       (rows) => {
@@ -528,7 +538,61 @@ export class RemoteTransport implements Transport {
         this.registerFailure('subscribeTopicMessages', err)
       },
     )
-    return () => unsubscribe()
+    return this.trackUnsubscribe(() => rawUnsubscribe())
+  }
+
+  /**
+   * Tear down the transport: invoke every outstanding subscribe-returned
+   * unsubscribe (DMs, topics, anything else future code adds via
+   * `trackUnsubscribe`), then close the underlying ConvexClient so its
+   * websocket shuts down. Safe to call multiple times; subsequent calls
+   * are no-ops.
+   *
+   * Used by `attachLocation`'s replace-in-place path (e.g. a force
+   * re-authenticate of an already-live location) and by the process-wide
+   * shutdown hook in `server.ts`. Never throws; errors from inner
+   * `.close()` or individual unsubscribe fns are swallowed after being
+   * logged so a cleanup failure cannot cascade into a stuck shutdown.
+   */
+  async shutdown(): Promise<void> {
+    if (this.shutdownStarted) return
+    this.shutdownStarted = true
+    this.enabled = false
+    for (const unsub of this.trackedUnsubscribes) {
+      try {
+        unsub()
+      } catch (err) {
+        this.log(`shutdown: unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    this.trackedUnsubscribes.clear()
+    try {
+      await this.client.close()
+    } catch (err) {
+      this.log(`shutdown: client.close() failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /**
+   * Wrap an unsubscribe callback so (a) it only runs once, (b) calling
+   * it removes the entry from `trackedUnsubscribes`. Callers hand the
+   * returned fn out - e.g. to `server.ts`'s `remoteUnsubscribes` map -
+   * and `shutdown()` still catches it via the internal set.
+   */
+  private trackUnsubscribe(fn: () => void): () => void {
+    let invoked = false
+    const wrapped = (): void => {
+      if (invoked) return
+      invoked = true
+      this.trackedUnsubscribes.delete(wrapped)
+      try {
+        fn()
+      } catch (err) {
+        this.log(`unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    this.trackedUnsubscribes.add(wrapped)
+    return wrapped
   }
 
   // ─── internals ────────────────────────────────────────────────────────

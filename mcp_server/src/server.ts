@@ -88,10 +88,12 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
   })
 
-  // Shared unsubscribe list. Every hot-attached transport pushes its DM
-  // subscription cleanup here, and the shutdown handler drains it
-  // alongside the ones wired at startup.
-  const remoteUnsubscribes: Array<() => void> = []
+  // Shared unsubscribe map keyed by location name. Every hot-attached
+  // transport stores its DM subscription cleanup here; the shutdown
+  // handler drains the whole map, and a replace-in-place attach (force
+  // re-authenticate of an already-live location) looks up the entry by
+  // name to tear it down before installing the replacement.
+  const remoteUnsubscribes = new Map<string, () => void>()
 
   // Introduce on the local transport up front so the session row
   // exists when list_sessions / DM routing queries it. Non-local
@@ -122,8 +124,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       continue
     }
     const result = await attachLocation(location.name, {
-      cwd: process.cwd(),
-      env: process.env,
       session,
       context,
       router,
@@ -236,19 +236,31 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     }
     shuttingDown = true
     console.error(`[cccollab] Shutting down (${reason})...`)
-    for (const unsubscribe of remoteUnsubscribes) {
+    for (const unsubscribe of remoteUnsubscribes.values()) {
       try {
         unsubscribe()
       } catch {
         /* ignore */
       }
     }
+    remoteUnsubscribes.clear()
     if (session.hasName()) {
       for (const transport of router.all()) {
         try {
           await transport.deregisterSession({ sessionName: session.displayName })
         } catch {
           // best-effort
+        }
+      }
+    }
+    // Close long-lived resources (ConvexClient websockets, etc). Local
+    // transports are stateless at the wire level and have no shutdown.
+    for (const transport of router.all()) {
+      if (typeof transport.shutdown === 'function') {
+        try {
+          await transport.shutdown()
+        } catch {
+          /* best-effort */
         }
       }
     }
@@ -285,7 +297,7 @@ interface ToolDeps {
   router: TransportRouter
   locations: ResolvedLocation[]
   messageBus: MessageBus
-  remoteUnsubscribes: Array<() => void>
+  remoteUnsubscribes: Map<string, () => void>
   cwd: string
   env: NodeJS.ProcessEnv
 }
@@ -400,7 +412,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], remote?: {configured, location, enabled, degradation?}}.',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
       inputSchema: {},
     },
     async () => {

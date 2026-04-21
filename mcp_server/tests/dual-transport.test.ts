@@ -286,11 +286,12 @@ describe('Dual transport: graceful degradation', () => {
     expect(local.joinChannel).toHaveBeenCalledTimes(1)
   })
 
-  it('whoami surfaces the remote degraded state', async () => {
+  it('whoami surfaces per-location degradation in the `locations` map', async () => {
     // Simulate a "configured but disabled" remote transport by passing
     // a FakeTransport whose enabled flag is off. The identity tool's
-    // degradation reporter reads `.enabled` and `.degradation` off the
-    // transport it finds at source="remote".
+    // per-location map reads `.enabled` and `.degradation` off every
+    // transport in the router, keyed by location name. The local
+    // transport has no degradation surface and reports enabled: true.
     class DegradedRemote extends FakeTransport {
       degradation = 'Remote sync disabled: function not found on deployment (FakeReason)'
       constructor() {
@@ -303,10 +304,25 @@ describe('Dual transport: graceful degradation', () => {
     const deps = makeDeps([local, remote])
     await handleIdentityTool('introduce', { name: 'architect' }, deps)
     const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
-    expect(result.remote).toMatchObject({
-      configured: true,
-      enabled: false,
-      degradation: expect.stringContaining('Remote sync disabled'),
+    expect(result.locations).toMatchObject({
+      local: { enabled: true },
+      remote: {
+        enabled: false,
+        degradation: expect.stringContaining('Remote sync disabled'),
+      },
+    })
+    // No `degradation` on local - the field is only set when present.
+    expect(result.locations.local.degradation).toBeUndefined()
+  })
+
+  it('whoami always includes the reserved `local` location in the locations map', async () => {
+    // Even without any non-local transport, `locations` contains `local`.
+    const local = new FakeTransport('local')
+    const deps = makeDeps([local])
+    await handleIdentityTool('introduce', { name: 'architect' }, deps)
+    const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+    expect(result.locations).toEqual({
+      local: { enabled: true },
     })
   })
 })
@@ -423,6 +439,11 @@ function makeDepsWithLocations(
 class HotAttachRemote extends FakeTransport {
   subscribedDms: Array<(msg: import('../src/types.js').ParsedMessage) => void> = []
   dmUnsubscribed = false
+  shutdownCalled = false
+  shutdown = vi.fn(async (): Promise<void> => {
+    this.shutdownCalled = true
+    this.enabled = false
+  })
   constructor(source: string) {
     super(source as 'local' | 'remote')
   }
@@ -489,7 +510,7 @@ describe('authenticate tool', () => {
   it('hot-attaches a new remote transport after force: true, replacing the old one', async () => {
     const local = new FakeTransport('local')
     const oldRemote = new HotAttachRemote('remote')
-    const remoteUnsubscribes: Array<() => void> = []
+    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -536,12 +557,83 @@ describe('authenticate tool', () => {
     expect(live).toBe(newRemote)
     // DM subscription wired; unsubscribe is tracked for shutdown.
     expect(newRemote.subscribedDms.length).toBe(1)
-    expect(remoteUnsubscribes.length).toBe(1)
+    expect(remoteUnsubscribes.size).toBe(1)
+    expect(remoteUnsubscribes.has('remote')).toBe(true)
+  })
+
+  it('hot-attach on force: true tears down the old transport (DM unsub, shutdown, deregisterSession) before swapping', async () => {
+    // Regression guard for the pre-fix leak: force-reauth used to leave
+    // the old transport's ConvexClient websocket open and its DM
+    // subscription firing into MessageBus. The new path must:
+    //   1. Invoke the old transport's stored DM unsubscribe.
+    //   2. Call `shutdown()` on the old transport.
+    //   3. Call `deregisterSession` on the old transport.
+    //   4. Swap the router to point at the new transport.
+    //   5. Store the new transport's DM unsubscribe under the same key.
+    const local = new FakeTransport('local')
+    const oldRemote = new HotAttachRemote('remote')
+    // Seed the unsubscribes map with a callback that simulates the old
+    // transport's DM unsubscribe. attachLocation must invoke this and
+    // then replace it with the new transport's unsubscribe.
+    let oldDmUnsubInvoked = false
+    const remoteUnsubscribes = new Map<string, () => void>()
+    remoteUnsubscribes.set('remote', () => {
+      oldDmUnsubInvoked = true
+    })
+    const bus = {
+      push: vi.fn(async () => {}),
+    } as unknown as IdentityToolDeps['messageBus']
+
+    const newRemote = new HotAttachRemote('remote')
+    const factory = vi.fn(() => newRemote) as IdentityToolDeps['transportFactory']
+
+    const deps = makeDepsWithLocations(
+      [local, oldRemote],
+      [
+        { name: 'local', isLocal: true },
+        { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
+      ],
+      { messageBus: bus, remoteUnsubscribes },
+    )
+    deps.transportFactory = factory
+
+    await mockFreshResolve([
+      { name: 'local', isLocal: true, channels: [] },
+      {
+        name: 'remote',
+        isLocal: false,
+        url: 'https://example.convex.cloud',
+        accessToken: 'jwt',
+        refreshToken: 'refresh',
+        channels: [],
+      },
+    ])
+
+    const result = await handleIdentityTool('authenticate', { force: true }, deps)
+    expect(result).toContain('is now active')
+
+    // 1. Old DM unsubscribe fired.
+    expect(oldDmUnsubInvoked).toBe(true)
+    // 2. Old shutdown called.
+    expect(oldRemote.shutdown).toHaveBeenCalledTimes(1)
+    expect(oldRemote.shutdownCalled).toBe(true)
+    // 3. Old deregisterSession called.
+    expect(oldRemote.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
+    // 4. Router now points at the new transport.
+    expect(deps.router.all().find((t) => t.source === 'remote')).toBe(newRemote)
+    // 5. Map has exactly one entry under 'remote' and it belongs to the new transport.
+    expect(remoteUnsubscribes.size).toBe(1)
+    expect(remoteUnsubscribes.has('remote')).toBe(true)
+    remoteUnsubscribes.get('remote')!()
+    expect(newRemote.dmUnsubscribed).toBe(true)
+    // Invoking the new unsubscribe must NOT re-trigger the old one.
+    // (oldDmUnsubInvoked was already true from step 1; no double count is
+    // possible because the closure only sets it to true.)
   })
 
   it('hot-attach failure after sign-in keeps tokens persisted and returns restart guidance', async () => {
     const local = new FakeTransport('local')
-    const remoteUnsubscribes: Array<() => void> = []
+    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -584,7 +676,7 @@ describe('authenticate tool', () => {
     // The router must NOT contain the broken transport.
     expect(deps.router.has('remote')).toBe(false)
     // No orphan DM subscription was left behind.
-    expect(remoteUnsubscribes.length).toBe(0)
+    expect(remoteUnsubscribes.size).toBe(0)
   })
 
   it('errors when location arg names an unknown location', async () => {
@@ -618,7 +710,7 @@ describe('authenticate tool', () => {
     // write out of sight. The tool must not crash; it must keep the
     // tokens persisted and tell the user to restart.
     const local = new FakeTransport('local')
-    const remoteUnsubscribes: Array<() => void> = []
+    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']

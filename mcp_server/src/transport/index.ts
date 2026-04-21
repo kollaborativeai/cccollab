@@ -119,6 +119,19 @@ export interface Transport {
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */
   deregisterSession(args: { sessionName: string }): Promise<void>
+
+  /**
+   * Release every resource this transport holds: reactive subscriptions,
+   * network clients, timers, pending retries. Idempotent; safe to call
+   * on a transport that already self-disabled. Must not throw.
+   *
+   * Optional because the local transport is stateless at the wire level
+   * (it only makes one-shot fetch calls); only transports that hold
+   * long-lived state (e.g. the remote ConvexClient websocket) need to
+   * implement it. Callers that want to tear down a transport should
+   * invoke this iff it is defined.
+   */
+  shutdown?(): Promise<void>
 }
 
 /** UUID v4 pattern as emitted by the local broker. */
