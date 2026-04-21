@@ -31,11 +31,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "convex": "^1.28.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
+    "convex-test": "^0.0.38",
     "eslint": "^10.2.1",
     "globals": "^17.5.0",
     "husky": "^9.1.7",
