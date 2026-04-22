@@ -22,7 +22,7 @@ import { defineSchema } from 'convex/server'
 
 import { channelMembersTable } from './channelMembers/schema'
 import { channelsTable } from './channels/schema'
-import { messagesTable } from './messages/schema'
+import { channelReadCursorsTable, messagesTable } from './messages/schema'
 import { sessionChannelsTable } from './sessionChannels/schema'
 import { sessionsTable } from './sessions/schema'
 import { topicMembersTable } from './topicMembers/schema'
@@ -41,4 +41,5 @@ export default defineSchema({
   topics: topicsTable,
   topicMembers: topicMembersTable,
   messages: messagesTable,
+  channelReadCursors: channelReadCursorsTable,
 })

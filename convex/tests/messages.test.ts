@@ -284,6 +284,118 @@ describe('messages.listByTopic with sinceTs cursor', () => {
   })
 })
 
+describe('messages.ackChannel + listByChannel per-session cursor (duplicate-broadcast suppression)', () => {
+  it("listByChannel filters out broadcasts with ts <= the session's ackChannel cursor", async () => {
+    // Bug D regression: on every MCP restart the reactive subscribe
+    // re-delivers the entire channel history because there's no
+    // per-session high-water-mark. The fix moves the cursor to the
+    // server: `listByChannel({sessionId, channelId})` reads the session's
+    // cursor; `ackChannel({sessionId, channelId, ts})` bumps it. New
+    // subscribe after an ack must skip the acked message.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    const { channelId } = await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+
+    await asStefan.mutation(api.messages.mutations.sendToChannel, {
+      sessionId,
+      channel: 'eng',
+      text: 'first',
+    })
+    await asStefan.mutation(api.messages.mutations.sendToChannel, {
+      sessionId,
+      channel: 'eng',
+      text: 'second',
+    })
+
+    // Without any ack, listByChannel returns both (current behaviour
+    // preserved when no sessionId is passed).
+    const before = await asStefan.query(api.messages.queries.listByChannel, { channelId })
+    expect(before.map((m) => m.text)).toEqual(['first', 'second'])
+
+    // Ack up to the first message's ts. The second is strictly newer.
+    const firstTs = before[0]!.ts
+    await asStefan.mutation(api.messages.mutations.ackChannel, { sessionId, channelId, ts: firstTs })
+
+    // With sessionId passed, the query uses the stored cursor and skips
+    // the acked message.
+    const after = await asStefan.query(api.messages.queries.listByChannel, { channelId, sessionId })
+    expect(after.map((m) => m.text)).toEqual(['second'])
+
+    // Without sessionId, the legacy call still returns the full set.
+    const unfiltered = await asStefan.query(api.messages.queries.listByChannel, { channelId })
+    expect(unfiltered.map((m) => m.text)).toEqual(['first', 'second'])
+  })
+
+  it('ackChannel is monotonic (ts older than the stored cursor is a no-op)', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    const { channelId } = await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+
+    await asStefan.mutation(api.messages.mutations.sendToChannel, { sessionId, channel: 'eng', text: 'a' })
+    await asStefan.mutation(api.messages.mutations.sendToChannel, { sessionId, channel: 'eng', text: 'b' })
+    const all = await asStefan.query(api.messages.queries.listByChannel, { channelId })
+    const [aRow, bRow] = all
+
+    // Ack to b (later), then try to regress to a (earlier). Must not
+    // reduce the cursor.
+    await asStefan.mutation(api.messages.mutations.ackChannel, { sessionId, channelId, ts: bRow!.ts })
+    await asStefan.mutation(api.messages.mutations.ackChannel, { sessionId, channelId, ts: aRow!.ts })
+
+    const after = await asStefan.query(api.messages.queries.listByChannel, { channelId, sessionId })
+    expect(after.map((m) => m.text)).toEqual([])
+  })
+
+  it("ackChannel is per-session: one session's cursor does not affect another", async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionA = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const sessionB = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    const { channelId } = await asStefan.mutation(api.channels.mutations.join, { sessionId: sessionA, channel: 'eng' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId: sessionB, channel: 'eng' })
+
+    await asStefan.mutation(api.messages.mutations.sendToChannel, {
+      sessionId: sessionA,
+      channel: 'eng',
+      text: 'msg',
+    })
+    const rows = await asStefan.query(api.messages.queries.listByChannel, { channelId })
+    const onlyTs = rows[0]!.ts
+
+    // sessionA acks; sessionB has not acked.
+    await asStefan.mutation(api.messages.mutations.ackChannel, { sessionId: sessionA, channelId, ts: onlyTs })
+
+    const aView = await asStefan.query(api.messages.queries.listByChannel, { channelId, sessionId: sessionA })
+    const bView = await asStefan.query(api.messages.queries.listByChannel, { channelId, sessionId: sessionB })
+    expect(aView.map((m) => m.text)).toEqual([])
+    expect(bView.map((m) => m.text)).toEqual(['msg'])
+  })
+
+  it('ackChannel refuses to update a cursor for a session the caller does not own', async () => {
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const bobSession = await asBob.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    const { channelId } = await asAlice.mutation(api.channels.mutations.join, {
+      sessionId: aliceSession,
+      channel: 'eng',
+    })
+    await asBob.mutation(api.channels.mutations.join, { sessionId: bobSession, channel: 'eng' })
+
+    // Alice tries to move Bob's cursor. Must throw.
+    await expect(
+      asAlice.mutation(api.messages.mutations.ackChannel, { sessionId: bobSession, channelId, ts: 1 }),
+    ).rejects.toThrow(/ACK_SESSION_NOT_OWNED|ownership|forbidden/i)
+  })
+})
+
 describe('messages.listDirectMessagesForSession', () => {
   it('refuses to surface another user’s DMs', async () => {
     const t = convexTest(schema, modules)

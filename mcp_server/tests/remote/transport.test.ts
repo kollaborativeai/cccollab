@@ -349,3 +349,115 @@ describe('RemoteTransport.subscribeDirectMessages dedup', () => {
     expect(delivered.map((d) => d.text).sort()).toEqual(['a', 'b'])
   })
 })
+
+describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor', () => {
+  it('keeps the transport enabled when ackChannel fails (fire-and-forget, non-degrading)', async () => {
+    // Regression guard: earlier we caught ackChannel failures via
+    // `registerFailure`, which treats UNAUTHENTICATED as "permanent"
+    // and flips the whole transport off. A transient auth hiccup on a
+    // fire-and-forget ack then killed channel + DM + topic delivery
+    // for the session. Ack is best-effort; its failure must not
+    // degrade.
+    const callbacks: Array<(rows: unknown) => void> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        // introduce/join succeed; ackChannel rejects with
+        // UNAUTHENTICATED (structured ConvexError-like object).
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev' }
+        }
+        // ackChannel path: { sessionId, channelId, ts }
+        const err: Error & { data?: { code: string; message: string } } = new Error('Sign-in required.')
+        err.data = { code: 'UNAUTHENTICATED', message: 'Sign-in required.' }
+        throw err
+      }),
+      onUpdate: vi.fn((_q: unknown, _args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'hi', ts: 1 }])
+    // Let the fire-and-forget mutation settle.
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('passes sessionId to listByChannel and ackChannel mutates with the highest ts of each batch', async () => {
+    // Bug D fix: restart-replay duplicate suppression via
+    // server-side per-session cursor. The reactive subscribe must
+    // thread `sessionId` into `listByChannel`, and each delivered
+    // batch must trigger an `ackChannel` mutation that advances the
+    // cursor to the highest ts just seen.
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const mutationCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        mutationCalls.push({ args })
+        // introduce → returns sessionId; channels.join → returns {channelId}.
+        // Dispatch off arg shape to keep the test independent of
+        // FunctionReference identity.
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev' }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+
+    // listByChannel must be called with sessionId + channelId.
+    expect(onUpdateCalls).toHaveLength(1)
+    expect(onUpdateCalls[0]!.args).toMatchObject({
+      channelId: 'chan_dev',
+      sessionId: 'session_1',
+    })
+
+    // Deliver a batch; the highest ts must be acked.
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_100_000 },
+      { _id: 'm2', fromSessionId: 'alice', text: 'b', ts: 1_700_000_200_000 },
+    ])
+    // Drain microtasks so the mutation fire-and-forget settles.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const ackCalls = mutationCalls.filter(
+      (c) =>
+        typeof c.args === 'object' &&
+        c.args !== null &&
+        'sessionId' in c.args &&
+        'channelId' in c.args &&
+        'ts' in c.args,
+    )
+    expect(ackCalls).toHaveLength(1)
+    expect(ackCalls[0]!.args).toMatchObject({
+      sessionId: 'session_1',
+      channelId: 'chan_dev',
+      ts: 1_700_000_200_000,
+    })
+  })
+})

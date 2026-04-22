@@ -17,9 +17,9 @@ import {
 
 /**
  * Remote-flavoured fake. Implements the same surface as RemoteTransport
- * plus a `subscribeDirectMessages` hook so `attachLocation` can wire
- * the DM inbox reactive feed into MessageBus the same way the real
- * RemoteTransport does.
+ * plus a `subscribeDirectMessages` / `subscribeTopicMessages` hook so
+ * `attachLocation` can wire the DM inbox and per-topic reactive feeds
+ * into MessageBus the same way the real RemoteTransport does.
  */
 class FakeRemoteTransport implements Transport {
   readonly source: string
@@ -29,6 +29,26 @@ class FakeRemoteTransport implements Transport {
   introduceError: Error | null = null
   subscribedDms: Array<(msg: ParsedMessage) => void> = []
   dmUnsubscribeCalled = false
+  /** Per-topic subscription state: keeps the callback, the channel name
+   *  it was registered with, the cursor that was in place at subscribe
+   *  time, and a flag recording whether the returned unsubscribe fn has
+   *  been invoked. Lets tests fire fake messages and assert teardown. */
+  subscribedTopics = new Map<
+    string,
+    {
+      channelName: string
+      onEvent: (msg: ParsedMessage) => void
+      sinceTs: number | undefined
+      unsubscribeCalled: boolean
+    }
+  >()
+  /** Topic ids for which `primeTopicCursor` has been called, mapped to
+   *  the highest ts passed to prime. Subscribe reads this to seed the
+   *  recorded `sinceTs`. */
+  primedCursors = new Map<string, number>()
+  /** Per-channel subscription state, keyed by channel name. Mirrors
+   *  `subscribedTopics` for the channel-broadcast wiring added by bug B. */
+  subscribedChannels = new Map<string, { onEvent: (msg: ParsedMessage) => void; unsubscribeCalled: boolean }>()
   shutdownCalled = false
   shutdown = vi.fn(async (): Promise<void> => {
     this.shutdownCalled = true
@@ -103,6 +123,37 @@ class FakeRemoteTransport implements Transport {
     }
   }
 
+  subscribeTopicMessages(
+    args: { topicId: string; channelName: string },
+    onEvent: (msg: ParsedMessage) => void,
+  ): () => void {
+    const entry = {
+      channelName: args.channelName,
+      onEvent,
+      sinceTs: this.primedCursors.get(args.topicId),
+      unsubscribeCalled: false,
+    }
+    this.subscribedTopics.set(args.topicId, entry)
+    return () => {
+      entry.unsubscribeCalled = true
+      // Match real behaviour: first-call wins, subsequent invocations
+      // are no-ops. We keep the entry in the map so tests can inspect it.
+    }
+  }
+
+  primeTopicCursor(topicId: string, ts: number): void {
+    const prior = this.primedCursors.get(topicId) ?? 0
+    if (ts > prior) this.primedCursors.set(topicId, ts)
+  }
+
+  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+    const entry = { onEvent, unsubscribeCalled: false }
+    this.subscribedChannels.set(args.channelName, entry)
+    return () => {
+      entry.unsubscribeCalled = true
+    }
+  }
+
   /** Expose the topic cache so tests can pre-populate for listTopics. */
   registerTopic(t: TransportTopic): void {
     this.topics.set(t.id, t)
@@ -120,6 +171,8 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
   const context = new ActiveContext()
   const router = new TransportRouter([])
   const remoteUnsubscribes = new Map<string, () => void>()
+  const remoteTopicUnsubscribes = new Map<string, () => void>()
+  const remoteChannelUnsubscribes = new Map<string, () => void>()
   const busPushes: ParsedMessage[] = []
   // Minimal MessageBus stand-in. attachLocation only calls `push`.
   const bus = {
@@ -135,6 +188,8 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
     router,
     messageBus: bus,
     remoteUnsubscribes,
+    remoteTopicUnsubscribes,
+    remoteChannelUnsubscribes,
     resolved: { locations: [location], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
     transportFactory: (loc) => new FakeRemoteTransport(loc.name),
     bus,
@@ -310,5 +365,132 @@ describe('attachLocation', () => {
     })
     const result = await attachLocation('flatout', ctx)
     expect(result.ok).toBe(false)
+  })
+
+  it('subscribes to messages for each auto-joined topic and pushes inbound messages into MessageBus', async () => {
+    // This is the regression guard for the "two remote sessions joined
+    // the same topic but messages never cross" bug: attachLocation must
+    // establish a `subscribeTopicMessages` per auto-subscribed topic,
+    // not just a server-side membership row via `joinTopic`.
+    const ctx = makeCtx(location)
+    const result = await attachLocation('flatout', ctx)
+    expect(result.ok).toBe(true)
+
+    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    // The cccollab.json configured exactly one topic ("planning") under
+    // "dev". `attachLocation` should have created it (listTopics was
+    // empty) and subscribed to its message stream.
+    expect(transport.subscribedTopics.size).toBe(1)
+    const [topicId, sub] = [...transport.subscribedTopics.entries()][0]!
+    expect(sub.channelName).toBe('dev')
+
+    // The per-topic subscription key is stored in remoteTopicUnsubscribes
+    // so the shutdown / teardown paths can find it.
+    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
+    expect(ctx.remoteTopicUnsubscribes.has(`flatout::${topicId}`)).toBe(true)
+
+    // Fire a fake topic message through the subscription callback. It
+    // must reach MessageBus.push with the location as the source tag.
+    sub.onEvent({
+      sender: 'peer',
+      text: 'hello from peer',
+      ts: '2026-04-21T00:00:00Z',
+      channel: 'dev',
+      channelName: 'dev',
+      threadTs: topicId,
+    })
+    const push = (ctx.messageBus as unknown as { push: ReturnType<typeof vi.fn> }).push
+    expect(push).toHaveBeenCalled()
+    const [msg, sourceArg] = push.mock.calls[0] as [ParsedMessage, string]
+    expect(msg.text).toBe('hello from peer')
+    expect(msg.threadTs).toBe(topicId)
+    expect(sourceArg).toBe('flatout')
+  })
+
+  it('primes the topic cursor from joinTopic history so auto-subscribe does not replay past messages', async () => {
+    // Pre-populate an existing topic on the fake so the auto-subscribe
+    // path goes down joinTopic (not createTopic), and make joinTopic
+    // return history so attachLocation can prime the cursor past it.
+    const ctx = makeCtx(location)
+    const fake = new FakeRemoteTransport('flatout')
+    fake.registerTopic({
+      id: 'topic-existing',
+      topic: 'planning',
+      channel: 'dev',
+      creator: 'someone',
+      state: 'active',
+      createdAt: '2026-04-20T00:00:00Z',
+    })
+    fake.joinTopic = vi.fn(async () => ({
+      channel: 'dev',
+      history: [
+        { sender: 'peer', text: 'old-1', ts: '2026-04-20T00:00:00.000Z' },
+        { sender: 'peer', text: 'old-2', ts: '2026-04-20T00:00:01.000Z' },
+      ],
+    }))
+    ctx.transportFactory = () => fake
+
+    const result = await attachLocation('flatout', ctx)
+    expect(result.ok).toBe(true)
+    // Cursor primed to the highest history ts.
+    const primed = fake.primedCursors.get('topic-existing')
+    expect(primed).toBe(Date.parse('2026-04-20T00:00:01.000Z'))
+    const sub = fake.subscribedTopics.get('topic-existing')
+    expect(sub?.sinceTs).toBe(Date.parse('2026-04-20T00:00:01.000Z'))
+  })
+
+  it('subscribes to channel messages for each auto-joined channel and pushes inbound messages into MessageBus', async () => {
+    // Regression guard for bug B (channel broadcasts on a remote location
+    // don't reach other subscribers). attachLocation must wire
+    // subscribeChannelMessages for each configured channel so broadcasts
+    // travel back through MessageBus just like topic messages and DMs do.
+    const ctx = makeCtx(location)
+    const result = await attachLocation('flatout', ctx)
+    expect(result.ok).toBe(true)
+
+    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    expect(transport.subscribedChannels.size).toBe(1)
+    const sub = transport.subscribedChannels.get('dev')!
+    expect(ctx.remoteChannelUnsubscribes.size).toBe(1)
+    expect(ctx.remoteChannelUnsubscribes.has('flatout::dev')).toBe(true)
+
+    sub.onEvent({
+      sender: 'peer',
+      text: 'hello-from-peer-on-dev',
+      ts: '2026-04-22T13:42:00Z',
+      channel: 'dev',
+      channelName: 'dev',
+      threadTs: undefined,
+    })
+    const push = (ctx.messageBus as unknown as { push: ReturnType<typeof vi.fn> }).push
+    expect(push).toHaveBeenCalled()
+    const [msg, sourceArg] = push.mock.calls[0] as [ParsedMessage, string]
+    expect(msg.text).toBe('hello-from-peer-on-dev')
+    expect(msg.channel).toBe('dev')
+    expect(sourceArg).toBe('flatout')
+  })
+
+  it('tears down topic subscriptions on prior-transport replace (force re-authenticate)', async () => {
+    const ctx = makeCtx(location)
+    const first = await attachLocation('flatout', ctx)
+    expect(first.ok).toBe(true)
+
+    const originalTransport = ctx.router.get('flatout') as FakeRemoteTransport
+    const topicKey = [...ctx.remoteTopicUnsubscribes.keys()][0]!
+    const topicId = topicKey.slice('flatout::'.length)
+    const priorSub = originalTransport.subscribedTopics.get(topicId)!
+
+    // Replace-in-place attach (what `authenticate({force:true})` does).
+    const replacement = new FakeRemoteTransport('flatout')
+    ctx.transportFactory = () => replacement
+    const second = await attachLocation('flatout', ctx)
+    expect(second.ok).toBe(true)
+
+    // Prior topic subscription was torn down, the map no longer points at
+    // it, and the replacement has its own.
+    expect(priorSub.unsubscribeCalled).toBe(true)
+    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
+    expect([...ctx.remoteTopicUnsubscribes.keys()][0]!.startsWith('flatout::')).toBe(true)
+    expect(replacement.subscribedTopics.size).toBe(1)
   })
 })

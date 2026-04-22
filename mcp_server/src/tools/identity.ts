@@ -30,6 +30,17 @@ export interface IdentityToolDeps {
    *  re-authenticate) can look the entry up by name and invoke it
    *  before swapping in the replacement transport. */
   remoteUnsubscribes?: Map<string, () => void>
+  /** Shared map of topic-message subscription unsubscribe callbacks,
+   *  keyed by `${location}::${topicId}`. Threaded into `attachLocation`
+   *  on the hot-attach path so auto-subscribe to configured topics wires
+   *  reactive subscriptions there instead of on the next restart. */
+  remoteTopicUnsubscribes?: Map<string, () => void>
+  /** Shared map of channel-broadcast subscription unsubscribe callbacks,
+   *  keyed by `${location}::${channelName}`. Mirrors
+   *  `remoteTopicUnsubscribes` for channel-level broadcasts so bug B
+   *  (channel messages not delivered to other remote subscribers) is
+   *  covered by the same hot-attach wiring. */
+  remoteChannelUnsubscribes?: Map<string, () => void>
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -302,6 +313,13 @@ async function handleAuthenticate(
     router: deps.router,
     messageBus,
     remoteUnsubscribes,
+    // Fall back to a process-local map when the caller didn't thread
+    // one through (older unit-test paths). attachLocation only iterates
+    // this map on the replace-in-place prefix sweep, so a local map is
+    // safe: its lifetime is bounded by the call, and no other code path
+    // expects entries to persist across calls in that test scenario.
+    remoteTopicUnsubscribes: deps.remoteTopicUnsubscribes ?? new Map<string, () => void>(),
+    remoteChannelUnsubscribes: deps.remoteChannelUnsubscribes ?? new Map<string, () => void>(),
     resolved: {
       locations: refreshed.locations,
       activeLocation: refreshed.active.activeLocation,

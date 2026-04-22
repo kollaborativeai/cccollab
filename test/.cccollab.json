@@ -3,11 +3,16 @@
     "local": {
       "active": true,
       "channels": {
-        "cccollab-test": { "active": true }
+        "cccollab-test": {
+          "active": true
+        }
       }
     },
     "flatout-dev": {
-      "url": "https://wonderful-narwhal-409.convex.cloud"
+      "url": "https://wonderful-narwhal-409.convex.cloud",
+      "channels": {
+        "test-remote": {}
+      }
     }
   }
 }

@@ -1,4 +1,5 @@
 import type { ActiveContext } from '../context.js'
+import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import {
   DmDeliveryError,
@@ -8,12 +9,24 @@ import {
   type TransportTopic,
 } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
+import { ensureTopicSubscription, teardownTopicSubscription } from '../transport/attach.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface TopicToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  /** Inbound message pipeline, used by the tool handlers below to push
+   *  remote topic-message subscription callbacks into the MCP
+   *  notification stream. Optional so older tool-layer unit tests (which
+   *  don't exercise remote subscriptions) can keep constructing deps
+   *  without one; the wiring degrades to a no-op when absent. */
+  messageBus?: MessageBus
+  /** Shared map of topic-message subscription unsubscribe callbacks,
+   *  keyed by `${location}::${topicId}`. Populated on start/join and
+   *  drained on leave/archive; shutdown and replace-in-place are
+   *  handled by `server.ts` / `attachLocation` respectively. */
+  remoteTopicUnsubscribes?: Map<string, () => void>
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -121,13 +134,22 @@ export async function handleTopicTool(
         threadTs = deps.context.getThreadTs()
         topicName = deps.context.getTopicName() ?? 'topic'
       }
+      let leavingTransportSource: string | undefined
       try {
         const transport = resolveTopicTransport(deps, threadTs)
+        leavingTransportSource = transport.source
         await transport.leaveTopic({ sessionName: deps.session.displayName, topicId: threadTs })
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
       deps.context.leaveTopic(threadTs)
+      if (deps.remoteTopicUnsubscribes && leavingTransportSource !== undefined) {
+        teardownTopicSubscription({
+          locationName: leavingTransportSource,
+          topicId: threadTs,
+          map: deps.remoteTopicUnsubscribes,
+        })
+      }
       return JSON.stringify({ id: threadTs, name: topicName })
     }
     case 'archive_topic': {
@@ -194,12 +216,26 @@ async function handleListTopics(
       }
     }
   } else {
+    // No channel arg: enumerate topics across every channel the session
+    // is subscribed to at each transport's location. Remote backends
+    // have no efficient cross-channel listTopics query, so we must
+    // fan-out per-channel; local does too and benefits from the same
+    // loop. Dedup happens naturally - each (location, channel) pair
+    // owns a disjoint set of topic ids.
+    const subscribed = deps.context.getSubscribedChannels()
     for (const transport of transports) {
-      try {
-        const rows = await transport.listTopics({ sessionName: deps.session.displayName, includeArchived })
-        for (const r of rows) located.push({ ...r, location: transport.source })
-      } catch {
-        // Transport unreachable: skip.
+      const subsAtLocation = subscribed.filter((c) => c.location === transport.source)
+      for (const { name: channel } of subsAtLocation) {
+        try {
+          const rows = await transport.listTopics({
+            sessionName: deps.session.displayName,
+            channel,
+            includeArchived,
+          })
+          for (const r of rows) located.push({ ...r, location: transport.source })
+        } catch {
+          // Transport unreachable: skip.
+        }
       }
     }
   }
@@ -268,6 +304,20 @@ async function handleStartTopic(
       topic,
     })
     deps.context.joinTopic(data.id, topic, data.channel ?? channel, location)
+    if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+      // Brand-new topic: no history to prime past, so seed the cursor
+      // to `now` to avoid replaying anything another producer may have
+      // inserted between createTopic and subscribe.
+      ensureTopicSubscription({
+        transport,
+        locationName: location,
+        topicId: data.id,
+        channelName: data.channel ?? channel,
+        sinceTs: Date.now(),
+        messageBus: deps.messageBus,
+        map: deps.remoteTopicUnsubscribes,
+      })
+    }
     return JSON.stringify({ id: data.id, name: topic, channel: data.channel ?? channel, location })
   } catch (err) {
     if (err instanceof TopicNameConflictError) {
@@ -341,6 +391,26 @@ async function joinTopicByData(
     topicId: topic.id,
   })
   deps.context.joinTopic(topic.id, topic.topic, topic.channel, location)
+  if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+    // Prime the reactive cursor past whatever history we just returned
+    // to the tool caller so the first `onUpdate` batch doesn't replay
+    // those same messages as inbound notifications.
+    let sinceTs: number | undefined
+    for (const row of history) {
+      const parsed = Date.parse(row.ts)
+      if (Number.isNaN(parsed)) continue
+      if (sinceTs === undefined || parsed > sinceTs) sinceTs = parsed
+    }
+    ensureTopicSubscription({
+      transport,
+      locationName: location,
+      topicId: topic.id,
+      channelName: topic.channel,
+      sinceTs,
+      messageBus: deps.messageBus,
+      map: deps.remoteTopicUnsubscribes,
+    })
+  }
   return JSON.stringify({
     id: topic.id,
     name: topic.topic,
@@ -371,6 +441,13 @@ async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise
   }
   await transport.archiveTopic({ sessionName: deps.session.displayName, topicId })
   deps.context.leaveTopic(topicId)
+  if (deps.remoteTopicUnsubscribes) {
+    teardownTopicSubscription({
+      locationName: transport.source,
+      topicId,
+      map: deps.remoteTopicUnsubscribes,
+    })
+  }
   return JSON.stringify({ id: topicId, name: topicName })
 }
 

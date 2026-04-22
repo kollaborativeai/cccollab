@@ -1,13 +1,24 @@
 import type { ActiveContext, ChannelSource } from '../context.js'
+import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { ChannelLocation } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
+import { ensureChannelSubscription, teardownChannelSubscription } from '../transport/attach.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface ChannelToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  /** Inbound message pipeline. Optional so legacy tests that don't
+   *  exercise remote broadcast subscriptions can keep constructing deps
+   *  without one; wiring degrades to a no-op when absent. */
+  messageBus?: MessageBus
+  /** Shared map of channel-broadcast subscription unsubscribe callbacks,
+   *  keyed by `${location}::${channelName}`. Populated on join_channel,
+   *  drained on leave_channel. Shutdown + replace-in-place drain is
+   *  handled by `server.ts` and `attachLocation` respectively. */
+  remoteChannelUnsubscribes?: Map<string, () => void>
 }
 
 const NO_NAME_ERROR = JSON.stringify({
@@ -131,6 +142,15 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
     channel: normalized,
   })
   const { becameActive } = deps.context.joinChannel(normalized, 'manual', location)
+  if (deps.messageBus && deps.remoteChannelUnsubscribes) {
+    ensureChannelSubscription({
+      transport,
+      locationName: location,
+      channelName: normalized,
+      messageBus: deps.messageBus,
+      map: deps.remoteChannelUnsubscribes,
+    })
+  }
   return JSON.stringify({ channel: normalized, location, becameActive, subscriberCount })
 }
 
@@ -150,6 +170,13 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, locati
 
   await transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
   const { removed, newActive } = deps.context.leaveChannel(normalized, location)
+  if (deps.remoteChannelUnsubscribes) {
+    teardownChannelSubscription({
+      locationName: location,
+      channelName: normalized,
+      map: deps.remoteChannelUnsubscribes,
+    })
+  }
   return JSON.stringify({
     channel: normalized,
     location,

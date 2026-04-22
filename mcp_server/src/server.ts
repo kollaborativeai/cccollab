@@ -95,6 +95,19 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // name to tear it down before installing the replacement.
   const remoteUnsubscribes = new Map<string, () => void>()
 
+  // Same shape, different key. Topic-message subscriptions are keyed by
+  // `${location}::${topicId}` because a single remote location can hold
+  // many concurrent topic subscriptions. Populated by `attachLocation`
+  // during auto-subscribe and by `tools/topics.ts` on runtime join/start;
+  // drained on shutdown and on replace-in-place.
+  const remoteTopicUnsubscribes = new Map<string, () => void>()
+
+  // Channel-broadcast subscriptions, keyed by `${location}::${channel}`.
+  // Populated by `attachLocation` auto-subscribe and by
+  // `tools/channels.ts` on runtime join; drained on leave_channel,
+  // shutdown, and replace-in-place.
+  const remoteChannelUnsubscribes = new Map<string, () => void>()
+
   // Introduce on the local transport up front so the session row
   // exists when list_sessions / DM routing queries it. Non-local
   // locations run introduce inside their own attachLocation call.
@@ -129,6 +142,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       router,
       messageBus,
       remoteUnsubscribes,
+      remoteTopicUnsubscribes,
+      remoteChannelUnsubscribes,
       resolved: {
         locations: resolved.locations,
         activeLocation: resolved.active.activeLocation,
@@ -222,6 +237,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     locations: resolved.locations,
     messageBus,
     remoteUnsubscribes,
+    remoteTopicUnsubscribes,
+    remoteChannelUnsubscribes,
     cwd: process.cwd(),
     env: process.env,
   })
@@ -244,6 +261,22 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       }
     }
     remoteUnsubscribes.clear()
+    for (const unsubscribe of remoteTopicUnsubscribes.values()) {
+      try {
+        unsubscribe()
+      } catch {
+        /* ignore */
+      }
+    }
+    remoteTopicUnsubscribes.clear()
+    for (const unsubscribe of remoteChannelUnsubscribes.values()) {
+      try {
+        unsubscribe()
+      } catch {
+        /* ignore */
+      }
+    }
+    remoteChannelUnsubscribes.clear()
     if (session.hasName()) {
       for (const transport of router.all()) {
         try {
@@ -298,6 +331,8 @@ interface ToolDeps {
   locations: ResolvedLocation[]
   messageBus: MessageBus
   remoteUnsubscribes: Map<string, () => void>
+  remoteTopicUnsubscribes: Map<string, () => void>
+  remoteChannelUnsubscribes: Map<string, () => void>
   cwd: string
   env: NodeJS.ProcessEnv
 }

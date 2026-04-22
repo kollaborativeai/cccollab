@@ -54,7 +54,11 @@ describe('Topic Tools', () => {
       vi.unstubAllGlobals()
     })
 
-    it('list_topics without channel scopes to subscribed (via sessionId)', async () => {
+    it('list_topics without channel iterates per subscribed channel at each location', async () => {
+      // Post-bug-A fix: handleListTopics's no-channel branch fans out
+      // per subscribed channel per transport instead of passing
+      // sessionName to the transport. The broker URL therefore contains
+      // `channel=<name>` for each subscribed channel (here: "default").
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ topics: [] }),
@@ -63,8 +67,9 @@ describe('Topic Tools', () => {
 
       const result = JSON.parse(await handleTopicTool('list_topics', {}, deps))
       expect(result).toEqual([])
+      expect(mockFetch).toHaveBeenCalledTimes(1)
       const calledUrl = mockFetch.mock.calls[0]![0] as string
-      expect(calledUrl).toContain('sessionId=architect')
+      expect(calledUrl).toContain('channel=default')
     })
 
     it('list_topics with explicit channel rejects unsubscribed', async () => {

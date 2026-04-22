@@ -37,7 +37,7 @@ const REF = anyApi as unknown as {
     queries: { listByChannel: unknown; getById: unknown; listJoinedForUser: unknown }
   }
   messages: {
-    mutations: { sendToChannel: unknown; sendToTopic: unknown; sendToSession: unknown }
+    mutations: { sendToChannel: unknown; sendToTopic: unknown; sendToSession: unknown; ackChannel: unknown }
     queries: { listByTopic: unknown; listByChannel: unknown; listDirectMessagesForSession: unknown }
   }
 }
@@ -143,6 +143,18 @@ export class RemoteTransport implements Transport {
    *  benefits from the narrower window. */
   private readonly topicMaxTs = new Map<string, number>()
 
+  /** Resolved Convex `Id<'channels'>` per channel name. Populated as a
+   *  side-effect of `joinChannel` (whose mutation returns the id) so
+   *  subsequent `subscribeChannelMessages` calls don't need an extra
+   *  lookup round-trip. A channel whose id is unknown falls back to a
+   *  `channels.queries.listAll` lookup on demand. */
+  private readonly channelIdsByName = new Map<string, string>()
+
+  /** Highest `ts` per channel id. Mirrors `topicMaxTs` - seeds the
+   *  reactive `listByChannel` query's `sinceTs` so the initial batch
+   *  doesn't replay pre-subscribe broadcasts. */
+  private readonly channelMaxTs = new Map<string, number>()
+
   constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
@@ -152,6 +164,22 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /**
+   * Seed the per-topic `sinceTs` cursor so the next `subscribeTopicMessages`
+   * call starts the reactive query past this ts.
+   *
+   * Callers use this immediately before subscribing to a topic whose history
+   * has already been delivered to the user (e.g. via `joinTopic`'s history
+   * field) to prevent the initial `onUpdate` batch from flooding
+   * `MessageBus` with every pre-existing message. The cursor is monotonic
+   * non-decreasing: lower values are ignored so a subsequent `joinTopic`
+   * reconnect can't regress it.
+   */
+  primeTopicCursor(topicId: string, ts: number): void {
+    const prior = this.topicMaxTs.get(topicId) ?? 0
+    if (ts > prior) this.topicMaxTs.set(topicId, ts)
   }
 
   /**
@@ -209,10 +237,13 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
     try {
-      await this.client.mutation(fn<'mutation'>(REF.channels.mutations.join), {
+      const res = (await this.client.mutation(fn<'mutation'>(REF.channels.mutations.join), {
         sessionId: this.sessionId,
         channel: args.channel,
-      })
+      })) as { channelId?: string }
+      if (typeof res?.channelId === 'string') {
+        this.channelIdsByName.set(args.channel, res.channelId)
+      }
       return { subscriberCount: 0 }
     } catch (err) {
       this.registerFailure('joinChannel', err)
@@ -560,7 +591,7 @@ export class RemoteTransport implements Transport {
         }
       },
       (err) => {
-        this.registerFailure('subscribeDirectMessages', err)
+        this.registerSubscriptionFailure('subscribeDirectMessages', err)
       },
     )
     return this.trackUnsubscribe(() => rawUnsubscribe())
@@ -605,10 +636,141 @@ export class RemoteTransport implements Transport {
         }
       },
       (err) => {
-        this.registerFailure('subscribeTopicMessages', err)
+        this.registerSubscriptionFailure('subscribeTopicMessages', err)
       },
     )
     return this.trackUnsubscribe(() => rawUnsubscribe())
+  }
+
+  /**
+   * Subscribe to a channel's reactive broadcast feed. Each new message is
+   * passed to `onEvent` as a `ParsedMessage` that MessageBus tags for the
+   * remote source when it pushes. Symmetric to `subscribeTopicMessages`
+   * but addressed by channel name (resolved to a Convex `Id<'channels'>`
+   * via the `joinChannel` mutation's returned `channelId`, with a
+   * `channels.queries.listAll` fallback when the id isn't cached).
+   *
+   * Callers are responsible for invoking the returned unsubscribe fn on
+   * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
+   * so a `shutdown()` still sweeps it if the caller drops the reference.
+   */
+  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+    if (!this.enabled || this.shutdownStarted) return () => {}
+    const seen = new BoundedIdSet(DEDUP_CAPACITY)
+
+    // Resolve the channel id. If we have it cached from a prior
+    // joinChannel, use it synchronously; otherwise kick off an async
+    // listAll lookup, then register the subscription once the id lands.
+    // The outer return type stays synchronous so callers can treat this
+    // identically to subscribeTopicMessages.
+    let innerUnsubscribe: (() => void) | null = null
+    let unsubscribed = false
+
+    const register = (channelId: string): void => {
+      if (unsubscribed) return
+      const sessionId = this.sessionId
+      // Without a sessionId we can't use the server-side cursor; fall
+      // back to no filtering. Practically attachLocation introduces
+      // before subscribing, so sessionId is always set here - but we
+      // don't want to hard-fail if the order is ever violated.
+      const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
+        sessionId !== null ? { channelId, sessionId } : { channelId }
+      innerUnsubscribe = this.client.onUpdate(
+        fn<'query'>(REF.messages.queries.listByChannel),
+        queryArgs,
+        (rows) => {
+          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+          let highestTsInBatch = 0
+          for (const row of arr) {
+            if (seen.has(row._id)) continue
+            seen.add(row._id)
+            const prior = this.channelMaxTs.get(channelId) ?? 0
+            if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
+            if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
+            onEvent({
+              sender: row.fromSessionId,
+              text: row.text,
+              ts: new Date(row.ts).toISOString(),
+              channel: args.channelName,
+              channelName: args.channelName,
+              threadTs: undefined,
+            })
+          }
+          // Ack the batch's highest ts so subsequent subscribes (incl.
+          // MCP restarts) skip re-delivering it. Fire-and-forget; a
+          // failure here is non-fatal - the NEXT successful ack bumps
+          // the cursor to cover this batch's ts too (acks are monotonic
+          // and idempotent).
+          //
+          // Critically: ack failures MUST NOT trip the degradation
+          // circuit. A transient UNAUTHENTICATED during auth-refresh or
+          // a server hiccup on a fire-and-forget call would otherwise
+          // kill the whole transport for the session. The reactive
+          // listByChannel subscription's own error path still degrades
+          // on persistent failure, which is the right signal.
+          if (highestTsInBatch > 0 && sessionId !== null) {
+            void this.client
+              .mutation(fn<'mutation'>(REF.messages.mutations.ackChannel), {
+                sessionId,
+                channelId,
+                ts: highestTsInBatch,
+              })
+              .catch((err: unknown) => {
+                const msg = err instanceof Error ? err.message : String(err)
+                this.log(`ackChannel failed (non-fatal, cursor will advance on next ack): ${msg}`)
+              })
+          }
+        },
+        (err) => {
+          this.registerSubscriptionFailure('subscribeChannelMessages', err)
+        },
+      )
+    }
+
+    const cached = this.channelIdsByName.get(args.channelName)
+    if (cached !== undefined) {
+      register(cached)
+    } else {
+      void (async () => {
+        try {
+          const rows = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+            channelId: string
+            name: string
+          }>
+          const match = rows.find((r) => r.name.toLowerCase() === args.channelName.toLowerCase())
+          if (match !== undefined) {
+            this.channelIdsByName.set(args.channelName, match.channelId)
+            register(match.channelId)
+          }
+        } catch (err) {
+          this.registerFailure('subscribeChannelMessages.lookup', err)
+        }
+      })()
+    }
+
+    return this.trackUnsubscribe(() => {
+      unsubscribed = true
+      if (innerUnsubscribe !== null) {
+        try {
+          innerUnsubscribe()
+        } catch {
+          /* best-effort */
+        }
+        innerUnsubscribe = null
+      }
+    })
+  }
+
+  /**
+   * Seed the per-channel `sinceTs` cursor (by channel id) so the next
+   * `subscribeChannelMessages` call skips broadcasts older than `ts`.
+   * No-op if the channel name hasn't been resolved yet.
+   */
+  primeChannelCursor(channelName: string, ts: number): void {
+    const channelId = this.channelIdsByName.get(channelName)
+    if (channelId === undefined) return
+    const prior = this.channelMaxTs.get(channelId) ?? 0
+    if (ts > prior) this.channelMaxTs.set(channelId, ts)
   }
 
   /**
@@ -666,6 +828,40 @@ export class RemoteTransport implements Transport {
   }
 
   // ─── internals ────────────────────────────────────────────────────────
+
+  /**
+   * Register a transient failure from a long-lived reactive subscription
+   * error callback. Unlike `registerFailure`, this variant does NOT
+   * immediately disable the transport on UNAUTHENTICATED because the
+   * underlying `ConvexClient` routinely retries with a refreshed token
+   * during the auth handshake window at startup. Only
+   * function-not-found (structural schema drift) and the sustained
+   * count-in-window path trip the breaker here.
+   */
+  private registerSubscriptionFailure(op: string, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err)
+    this.log(`subscription ${op} error (transient): ${msg}`)
+    if (isFunctionNotFoundError(err)) {
+      this.enabled = false
+      this.degradationReason = `Remote sync disabled: function not found on deployment (${msg})`
+      this.log(this.degradationReason)
+      return
+    }
+    // Intentionally NOT tripping on isAuthError: a single
+    // UNAUTHENTICATED during startup auth-refresh must not kill the
+    // whole transport. Persistent auth failures still surface via the
+    // mutation/query paths which use `registerFailure`.
+    const now = Date.now()
+    this.recentFailures.push(now)
+    while (this.recentFailures.length > 0 && now - this.recentFailures[0]! > DEGRADATION_WINDOW_MS) {
+      this.recentFailures.shift()
+    }
+    if (this.recentFailures.length >= DEGRADATION_THRESHOLD) {
+      this.enabled = false
+      this.degradationReason = `Remote sync disabled: ${this.recentFailures.length} subscription failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
+      this.log(this.degradationReason)
+    }
+  }
 
   private registerFailure(op: string, err: unknown): void {
     const msg = err instanceof Error ? err.message : String(err)

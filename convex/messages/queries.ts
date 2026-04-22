@@ -53,15 +53,42 @@ export const listByChannel = authenticatedQuery({
   args: {
     channelId: v.id('channels'),
     sinceTs: v.optional(v.number()),
+    /** When supplied, `listByChannel` consults the caller's
+     *  `channelReadCursors` row for this session and drops messages with
+     *  `ts <= lastDeliveredTs`. An explicit `sinceTs` overrides the
+     *  cursor. The MCP server's `RemoteTransport.subscribeChannelMessages`
+     *  passes its sessionId here so restart-replay is suppressed. */
+    sessionId: v.optional(v.id('sessions')),
   },
   handler: async (ctx, args) => {
     await assertCallerSubscribedToChannel(ctx, args.channelId)
-    const cutoff = args.sinceTs
+    let cutoff = args.sinceTs
+    // Per-session cursor filtering uses strict `>` so an acked `ts`
+    // isn't re-delivered. Only consulted when no explicit `sinceTs`.
+    // Session ownership is verified so a caller can't use another
+    // user's cursor to probe the channel.
+    let useExclusive = false
+    if (cutoff === undefined && args.sessionId !== undefined) {
+      const session = await ctx.db.get(args.sessionId)
+      if (session !== null && session.userId === ctx.userId) {
+        const cursor = await ctx.db
+          .query('channelReadCursors')
+          .withIndex('by_user_and_sessionName_and_channel', (q) =>
+            q.eq('userId', ctx.userId).eq('sessionName', session.sessionName).eq('channelId', args.channelId),
+          )
+          .unique()
+        if (cursor !== null) {
+          cutoff = cursor.lastDeliveredTs
+          useExclusive = true
+        }
+      }
+    }
     return await ctx.db
       .query('messages')
       .withIndex('by_channel_and_ts', (q) => {
         const scoped = q.eq('channelId', args.channelId)
-        return cutoff === undefined ? scoped : scoped.gte('ts', cutoff)
+        if (cutoff === undefined) return scoped
+        return useExclusive ? scoped.gt('ts', cutoff) : scoped.gte('ts', cutoff)
       })
       .collect()
   },

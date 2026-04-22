@@ -49,3 +49,42 @@ export const messagesTable = defineTable({
   .index('by_topic_and_ts', ['topicId', 'ts'])
   .index('by_channel_and_ts', ['channelId', 'ts'])
   .index('by_toSessionId_and_ts', ['toSessionId', 'ts'])
+
+/**
+ * `channelReadCursors` - per-(user, sessionName)-per-channel
+ * high-water-mark for delivered broadcasts.
+ *
+ * Solves the duplicate-on-restart problem: the MCP server subscribes via
+ * a Convex reactive `listByChannel` query; without a persisted cursor
+ * every restart fires the full channel backlog into the notification
+ * stream. This table stores the highest `ts` delivered to a given
+ * logical session identity; subsequent subscribes filter strictly
+ * greater than the stored cursor.
+ *
+ * Keying by `(userId, sessionName, channelId)` rather than
+ * `(sessionId, channelId)` is deliberate. cccollab's `sessions`
+ * rows are created on `introduce` and deleted on `remove` (shutdown);
+ * every MCP restart gets a fresh `sessions._id` even when the user
+ * keeps the same `sessionName`. The cursor must survive session row
+ * churn, so it ties to the stable pair. Concurrent MCPs for the same
+ * `(user, sessionName)` on different machines would share one cursor;
+ * that's fine - they are by convention the same logical client.
+ *
+ * Deployment-level failure mode: if the deployment's `channelReadCursors`
+ * table is wiped, clients see duplicates on their next subscribe. That
+ * is the documented accepted tradeoff.
+ */
+export const channelReadCursorsTable = defineTable({
+  userId: v.id('users'),
+  sessionName: v.optional(v.string()),
+  /** Legacy field from the initial keying by Convex session id. Kept
+   *  optional so old rows validate during the migration; new writes
+   *  don't populate it. A follow-up can drop it once the table has
+   *  been naturally rotated. */
+  sessionId: v.optional(v.id('sessions')),
+  channelId: v.id('channels'),
+  lastDeliveredTs: v.number(),
+  updatedAt: v.number(),
+})
+  .index('by_user_and_sessionName_and_channel', ['userId', 'sessionName', 'channelId'])
+  .index('by_user', ['userId'])
