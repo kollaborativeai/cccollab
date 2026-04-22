@@ -1,5 +1,6 @@
 dist
 .yarn
+.convex
 node_modules
 .codegraph
 i

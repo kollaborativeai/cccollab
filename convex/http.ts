@@ -24,6 +24,49 @@ function baseUrl(req: Request): string {
   return new URL(req.url).origin
 }
 
+/**
+ * Produce an RFC-6749-friendly `error_description` string from an error
+ * thrown by a token-endpoint mutation/action.
+ *
+ * Why this exists: the Convex runtime serialises a ConvexError thrown
+ * from a `runAction`-nested mutation into the parent's caught `err` as
+ * a regular `Error` whose `.message` is a wrapper string containing the
+ * full inner serialised JSON plus the Convex source-location stack —
+ * e.g.:
+ *
+ *   "Uncaught ConvexError: Uncaught ConvexError:
+ *    {"code":"PKCE_MISMATCH","message":"code_verifier does not match..."}
+ *        at handler (../../convex/oauth/tokens.ts:150:26)
+ *        at async handler (../../convex/oauth/token.ts:88:17)"
+ *
+ * Passing that verbatim through `error_description` leaks Convex file
+ * paths + line numbers on the wire, which is both noisy and an
+ * information-disclosure issue. This helper:
+ *
+ * 1. If the caught error is a `ConvexError` instance with structured
+ *    `data.message`, use that directly (happens when ConvexError is
+ *    thrown at the top level of the httpAction, without a `runAction`
+ *    boundary in between — rare on the token path, but safe).
+ * 2. Otherwise extract the inner `"message":"..."` (and `"code":"..."`)
+ *    from the wrapper string by regex. We deliberately match on the
+ *    ConvexError's own JSON payload shape, not on the surrounding
+ *    "Uncaught ConvexError:" prefix, so this is resilient to Convex
+ *    runtime changes that tweak the wrapper text.
+ * 3. Fallback to a constant "authorization grant is invalid" when no
+ *    structured payload can be recovered — never leak raw `err.message`.
+ */
+function sanitizeTokenError(err: unknown): string {
+  if (err instanceof ConvexError) {
+    const data = err.data as { code?: string; message?: string } | undefined
+    if (data?.message) return data.code ? `${data.code}: ${data.message}` : data.message
+  }
+  if (err instanceof Error) {
+    const m = err.message.match(/"code"\s*:\s*"([^"]+)"\s*,\s*"message"\s*:\s*"([^"]+)"/)
+    if (m) return `${m[1]}: ${m[2]}`
+  }
+  return 'authorization grant is invalid'
+}
+
 // --------- OAuth 2.1 metadata (RFC 8414, RFC 9728) ---------
 
 http.route({
@@ -252,7 +295,7 @@ http.route({
         })
         return jsonResponse(tokens)
       } catch (err) {
-        return errorResponse(400, 'invalid_grant', err instanceof Error ? err.message : 'error')
+        return errorResponse(400, 'invalid_grant', sanitizeTokenError(err))
       }
     }
     if (grantType === 'refresh_token') {
@@ -265,7 +308,7 @@ http.route({
         })
         return jsonResponse(tokens)
       } catch (err) {
-        return errorResponse(400, 'invalid_grant', err instanceof Error ? err.message : 'error')
+        return errorResponse(400, 'invalid_grant', sanitizeTokenError(err))
       }
     }
     return errorResponse(400, 'unsupported_grant_type')

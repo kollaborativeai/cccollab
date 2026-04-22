@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { convexTest } from 'convex-test'
 
-import { api } from '../_generated/api'
+import { api, internal } from '../_generated/api'
 import schema from '../schema'
 import { sha256Base64Url } from '../lib/crypto'
 import { identityFor, seedUser } from './helpers'
@@ -330,6 +330,117 @@ describe('oauth.authorize + token', () => {
     expect(res.status).toBe(400)
     const body = (await res.json()) as { error: string; error_description?: string }
     expect(body.error).toBe('invalid_request')
+  })
+
+  it('refresh rotation revokes the OLD access token (not just the old refresh)', async () => {
+    // Regression for a bug found via e2e testing against a real
+    // deployment: previously `rotateRefreshToken` only patched the
+    // presented refresh-token row revoked; the access token issued in
+    // the same prior pair remained live for up to ACCESS_TOKEN_TTL_MS.
+    // This made refresh rotation asymmetric with
+    // `exchangeCodeForTokens`, which explicitly sweeps all prior
+    // (userId, clientId) tokens. The fix is a full sweep here too.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-rotate-revoke-0123456789abcdef01234'
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: await sha256Base64Url(verifier),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const tokensA = await t.action(api.oauth.token.exchangeAuthCode, {
+      clientId: client.client_id,
+      code,
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+    })
+
+    // Rotate.
+    const tokensB = await t.action(api.oauth.token.refreshAccessToken, {
+      clientId: client.client_id,
+      refreshToken: tokensA.refresh_token,
+    })
+    expect(tokensB.access_token).not.toBe(tokensA.access_token)
+
+    // The OLD access token row must be revoked.
+    const oldAccess = await t.run(async (ctx) =>
+      ctx.db
+        .query('oauthAccessTokens')
+        .withIndex('by_token', (q) => q.eq('token', tokensA.access_token))
+        .unique(),
+    )
+    expect(oldAccess?.revoked).toBe(true)
+
+    // And must not resolve through the normal access-token lookup.
+    const resolved = await t.query(internal.oauth.tokens.resolveAccessToken, {
+      token: tokensA.access_token,
+    })
+    expect(resolved).toBeNull()
+
+    // The NEW access token resolves normally.
+    const newResolved = await t.query(internal.oauth.tokens.resolveAccessToken, {
+      token: tokensB.access_token,
+    })
+    expect(newResolved).not.toBeNull()
+  })
+
+  it('/token error_description does NOT leak ConvexError stack / file paths', async () => {
+    // Regression for an information-disclosure bug found via e2e
+    // testing: the caught `err.message` was passed verbatim to
+    // `error_description`. For a ConvexError thrown inside a
+    // `runAction`-nested mutation, that string contains the full
+    // wrapped stack: "Uncaught ConvexError: ... at handler
+    // (../../convex/oauth/tokens.ts:150:26) ..." — leaking source
+    // paths + line numbers on the wire. The `sanitizeTokenError`
+    // helper must extract the structured `code:message` payload
+    // without any of the wrapper text.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'alice@flatout.solutions')
+    const client = await t.mutation(api.oauth.register.register, {
+      clientName: 'Claude.ai',
+      redirectUris: ['http://127.0.0.1:8765/cb'],
+      tokenEndpointAuthMethod: 'none',
+    })
+    const verifier = 'verifier-sanitize-0123456789abcdef0123456789'
+    const { code } = await t.withIdentity(identityFor(userId)).mutation(api.oauth.authorize.issueAuthCode, {
+      clientId: client.client_id,
+      redirectUri: 'http://127.0.0.1:8765/cb',
+      codeChallenge: await sha256Base64Url(verifier),
+      codeChallengeMethod: 'S256',
+      scope: 'cccollab:topics.rw',
+    })
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: client.client_id,
+      code_verifier: 'wrong-verifier',
+      redirect_uri: 'http://127.0.0.1:8765/cb',
+    }).toString()
+    const res = await t.fetch('/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { error: string; error_description?: string }
+    expect(json.error).toBe('invalid_grant')
+    expect(json.error_description).toBeTruthy()
+    // Structured: includes our error code + human message.
+    expect(json.error_description).toContain('PKCE_MISMATCH')
+    expect(json.error_description).toContain('code_verifier')
+    // Sanitized: no Convex runtime leakage.
+    const desc = json.error_description!
+    expect(desc).not.toMatch(/Uncaught ConvexError/i)
+    expect(desc).not.toMatch(/\.ts:\d+:\d+/)
+    expect(desc).not.toMatch(/\bat handler\b/)
+    expect(desc).not.toMatch(/convex\/oauth/)
   })
 })
 

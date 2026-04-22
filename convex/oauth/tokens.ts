@@ -250,14 +250,29 @@ export const exchangeCodeForTokens = internalMutation({
 })
 
 /**
- * Refresh-token rotation issued atomically in a single mutation. Same
- * shape as `exchangeCodeForTokens`: the two inserts and the consumption
- * of the old refresh token all live in one transaction.
+ * Refresh-token rotation issued atomically in a single mutation. Shape
+ * mirrors `exchangeCodeForTokens`: validate (read-only) → read grant
+ * sentinel (read-only) → write grant sentinel → revoke all prior
+ * access + refresh tokens for `(userId, clientId)` → issue new access +
+ * refresh.
+ *
+ * The full sweep-and-revoke of all prior tokens — not just the single
+ * refresh token presented in the request — is deliberate. Without it a
+ * rotated refresh still leaves the old access token valid for up to
+ * `ACCESS_TOKEN_TTL_MS`, so an attacker holding a stolen access token
+ * keeps access for nearly an hour after the victim has rotated. This
+ * also makes rotation semantically symmetric with `exchangeCodeForTokens`:
+ * issuing new tokens for a `(userId, clientId)` pair always invalidates
+ * every prior pair for that pair, regardless of which endpoint produced
+ * them. OAuth 2.1 §4.14.2 phrases this as "MAY", but every production
+ * AS (Google, Auth0, Okta) does it, and a real e2e test against a
+ * deployment caught this gap.
  *
  * Concurrency: two parallel rotate calls with the same old token both
- * read+patch the same `oauthRefreshTokens` document by ID, so Convex
- * OCC fires naturally on the shared document. The grant-row bump below
- * is defence-in-depth + a useful "last rotation" telemetry signal.
+ * read+patch the same `oauthRefreshTokens` document by ID, so OCC fires
+ * on that shared document. Two parallel rotates of DIFFERENT refresh
+ * tokens for the same `(userId, clientId)` conflict on the grant
+ * sentinel — same interval-OCC reasoning as the exchange mutation.
  */
 export const rotateRefreshToken = internalMutation({
   args: {
@@ -266,7 +281,16 @@ export const rotateRefreshToken = internalMutation({
     accessToken: v.string(),
     refreshToken: v.string(),
   },
-  handler: async (ctx, args): Promise<{ userId: Id<'users'>; scope: string; sessionId: Id<'sessions'> }> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    userId: Id<'users'>
+    scope: string
+    sessionId: Id<'sessions'>
+    accessRevoked: number
+    refreshRevoked: number
+  }> => {
     // 1. Validate the refresh token (read-only).
     const row = await ctx.db
       .query('oauthRefreshTokens')
@@ -282,17 +306,14 @@ export const rotateRefreshToken = internalMutation({
     // 2. Read the grant sentinel (still read-only). Same "validate,
     //    then commit" discipline as `exchangeCodeForTokens`: any throw
     //    here (e.g., a pathological `.unique()` failure) rolls back
-    //    before we revoke the old refresh token, so the client can
-    //    legitimately retry.
+    //    before we revoke anything, so the client can legitimately
+    //    retry the rotation.
     const grant = await ctx.db
       .query('oauthGrants')
       .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
       .unique()
 
-    // 3. Revoke the old refresh token.
-    await ctx.db.patch(row._id, { revoked: true })
-
-    // 4. Bump the grant sentinel.
+    // 3. Bump the grant sentinel.
     const grantNow = nowMs()
     if (grant) {
       await ctx.db.patch(grant._id, { version: grant.version + 1, lastRotatedAt: grantNow })
@@ -303,6 +324,34 @@ export const rotateRefreshToken = internalMutation({
         version: 1,
         lastRotatedAt: grantNow,
       })
+    }
+
+    // 4. Revoke every non-revoked access + refresh token for the same
+    //    (userId, clientId). This includes the refresh token presented
+    //    in this request, so the explicit revoke-of-row below falls out
+    //    of this sweep automatically. Matches the sweep in
+    //    `exchangeCodeForTokens` so the invariant "issuing new tokens
+    //    for (userId, clientId) invalidates every prior pair" holds
+    //    across both code-exchange and refresh-rotate entry points.
+    let accessRevoked = 0
+    const accessRows = await ctx.db
+      .query('oauthAccessTokens')
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
+      .collect()
+    for (const t of accessRows) {
+      if (t.revoked) continue
+      await ctx.db.patch(t._id, { revoked: true })
+      accessRevoked++
+    }
+    let refreshRevoked = 0
+    const refreshRows = await ctx.db
+      .query('oauthRefreshTokens')
+      .withIndex('by_userId_and_clientId', (q) => q.eq('userId', row.userId).eq('clientId', args.clientId))
+      .collect()
+    for (const t of refreshRows) {
+      if (t.revoked) continue
+      await ctx.db.patch(t._id, { revoked: true })
+      refreshRevoked++
     }
 
     await ctx.db.insert('oauthAccessTokens', {
@@ -323,7 +372,7 @@ export const rotateRefreshToken = internalMutation({
       expiresAt: nowMs() + REFRESH_TOKEN_TTL_MS,
       revoked: false,
     })
-    return { userId: row.userId, scope: row.scope, sessionId: row.sessionId }
+    return { userId: row.userId, scope: row.scope, sessionId: row.sessionId, accessRevoked, refreshRevoked }
   },
 })
 
