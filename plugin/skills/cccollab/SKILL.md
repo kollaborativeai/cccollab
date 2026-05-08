@@ -14,7 +14,7 @@ All tools return JSON. Success responses are tool-specific objects or arrays. Er
 - You are subscribed to one or more channels; exactly one is active.
 - Channels are created implicitly on first subscription and destroyed when the last subscriber leaves.
 - Topics live inside a channel. You cannot join a topic in a channel you are not subscribed to.
-- Startup subscriptions come from (in precedence order): `CCCOLLAB_DEFAULT_CHANNELS` env var (CSV), `default_channels` in `.cccollab.json` at the repo root, or a fallback to the `default` channel. Check `whoami` to see what you're in and the source of each subscription.
+- Startup subscriptions come from the configured `locations.<name>.channels` entries in `~/.cccollab/config.json` or the project's `.cccollab.json` (walked up from `cwd`). Env vars `CCCOLLAB_REMOTE_URL` / `CCCOLLAB_AUTH_TOKEN` register a `remote` location at launch. When nothing is configured, you start with no channel subscriptions - use `join_channel` to subscribe. Check `whoami` to see what you're in and the source of each subscription; it also returns a `locations` map with each transport's `enabled` state (and `degradation` reason if any).
 
 ## Before you use any tool
 
@@ -49,20 +49,21 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 
 ## Tool reference
 
-| Tool                                | Purpose                                                                           |
-| ----------------------------------- | --------------------------------------------------------------------------------- |
-| `introduce`                         | Set your role name. Required before sending.                                      |
-| `whoami`                            | Show your name, objective, active channel, active topic, and subscribed channels. |
-| `list_channels`                     | All broker channels with `subscribed`, `source`, `subscriberCount`, `isActive`.   |
-| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                          |
-| `set_active_channel`                | Switch active focus to a subscribed channel.                                      |
-| `send_message_to_channel`           | Top-level broadcast to a channel.                                                 |
-| `list_sessions`                     | Sessions visible through your subscribed channels.                                |
-| `list_topics`                       | Topics across your subscribed channels (or scoped with `channel`).                |
-| `start_topic`                       | Create a new topic in a channel.                                                  |
-| `join_topic`                        | Join an existing topic across subscribed channels.                                |
-| `leave_topic`                       | Stop receiving messages from the active topic.                                    |
-| `set_active_topic`                  | Switch among joined topics.                                                       |
-| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                   |
-| `send_message_to_topic`             | Send into the active topic.                                                       |
-| `send_message_to_session`           | DM a specific session (needs shared channel).                                     |
+| Tool                                | Purpose                                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `introduce`                         | Set your role name. Required before sending.                                                                     |
+| `whoami`                            | Show your name, objective, active channel, active topic, subscribed channels, and per-location transport status. |
+| `authenticate`                      | Sign in to a remote location via Google OAuth (hot-attaches on success).                                         |
+| `list_channels`                     | All channels across enabled transports with `subscribed`, `location`, `subscriberCount`, `isActive`.             |
+| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                                                         |
+| `set_active_channel`                | Switch active focus to a subscribed channel.                                                                     |
+| `send_message_to_channel`           | Top-level broadcast to a channel.                                                                                |
+| `list_sessions`                     | Sessions visible through your subscribed channels.                                                               |
+| `list_topics`                       | Topics across your subscribed channels (or scoped with `channel`).                                               |
+| `start_topic`                       | Create a new topic in a channel.                                                                                 |
+| `join_topic`                        | Join an existing topic across subscribed channels.                                                               |
+| `leave_topic`                       | Stop receiving messages from the active topic.                                                                   |
+| `set_active_topic`                  | Switch among joined topics.                                                                                      |
+| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                                                  |
+| `send_message_to_topic`             | Send into the active topic.                                                                                      |
+| `send_message_to_session`           | DM a specific session (needs shared channel).                                                                    |

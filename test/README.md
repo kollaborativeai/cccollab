@@ -17,9 +17,10 @@ claude plugin install cccollab@cccollab-test
 
 No `npm link` - that would replace the global `cccollab` binary on PATH and
 break every production cccollab session on the machine. Instead, `test/start.sh`
-prepends this repo's `bin/` to PATH for just the test session, so the spawned
-MCP server resolves to local `src/` via tsx while production sessions outside
-the harness keep using the globally installed `@flatoutsolutions/cccollab`.
+prepends this repo's `mcp_server/bin/` to PATH for just the test session, so
+the spawned MCP server resolves to local `mcp_server/src/` via tsx while
+production sessions outside the harness keep using the globally installed
+`@flatoutsolutions/cccollab`.
 
 `test/.claude/settings.json` enables `cccollab@cccollab-test` and disables the
 production `cccollab@flatoutsolutions` plugin so the two never collide in this
@@ -40,7 +41,7 @@ Open two terminals. In each, from anywhere in the repo:
 Each launch:
 
 - `cd`s into `test/`, so `.cccollab.json` is found by walking up from `cwd`.
-- Prepends the repo's `bin/` to PATH so the spawned MCP server resolves to local `src/` via tsx, not the global install.
+- Prepends the repo's `mcp_server/bin/` to PATH so the spawned MCP server resolves to local `mcp_server/src/` via tsx, not the global install.
 - Exports `CCCOLLAB_NAME=<positional>` so the session pre-seeds its identity.
 - Runs `claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:cccollab@cccollab-test -n <name>`.
 
