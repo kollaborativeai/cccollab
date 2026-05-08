@@ -566,6 +566,7 @@ export class RemoteTransport implements Transport {
     // second one. See convex/messages/queries.ts for the matching
     // inclusive cursor on the server side.
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listDirectMessagesForSession),
       { sessionId: this.sessionId },
@@ -580,6 +581,10 @@ export class RemoteTransport implements Transport {
         for (const row of arr) {
           if (seen.has(row._id)) continue
           seen.add(row._id)
+          // Skip self-echo: messages this session sent shouldn't push back
+          // into our own Claude as `<channel>` tags. Mirrors the local
+          // broker's `isExactSelf` drop in broker-event-listener.ts.
+          if (row.fromSessionId === ownSessionId) continue
           onEvent({
             sender: row.fromSessionId,
             text: row.text,
@@ -615,6 +620,7 @@ export class RemoteTransport implements Transport {
     const queryArgs: { topicId: string; sinceTs?: number } =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(REF.messages.queries.listByTopic),
       queryArgs,
@@ -625,6 +631,11 @@ export class RemoteTransport implements Transport {
           seen.add(row._id)
           const prior = this.topicMaxTs.get(args.topicId) ?? 0
           if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
+          // Skip self-echo: messages this session just sent shouldn't push
+          // back into our own Claude. The cursor advance above still
+          // happens so the next reconnect doesn't re-deliver our own row.
+          // Mirrors the local broker's `isExactSelf` drop.
+          if (row.fromSessionId === ownSessionId) continue
           onEvent({
             sender: row.fromSessionId,
             text: row.text,
@@ -687,6 +698,11 @@ export class RemoteTransport implements Transport {
             const prior = this.channelMaxTs.get(channelId) ?? 0
             if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
             if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
+            // Skip self-echo: own broadcasts shouldn't push back to our
+            // own Claude. Cursor + ack advance above still happens so
+            // we don't re-deliver our own row on reconnect. Mirrors the
+            // local broker's self-broadcast drop.
+            if (sessionId !== null && row.fromSessionId === sessionId) continue
             onEvent({
               sender: row.fromSessionId,
               text: row.text,
