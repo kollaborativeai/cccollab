@@ -133,3 +133,56 @@ describe('topics.listByChannel', () => {
     expect(withArchived.length).toBe(1)
   })
 })
+
+describe('topics.getById', () => {
+  it('returns the topic when the caller is subscribed to its channel', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 'visible',
+    })
+    const fetched = await asStefan.query(api.topics.queries.getById, { topicId })
+    expect(fetched._id).toBe(topicId)
+    expect(fetched.topic).toBe('visible')
+  })
+
+  it('rejects with NOT_SUBSCRIBED_TO_CHANNEL for users outside the parent channel', async () => {
+    // Alice creates a topic in `eng`. Bob is signed in but not subscribed
+    // to `eng` — `getById` must NOT leak the topic to him even though he
+    // can guess the id.
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    await asAlice.mutation(api.channels.mutations.join, { sessionId: aliceSession, channel: 'eng' })
+    const { topicId } = await asAlice.mutation(api.topics.mutations.start, {
+      sessionId: aliceSession,
+      channel: 'eng',
+      topic: 'private',
+    })
+    await expect(asBob.query(api.topics.queries.getById, { topicId })).rejects.toThrow(/NOT_SUBSCRIBED_TO_CHANNEL/)
+  })
+
+  it('returns archived topics in channels the caller is still subscribed to', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 'old',
+    })
+    await asStefan.mutation(api.topics.mutations.archive, { sessionId, topicId })
+    const fetched = await asStefan.query(api.topics.queries.getById, { topicId })
+    expect(fetched.state).toBe('archived')
+  })
+})

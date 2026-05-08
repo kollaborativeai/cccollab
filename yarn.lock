@@ -577,6 +577,7 @@ __metadata:
     "@eslint/js": "npm:^10.0.1"
     "@modelcontextprotocol/sdk": "npm:^1.29.0"
     "@types/node": "npm:^25.6.0"
+    convex: "npm:^1.35.1"
     cosmiconfig: "npm:^9.0.1"
     deepmerge: "npm:^4.3.1"
     eslint: "npm:^10.2.1"

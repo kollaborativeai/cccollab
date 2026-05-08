@@ -243,15 +243,20 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     env: process.env,
   })
 
-  let shuttingDown = false
+  let shutdownInFlight: Promise<void> | null = null
   const shutdown = async (reason: string): Promise<never> => {
-    if (shuttingDown) {
-      await new Promise<void>(() => {
-        /* let the in-flight shutdown finish */
-      })
+    // Re-entry guard: stdin 'end' + 'close' both fire on a clean detach,
+    // and SIGINT/SIGTERM can race with either. Anyone arriving after the
+    // first call awaits the in-flight cleanup and then exits — they must
+    // not start a parallel teardown of the same resources.
+    if (shutdownInFlight !== null) {
+      await shutdownInFlight
       process.exit(0)
     }
-    shuttingDown = true
+    let resolveShutdown: () => void = () => {}
+    shutdownInFlight = new Promise<void>((resolve) => {
+      resolveShutdown = resolve
+    })
     console.error(`[cccollab] Shutting down (${reason})...`)
     for (const unsubscribe of remoteUnsubscribes.values()) {
       try {
@@ -302,6 +307,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     } catch {
       /* ignore */
     }
+    resolveShutdown()
     process.exit(0)
   }
 

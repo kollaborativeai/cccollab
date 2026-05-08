@@ -175,6 +175,16 @@ async function resolveRecipient(
   args: { toSessionId?: Id<'sessions'>; toSessionName?: string },
 ): Promise<Doc<'sessions'>> {
   if (args.toSessionId !== undefined) {
+    if (args.toSessionId === senderSessionId) {
+      // Mirror the by-name self-skip: a session can't DM itself.
+      // `firstSharedChannelId` would otherwise return a hit (every
+      // session shares channels with itself) and the message would be
+      // written successfully, which is non-sensical.
+      throw new ConvexError({
+        code: 'DM_RECIPIENT_NOT_FOUND',
+        message: 'Cannot send a direct message to your own session.',
+      })
+    }
     const byId = await ctx.db.get(args.toSessionId)
     if (byId === null) {
       throw new ConvexError({ code: 'DM_RECIPIENT_NOT_FOUND', message: `No session ${args.toSessionId}.` })

@@ -106,6 +106,26 @@ describe('saveLocationAuth', () => {
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(true)
   })
 
+  it('recovers from a stale lock left by a crashed peer', async () => {
+    // Plant a lock file with an mtime well past the staleness threshold
+    // (STALE_LOCK_MS = 30s in save.ts). saveLocationAuth must reap it
+    // and proceed; without the reaper we'd hit the 5s timeout.
+    const { utimesSync } = await import('node:fs')
+    const lockPath = `${CCCOLLAB_CONFIG_FILE}.lock`
+    writeFileSync(lockPath, '999999')
+    const ancient = (Date.now() - 60_000) / 1000
+    utimesSync(lockPath, ancient, ancient)
+
+    saveLocationAuth('flatout', {
+      url: 'https://a.convex.cloud',
+      accessToken: 'after-stale',
+      refreshToken: 'r',
+    })
+    const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
+    expect(content.locations.flatout.accessToken).toBe('after-stale')
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
   it('preserves a corrupt prior config as a timestamped backup before overwriting', async () => {
     // Write a file that passes JSON.parse but fails the zod schema
     // (a zod failure should also trigger the backup path).

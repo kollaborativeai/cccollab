@@ -397,6 +397,15 @@ export class RemoteTransport implements Transport {
         createdAt: new Date(doc.createdAt).toISOString(),
       }
     } catch (err) {
+      // The Convex backend rejects `getById` with NOT_SUBSCRIBED_TO_CHANNEL
+      // (or TOPIC_NOT_FOUND) when the caller has no access — these are
+      // expected user-input errors, not transport failures. Treat them as
+      // "no such visible topic" so the tool layer surfaces the standard
+      // not-found path without tripping the degradation circuit.
+      const code = extractConvexErrorCode(err)
+      if (code === 'NOT_SUBSCRIBED_TO_CHANNEL' || code === 'TOPIC_NOT_FOUND') {
+        return null
+      }
       this.registerFailure('getTopicById', err)
       return null
     }

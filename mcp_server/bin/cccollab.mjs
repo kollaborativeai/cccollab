@@ -32,26 +32,16 @@ if (existsSync(srcEntry)) {
     tsxCli = require.resolve('tsx/cli')
   } catch {}
   if (tsxCli) {
-    runChild(
-      spawn(
-        process.execPath,
-        [tsxCli, srcEntry, ...process.argv.slice(2)],
-        { stdio: 'inherit' },
-      ),
-    )
+    runChild(spawn(process.execPath, [tsxCli, srcEntry, ...process.argv.slice(2)], { stdio: 'inherit' }))
   } else if (existsSync(distEntry)) {
     await import(pathToFileURL(distEntry).href)
   } else {
-    console.error(
-      'cccollab: src/server.ts present but tsx not installed, and no dist/server.js',
-    )
+    console.error('cccollab: src/server.ts present but tsx not installed, and no dist/server.js')
     process.exit(1)
   }
 } else if (existsSync(distEntry)) {
   await import(pathToFileURL(distEntry).href)
 } else {
-  console.error(
-    'cccollab: no runnable target (expected src/server.ts + tsx, or dist/server.js)',
-  )
+  console.error('cccollab: no runnable target (expected src/server.ts + tsx, or dist/server.js)')
   process.exit(1)
 }

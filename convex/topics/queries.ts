@@ -3,6 +3,7 @@ import { v, ConvexError } from 'convex/values'
 import type { Id } from '../_generated/dataModel'
 import { authenticatedQuery, type AuthenticatedQueryCtx } from '../utils/auth'
 import { normalizeChannelName } from '../channels/helpers'
+import { assertCallerSubscribedToChannel } from './helpers'
 
 /**
  * Topics inside a channel.
@@ -50,8 +51,19 @@ export const listByChannel = authenticatedQuery({
   },
 })
 
-/** Single topic by id. Unlike the list query this does NOT enforce channel
- *  subscription - callers may want to fetch an archived topic they left. */
+/**
+ * Single topic by id. Caller must be subscribed to the parent channel —
+ * otherwise we'd leak topic existence and contents (name, channel,
+ * creator) to any signed-in user who guesses an id. Topic ids are
+ * server-issued and not user-secret, so the membership check is the
+ * actual access control.
+ *
+ * Archived topics in channels the caller is still subscribed to remain
+ * fetchable; this is the legitimate "look up my old archived topic" use
+ * case. Leaving a channel removes the caller's topic memberships
+ * (`channels.mutations.leave`), so a topic in a channel the caller has
+ * abandoned is correctly inaccessible here.
+ */
 export const getById = authenticatedQuery({
   args: { topicId: v.id('topics') },
   handler: async (ctx, args) => {
@@ -59,6 +71,7 @@ export const getById = authenticatedQuery({
     if (topic === null) {
       throw new ConvexError({ code: 'TOPIC_NOT_FOUND', message: `No topic with id ${args.topicId}.` })
     }
+    await assertCallerSubscribedToChannel(ctx, topic.channelId)
     return topic
   },
 })
