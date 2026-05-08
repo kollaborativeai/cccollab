@@ -39,7 +39,7 @@ export async function openBrowser(url: string): Promise<void> {
 function resolveLauncher(url: string): [string, string[]] {
   const p = platform()
   if (p === 'darwin') return ['open', [url]]
-  if (p === 'win32') return ['cmd', ['/c', 'start', '""', url]]
+  if (p === 'win32') return ['rundll32', ['url.dll,FileProtocolHandler', url]]
   // linux and others
   return ['xdg-open', [url]]
 }
