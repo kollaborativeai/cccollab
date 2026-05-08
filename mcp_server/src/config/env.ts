@@ -51,10 +51,15 @@ export function applyEnvOverrides(config: CccollabConfig, env: NodeJS.ProcessEnv
   if (envUrl !== undefined) {
     next.locations = next.locations ?? {}
     // Clear every existing location's active flag so only the
-    // env-registered one is active after this pass.
+    // env-registered one is active after this pass. The cascade in
+    // active.ts treats a location as active when it has any active
+    // channel or topic (see schema.ts), so we must also strip
+    // `active` from every nested channel and topic - otherwise the
+    // cascade re-promotes the location we just deactivated and the
+    // resolver throws "exactly one active location required".
     for (const [, location] of Object.entries(next.locations)) {
       if (location) {
-        delete (location as { active?: boolean }).active
+        clearActiveCascade(location)
       }
     }
     const existing = (next.locations[REMOTE_ENV_LOCATION] as LocationConfig | undefined) ?? {}
@@ -78,6 +83,26 @@ export function applyEnvOverrides(config: CccollabConfig, env: NodeJS.ProcessEnv
 function stringOrUndefined(value: string | undefined): string | undefined {
   if (typeof value !== 'string') return undefined
   return value.trim() === '' ? undefined : value
+}
+
+/**
+ * Strip `active` flags from a location and every channel and topic
+ * inside it. Called when CCCOLLAB_REMOTE_URL hands activeness to the
+ * env-registered `remote` location: any leftover active flag at any
+ * depth would let the cascade in active.ts re-promote the location.
+ */
+function clearActiveCascade(location: LocationConfig): void {
+  delete (location as { active?: boolean }).active
+  if (!location.channels) return
+  for (const channel of Object.values(location.channels)) {
+    if (!channel) continue
+    delete (channel as { active?: boolean }).active
+    if (!channel.topics) continue
+    for (const topic of Object.values(channel.topics)) {
+      if (!topic) continue
+      delete (topic as { active?: boolean }).active
+    }
+  }
 }
 
 /**
