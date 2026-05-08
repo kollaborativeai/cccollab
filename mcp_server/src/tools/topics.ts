@@ -744,16 +744,30 @@ async function listTopicsAcrossTransports(
   deps: TopicToolDeps,
   opts: { includeArchived?: boolean } = {},
 ): Promise<LocatedTopic[]> {
+  // Fan out per (transport, subscribed channel at that location). The
+  // remote transport's `listTopics` requires a channel arg server-side
+  // (the Convex `topics.queries.listByChannel` query has no
+  // cross-channel variant), so calling it without one returns []. To
+  // keep behaviour uniform — and because the union we actually want is
+  // "topics in channels I'm subscribed to" — we always pass a channel
+  // and iterate. Without this, fuzzy `join_topic <name>` against a
+  // remote topic silently fails: the name path resolves through
+  // listTopicsAcrossTransports.
   const located: LocatedTopic[] = []
+  const subscribed = deps.context.getSubscribedChannels()
   for (const transport of deps.router.enabled()) {
-    try {
-      const rows = await transport.listTopics({
-        sessionName: deps.session.displayName,
-        includeArchived: opts.includeArchived,
-      })
-      for (const r of rows) located.push({ ...r, location: transport.source })
-    } catch {
-      // skip disabled or unreachable transport
+    const channelsAtLocation = subscribed.filter((c) => c.location === transport.source)
+    for (const { name: channel } of channelsAtLocation) {
+      try {
+        const rows = await transport.listTopics({
+          sessionName: deps.session.displayName,
+          channel,
+          includeArchived: opts.includeArchived,
+        })
+        for (const r of rows) located.push({ ...r, location: transport.source })
+      } catch {
+        // skip disabled or unreachable transport
+      }
     }
   }
   return located

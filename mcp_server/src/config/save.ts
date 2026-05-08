@@ -34,13 +34,17 @@ export interface LocationAuth {
  *
  * Semantics:
  *   - Lock file is a sibling of the config file (`<file>.lock`).
+ *   - The holder writes its PID into the lock file as the body.
  *   - Acquired with `writeFileSync({flag: 'wx'})` so creation is
  *     atomic — the OS guarantees only one creator wins the EEXIST
  *     race.
  *   - Released by deleting the file in `finally`.
- *   - A lock older than `STALE_LOCK_MS` is treated as abandoned (the
- *     holding process crashed before its `finally` could run). The
- *     waiter unlinks it and retries.
+ *   - A lock is only treated as abandoned (and reaped) when its mtime
+ *     is older than STALE_LOCK_MS AND the PID inside is no longer a
+ *     live process. The two-condition check prevents a slow-but-alive
+ *     holder (NFS hang, swap thrash, debugger SIGSTOP) from being
+ *     reaped concurrently with its own write — a same-machine concern
+ *     since the lock only protects same-machine contention anyway.
  *   - We poll on EEXIST with short backoff up to `LOCK_TIMEOUT_MS`. In
  *     the common case (no contention) the loop runs once.
  */
@@ -52,6 +56,24 @@ function lockFilePath(): string {
   return `${CCCOLLAB_CONFIG_FILE}.lock`
 }
 
+/** True if `pid` is unset, unparseable, or no longer a live process on
+ *  this machine. `process.kill(pid, 0)` is the standard liveness probe:
+ *  signal 0 performs the existence/permission check without delivering
+ *  anything. ESRCH (no such process) means dead; EPERM means alive but
+ *  owned by another user (still alive — don't reap). Any other thrown
+ *  error is treated conservatively as "still alive" so we never reap a
+ *  lock we can't prove is dead. */
+function isPidDead(raw: string): boolean {
+  const pid = Number.parseInt(raw.trim(), 10)
+  if (!Number.isFinite(pid) || pid <= 0) return true
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
 function acquireLock(): void {
   const lock = lockFilePath()
   const deadline = Date.now() + LOCK_TIMEOUT_MS
@@ -61,16 +83,27 @@ function acquireLock(): void {
       return
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-      // Reap a stale lock so we don't deadlock behind a crashed peer.
+      // Reap a stale lock only if the holder is provably gone — both
+      // mtime past the staleness threshold AND PID no longer alive.
+      // Reaping a slow-but-alive holder would let two processes into
+      // the critical section together.
       try {
         const age = Date.now() - statSync(lock).mtimeMs
         if (age > STALE_LOCK_MS) {
+          let holderPid = ''
           try {
-            unlinkSync(lock)
+            holderPid = readFileSync(lock, 'utf-8')
           } catch {
-            /* another waiter unlinked it first; fall through to retry */
+            /* lock vanished; retry */
           }
-          continue
+          if (isPidDead(holderPid)) {
+            try {
+              unlinkSync(lock)
+            } catch {
+              /* another waiter unlinked it first; fall through to retry */
+            }
+            continue
+          }
         }
       } catch {
         // Lock vanished between EEXIST and stat: retry immediately.
@@ -128,31 +161,92 @@ export function saveLocationAuth(locationName: string, auth: LocationAuth): void
   ensureHomeDir()
   acquireLock()
   try {
-    const existing = readExisting()
-    const next = existing
-    next.locations = next.locations ?? {}
-    const prior = (next.locations[locationName] as LocationConfig | undefined) ?? {}
-    next.locations[locationName] = {
-      ...prior,
-      ...(auth.url !== undefined ? { url: auth.url } : {}),
-      accessToken: auth.accessToken,
-      refreshToken: auth.refreshToken,
-      ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
-      ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
-      updatedAt: auth.updatedAt ?? Date.now(),
-    }
-
-    const tmp = `${CCCOLLAB_CONFIG_FILE}.${process.pid}.tmp`
-    writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
-    try {
-      chmodSync(tmp, 0o600)
-    } catch {
-      // chmod failed (probably Windows); tolerated - the mode arg above
-      // already covers POSIX.
-    }
-    renameSync(tmp, CCCOLLAB_CONFIG_FILE)
+    writeLocationAuthInLock(locationName, auth)
   } finally {
     releaseLock()
+  }
+}
+
+/**
+ * Inner read-modify-write of `saveLocationAuth`, factored out so callers
+ * already holding the config lock (via `withConfigLock`) can perform
+ * the persist step without re-entering the lock — re-entering would
+ * deadlock because the lock is not reentrant. External callers must
+ * use `saveLocationAuth` instead.
+ */
+function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void {
+  const existing = readExisting()
+  const next = existing
+  next.locations = next.locations ?? {}
+  const prior = (next.locations[locationName] as LocationConfig | undefined) ?? {}
+  next.locations[locationName] = {
+    ...prior,
+    ...(auth.url !== undefined ? { url: auth.url } : {}),
+    accessToken: auth.accessToken,
+    refreshToken: auth.refreshToken,
+    ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
+    ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
+    updatedAt: auth.updatedAt ?? Date.now(),
+  }
+
+  const tmp = `${CCCOLLAB_CONFIG_FILE}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+  try {
+    chmodSync(tmp, 0o600)
+  } catch {
+    // chmod failed (probably Windows); tolerated - the mode arg above
+    // already covers POSIX.
+  }
+  renameSync(tmp, CCCOLLAB_CONFIG_FILE)
+}
+
+/**
+ * Run an arbitrary critical section under the config lock. The
+ * callback receives a `persist` function it can use to write a
+ * location's auth atomically inside the same lock acquisition; this is
+ * the only way to combine a re-read with a save without a TOCTOU gap
+ * across processes.
+ *
+ * The refresh path in `remote/client.ts` uses this to: (1) read the
+ * current persisted refresh token from disk, (2) decide whether to
+ * issue a refresh call or adopt tokens written by a peer process, and
+ * (3) persist any new tokens — all under the same lock, so two
+ * processes refreshing the same location can never both consume the
+ * same single-use refresh token.
+ *
+ * The callback may be async; the lock is released in `finally` so a
+ * thrown rejection releases cleanly.
+ */
+export async function withConfigLock<T>(
+  callback: (persist: (locationName: string, auth: LocationAuth) => void) => Promise<T>,
+): Promise<T> {
+  ensureHomeDir()
+  acquireLock()
+  try {
+    return await callback(writeLocationAuthInLock)
+  } finally {
+    releaseLock()
+  }
+}
+
+/**
+ * Read the persisted auth fields for one location, or null if the file
+ * is absent / unreadable / has no entry for this location. Does NOT
+ * acquire the lock; callers that need a coherent read+write should
+ * call this from within `withConfigLock`.
+ */
+export function loadPersistedLocationAuth(
+  locationName: string,
+): { url?: string; accessToken?: string; refreshToken?: string; userEmail?: string; userId?: string } | null {
+  const existing = readExisting()
+  const loc = existing.locations?.[locationName] as LocationConfig | undefined
+  if (!loc) return null
+  return {
+    url: loc.url,
+    accessToken: loc.accessToken,
+    refreshToken: loc.refreshToken,
+    userEmail: loc.userEmail,
+    userId: loc.userId,
   }
 }
 

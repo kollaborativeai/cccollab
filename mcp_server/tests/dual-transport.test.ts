@@ -64,8 +64,16 @@ class FakeTransport implements Transport {
     },
   )
   listTopics = vi.fn(
-    async (_args: { sessionName?: string; channel?: string; includeArchived?: boolean }): Promise<TransportTopic[]> => {
-      return [...this.topics.values()]
+    async (args: { sessionName?: string; channel?: string; includeArchived?: boolean }): Promise<TransportTopic[]> => {
+      // Honour the channel filter so this fake models production
+      // behaviour (the remote transport's `listTopics` requires a
+      // channel server-side; without filtering, a buggy caller that
+      // forgets to pass `channel` would silently match any topic in
+      // the test fixture).
+      const all = [...this.topics.values()]
+      if (args.channel === undefined) return all
+      const want = args.channel.toLowerCase()
+      return all.filter((t) => t.channel.toLowerCase() === want)
     },
   )
   getTopicById = vi.fn(async (args: { sessionName: string; topicId: string }): Promise<TransportTopic | null> => {
@@ -265,6 +273,25 @@ describe('Dual transport: topic routing by id', () => {
     await handleTopicTool('archive_topic', {}, deps)
     expect(remote.archiveTopic).toHaveBeenCalledTimes(1)
     expect(local.archiveTopic).not.toHaveBeenCalled()
+  })
+
+  it('join_topic by NAME finds a remote topic via per-channel fan-out', async () => {
+    // Regression: listTopicsAcrossTransports used to call
+    // transport.listTopics() with no channel arg. The remote
+    // transport's listTopics short-circuits to [] without a channel,
+    // so name-based join_topic against a remote topic silently failed.
+    // The fix fans out per (transport, subscribed channel at that
+    // location); this test asserts the fan-out happens.
+    const deps = makeDeps([local, remote])
+    deps.context.joinChannel('cccollab', 'manual', 'remote')
+    const result = JSON.parse(await handleTopicTool('join_topic', { topic: 'remote-topic' }, deps))
+    expect(result.id).toBe(remoteConvexId)
+    expect(result.location).toBe('remote')
+    expect(remote.joinTopic).toHaveBeenCalledWith({ sessionName: 'architect', topicId: remoteConvexId })
+    expect(local.joinTopic).not.toHaveBeenCalled()
+    // The remote fake's listTopics was invoked with the subscribed
+    // channel name — the diagnostic that proves the fan-out happened.
+    expect(remote.listTopics).toHaveBeenCalledWith(expect.objectContaining({ channel: 'cccollab' }))
   })
 })
 

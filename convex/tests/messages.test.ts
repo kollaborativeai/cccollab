@@ -134,6 +134,24 @@ describe('messages.sendToSession (DM)', () => {
       }),
     ).rejects.toThrow(/DM_RECIPIENT_AMBIGUOUS/)
   })
+
+  it('rejects a self-DM by id with DM_RECIPIENT_NOT_FOUND', async () => {
+    // Without the by-id self-skip, firstSharedChannelId would always
+    // succeed (every session shares channels with itself) and the DM
+    // would write — so this guards a real foot-gun, not a hypothetical.
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    await expect(
+      asStefan.mutation(api.messages.mutations.sendToSession, {
+        sessionId,
+        toSessionId: sessionId,
+        text: 'note to self',
+      }),
+    ).rejects.toThrow(/DM_RECIPIENT_NOT_FOUND/)
+  })
 })
 
 describe('messages.listByTopic archived-topic filter', () => {

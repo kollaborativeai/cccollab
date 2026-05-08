@@ -60,9 +60,10 @@ export const listByChannel = authenticatedQuery({
  *
  * Archived topics in channels the caller is still subscribed to remain
  * fetchable; this is the legitimate "look up my old archived topic" use
- * case. Leaving a channel removes the caller's topic memberships
- * (`channels.mutations.leave`), so a topic in a channel the caller has
- * abandoned is correctly inaccessible here.
+ * case. The gate consults `channelMembers`: leaving a channel removes
+ * the caller's `channelMembers` row (`channels.mutations.leave`), so a
+ * topic in a channel the caller has abandoned correctly fails the
+ * membership check here regardless of any leftover topicMembers state.
  */
 export const getById = authenticatedQuery({
   args: { topicId: v.id('topics') },

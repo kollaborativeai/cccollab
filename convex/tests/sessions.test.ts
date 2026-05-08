@@ -173,4 +173,28 @@ describe('sessions.listByChannel', () => {
     const asAlice = t.withIdentity(identityFor(alice))
     expect(await asAlice.query(api.sessions.queries.listByChannel, { channel: 'eng' })).toEqual([])
   })
+
+  it('does NOT include userId in the response (privacy projection)', async () => {
+    // Without explicit projection, every authenticated user in a shared
+    // channel can enumerate the stable Id<'users'> for every other
+    // session in that channel. The handler projects the response to
+    // drop userId — assert that it stays dropped.
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const bobSession = await asBob.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    await asAlice.mutation(api.channels.mutations.join, { sessionId: aliceSession, channel: 'eng' })
+    await asBob.mutation(api.channels.mutations.join, { sessionId: bobSession, channel: 'eng' })
+
+    const sessions = await asAlice.query(api.sessions.queries.listByChannel, { channel: 'eng' })
+    expect(sessions.length).toBe(2)
+    for (const s of sessions) {
+      expect(s).not.toHaveProperty('userId')
+      expect(s).toHaveProperty('sessionName')
+      expect(s).toHaveProperty('_id')
+    }
+  })
 })

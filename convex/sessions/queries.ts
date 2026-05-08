@@ -87,10 +87,31 @@ export const listByChannel = authenticatedQuery({
 
     // Fetch session docs. Null rows shouldn't happen but the code tolerates
     // a race where a sessionChannels row points at a deleted session.
-    const sessions = []
+    //
+    // Projection: deliberately drop `userId` from the wire response.
+    // `userId` is a stable internal identifier; surfacing it lets any
+    // authenticated user in a shared channel enumerate the user-id of
+    // every other session in that channel. The fields we keep are the
+    // ones the MCP server's `listSessions` tool actually needs.
+    const sessions: Array<{
+      _id: Id<'sessions'>
+      sessionName: string
+      objective?: string
+      machine?: string
+      createdAt: number
+      lastSeenAt: number
+    }> = []
     for (const id of sessionIdsOrdered) {
       const session = await ctx.db.get(id)
-      if (session !== null) sessions.push(session)
+      if (session === null) continue
+      sessions.push({
+        _id: session._id,
+        sessionName: session.sessionName,
+        objective: session.objective,
+        machine: session.machine,
+        createdAt: session.createdAt,
+        lastSeenAt: session.lastSeenAt,
+      })
     }
     return sessions
   },

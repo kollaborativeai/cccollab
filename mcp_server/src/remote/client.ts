@@ -2,7 +2,7 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import { saveLocationAuth } from '../config/save.js'
+import { loadPersistedLocationAuth, withConfigLock } from '../config/save.js'
 
 /** See `remote/auth.ts` for rationale on runtime-typed action references. */
 const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as FunctionReference<'action'>
@@ -31,14 +31,22 @@ export interface RemoteClientInit {
  * token has expired.
  *
  * Critical invariant for token refresh (per Convex Auth docs): the
- * refresh token is SINGLE-USE. After a successful refresh we MUST
- * persist the new refresh token atomically before using it again;
- * reusing an old refresh token invalidates the entire session on the
- * server side. This factory serialises refresh calls through a single
- * pending promise so we never issue two refreshes for the same stored
- * refresh token. The persisted update goes through `saveLocationAuth`
- * so the user-level file's other locations and top-level fields are
- * preserved.
+ * refresh token is SINGLE-USE. Reusing an old refresh token invalidates
+ * the entire session on the server side. We defend against losing
+ * tokens at two layers:
+ *
+ *  1. In-process: an `refreshInFlight` promise serialises refresh
+ *     attempts so two concurrent token-expiry events in the same
+ *     process don't issue two refresh calls.
+ *
+ *  2. Cross-process: the read+refresh+write happens inside
+ *     `withConfigLock`. Before issuing a refresh call we re-read the
+ *     persisted refresh token from disk; if a peer process has
+ *     refreshed since this process's last read, we adopt their tokens
+ *     instead of issuing a stale-token refresh that Convex would
+ *     reject. Without this, two MCP processes that loaded the same
+ *     refresh token at startup would race their first refresh, and
+ *     the loser would degrade with an UNAUTHENTICATED error.
  */
 export function createRemoteClient(init: RemoteClientInit): ConvexClient {
   const client = new ConvexClient(init.url)
@@ -53,26 +61,47 @@ export function createRemoteClient(init: RemoteClientInit): ConvexClient {
     if (refreshInFlight !== null) return await refreshInFlight
     refreshInFlight = (async () => {
       try {
-        const next = await refreshTokens(init.url, currentRefreshToken)
-        if (next === null) {
-          // Refresh failed: clear in-memory tokens and surface null so
-          // Convex flips to unauthenticated. The caller (remote
-          // transport) should trip its degradation switch on the next
-          // operation.
-          currentAccessToken = ''
-          return null
-        }
-        currentAccessToken = next.accessToken
-        currentRefreshToken = next.refreshToken
-        saveLocationAuth(init.locationName, {
-          url: init.url,
-          accessToken: next.accessToken,
-          refreshToken: next.refreshToken,
-          userEmail: init.userEmail,
-          userId: init.userId,
-          updatedAt: Date.now(),
+        return await withConfigLock(async (persist) => {
+          // Re-read the persisted state inside the lock. If a peer
+          // process refreshed since we last loaded, adopt their
+          // tokens — they're the live ones; ours are now invalidated
+          // server-side because Convex Auth refresh tokens are
+          // single-use.
+          const onDisk = loadPersistedLocationAuth(init.locationName)
+          if (
+            onDisk &&
+            typeof onDisk.refreshToken === 'string' &&
+            onDisk.refreshToken !== '' &&
+            onDisk.refreshToken !== currentRefreshToken &&
+            typeof onDisk.accessToken === 'string' &&
+            onDisk.accessToken !== ''
+          ) {
+            currentAccessToken = onDisk.accessToken
+            currentRefreshToken = onDisk.refreshToken
+            return currentAccessToken
+          }
+
+          const next = await refreshTokens(init.url, currentRefreshToken)
+          if (next === null) {
+            // Refresh failed: clear in-memory tokens and surface null
+            // so Convex flips to unauthenticated. The caller (remote
+            // transport) should trip its degradation switch on the
+            // next operation.
+            currentAccessToken = ''
+            return null
+          }
+          currentAccessToken = next.accessToken
+          currentRefreshToken = next.refreshToken
+          persist(init.locationName, {
+            url: init.url,
+            accessToken: next.accessToken,
+            refreshToken: next.refreshToken,
+            userEmail: init.userEmail,
+            userId: init.userId,
+            updatedAt: Date.now(),
+          })
+          return next.accessToken
         })
-        return next.accessToken
       } finally {
         refreshInFlight = null
       }

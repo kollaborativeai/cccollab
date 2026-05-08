@@ -108,11 +108,16 @@ describe('saveLocationAuth', () => {
 
   it('recovers from a stale lock left by a crashed peer', async () => {
     // Plant a lock file with an mtime well past the staleness threshold
-    // (STALE_LOCK_MS = 30s in save.ts). saveLocationAuth must reap it
-    // and proceed; without the reaper we'd hit the 5s timeout.
+    // (STALE_LOCK_MS = 30s in save.ts) AND a PID that is provably dead.
+    // saveLocationAuth must reap it and proceed; without the reaper we'd
+    // hit the 5s timeout. PID 999999 is reserved as "obviously dead" — far
+    // above any plausible live pid range, and the test asserts ESRCH on
+    // process.kill(pid, 0) before relying on it.
     const { utimesSync } = await import('node:fs')
+    const deadPid = 999999
+    expect(() => process.kill(deadPid, 0)).toThrow(/ESRCH/)
     const lockPath = `${CCCOLLAB_CONFIG_FILE}.lock`
-    writeFileSync(lockPath, '999999')
+    writeFileSync(lockPath, String(deadPid))
     const ancient = (Date.now() - 60_000) / 1000
     utimesSync(lockPath, ancient, ancient)
 
@@ -125,6 +130,46 @@ describe('saveLocationAuth', () => {
     expect(content.locations.flatout.accessToken).toBe('after-stale')
     expect(existsSync(lockPath)).toBe(false)
   })
+
+  it('does NOT reap an old lock whose holder PID is still alive', async () => {
+    // The reaper must require BOTH stale mtime AND a dead PID. A
+    // slow-but-alive holder (NFS hang, debugger SIGSTOP) must not be
+    // reaped or two writers would land in the critical section
+    // concurrently. We plant a lock with our own PID (definitely alive)
+    // and an ancient mtime, then assert saveLocationAuth times out at
+    // ~LOCK_TIMEOUT_MS instead of reaping.
+    const { utimesSync } = await import('node:fs')
+    const lockPath = `${CCCOLLAB_CONFIG_FILE}.lock`
+    writeFileSync(lockPath, String(process.pid))
+    const ancient = (Date.now() - 60_000) / 1000
+    utimesSync(lockPath, ancient, ancient)
+
+    const start = Date.now()
+    expect(() =>
+      saveLocationAuth('flatout', {
+        url: 'https://a.convex.cloud',
+        accessToken: 'should-not-write',
+        refreshToken: 'r',
+      }),
+    ).toThrow(/timed out/)
+    const elapsed = Date.now() - start
+    // Should have taken at least LOCK_TIMEOUT_MS (5s) — confirming the
+    // lock was not reaped. Allow a generous lower bound (4s) for clock
+    // jitter and a higher bound that just sanity-checks we didn't loop
+    // forever.
+    expect(elapsed).toBeGreaterThanOrEqual(4_000)
+    expect(elapsed).toBeLessThan(15_000)
+    // Critical section was never entered, so the config file must not
+    // exist (this test runs after `clearUserConfig` in beforeEach).
+    expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(false)
+    // Manually clean up the lock we planted so afterEach doesn't leak.
+    const { unlinkSync } = await import('node:fs')
+    try {
+      unlinkSync(lockPath)
+    } catch {
+      /* already gone */
+    }
+  }, 20_000)
 
   it('preserves a corrupt prior config as a timestamped backup before overwriting', async () => {
     // Write a file that passes JSON.parse but fails the zod schema
