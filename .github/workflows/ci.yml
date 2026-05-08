@@ -323,8 +323,13 @@ jobs:
         if: steps.semver.outputs.nextStrict != ''
         env:
           VERSION: ${{ steps.semver.outputs.nextStrict }}
+        # `JSON.stringify(_, null, 2)` always emits multi-line arrays, which
+        # conflicts with Prettier's compact style for short arrays and breaks
+        # the next non-skip CI run's `format:check`. Run prettier --write on
+        # both files immediately after the rewrite to keep them conformant.
         run: |
           node -e "const fs=require('fs'); for (const f of ['./mcp_server/package.json','./plugin/.claude-plugin/plugin.json']) { const p=JSON.parse(fs.readFileSync(f,'utf8')); p.version=process.env.VERSION; fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n'); }"
+          npx prettier --write mcp_server/package.json plugin/.claude-plugin/plugin.json
 
       - name: Publish
         if: steps.semver.outputs.nextStrict != ''

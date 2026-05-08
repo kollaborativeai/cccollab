@@ -6,7 +6,5 @@
     "name": "FlatOut Solutions",
     "email": "stefan@flatout.solutions"
   },
-  "skills": [
-    "./skills/"
-  ]
+  "skills": ["./skills/"]
 }
