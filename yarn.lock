@@ -588,7 +588,7 @@ __metadata:
     vitest: "npm:^4.1.4"
     zod: "npm:^4.3.6"
   bin:
-    cccollab: bin/cccollab
+    cccollab: bin/cccollab.mjs
   languageName: unknown
   linkType: soft
 

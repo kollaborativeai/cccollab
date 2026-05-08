@@ -4,9 +4,7 @@
   "type": "module",
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
-  "bin": {
-    "cccollab": "bin/cccollab.mjs"
-  },
+  "bin": "bin/cccollab.mjs",
   "files": [
     "bin",
     "dist"

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveTsx } from '../src/resolve-tsx.js'
@@ -26,7 +26,10 @@ describe('resolveTsx', () => {
   let root: string
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'cccollab-resolve-tsx-'))
+    // realpath: on macOS tmpdir() is /var/folders/... but /var -> /private/var,
+    // and require.resolve canonicalises the symlink. Resolve up front so all
+    // paths derived from `root` match what resolveTsx returns.
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'cccollab-resolve-tsx-')))
   })
 
   afterEach(() => {
