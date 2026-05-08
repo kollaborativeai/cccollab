@@ -149,6 +149,30 @@ describe('resolveConfig', () => {
     expect(remote?.accessToken).toBe('env-token')
   })
 
+  it('CCCOLLAB_REMOTE_URL wins over a project file with active local channels (cascade regression)', () => {
+    // Regression for "exactly one active location required, found 2:
+    // local, remote." A project file declared `local` active with an
+    // active channel inside it; the env var was supposed to override
+    // the file and make `remote` the sole active location, but the
+    // env-override sweep left the channel-level `active: true` intact,
+    // and the cascade in active.ts re-promoted `local`.
+    writeFileSync(
+      join(projectRoot, '.cccollab.json'),
+      JSON.stringify({
+        locations: {
+          local: {
+            active: true,
+            channels: { cccollab: { active: true } },
+          },
+        },
+      }),
+    )
+    const resolved = resolveConfig(projectRoot, {
+      CCCOLLAB_REMOTE_URL: 'https://env.convex.cloud',
+    })
+    expect(resolved.active.activeLocation).toBe('remote')
+  })
+
   it('cascades: topic active flag makes its channel and location active', () => {
     writeUserConfig({
       locations: {

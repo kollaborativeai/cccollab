@@ -52,6 +52,51 @@ describe('applyEnvOverrides', () => {
     expect(result.locations?.remote?.active).toBe(true)
   })
 
+  it('clears nested channel active flags so the cascade does not re-promote a non-env location', () => {
+    // Regression: project config flags `local` AND a channel inside it
+    // as active. The env-override sweep used to clear only the
+    // location-level `active`, leaving `channels.<name>.active` intact;
+    // the cascade in active.ts then re-promoted `local`, producing two
+    // active locations and the "exactly one active location required"
+    // error at startup.
+    const result = applyEnvOverrides(
+      {
+        locations: {
+          local: {
+            active: true,
+            channels: { cccollab: { active: true } },
+          },
+        },
+      },
+      { CCCOLLAB_REMOTE_URL: 'https://env.convex.cloud' },
+    )
+    expect(result.locations?.local?.active).toBeUndefined()
+    expect(result.locations?.local?.channels?.cccollab?.active).toBeUndefined()
+    expect(result.locations?.remote?.active).toBe(true)
+  })
+
+  it('clears nested topic active flags so the cascade does not re-promote a non-env location', () => {
+    // Same regression at the topic layer: a topic with `active: true`
+    // also cascades up to its location, so the env-override sweep must
+    // clear it too.
+    const result = applyEnvOverrides(
+      {
+        locations: {
+          local: {
+            channels: {
+              cccollab: {
+                topics: { 'design-review': { active: true } },
+              },
+            },
+          },
+        },
+      },
+      { CCCOLLAB_REMOTE_URL: 'https://env.convex.cloud' },
+    )
+    expect(result.locations?.local?.channels?.cccollab?.topics?.['design-review']?.active).toBeUndefined()
+    expect(result.locations?.remote?.active).toBe(true)
+  })
+
   it('assigns CCCOLLAB_AUTH_TOKEN to the active non-local location', () => {
     const result = applyEnvOverrides(
       {
