@@ -1,7 +1,7 @@
 /**
  * Convex HTTP router.
  *
- * Only wires up Convex Auth's OAuth callback routes today. The future HTTP
+ * Only wires up Convex Auth's OAuth callback routes currently. The future HTTP
  * MCP server (see `docs/architecture/mcp-servers.md`) will register its own
  * routes here.
  */
