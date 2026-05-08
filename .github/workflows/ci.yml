@@ -350,3 +350,19 @@ jobs:
           git commit -m "chore: bump version to ${VERSION} [skip ci]"
           git tag "${TAG}"
           git push origin main --tags
+
+      - name: Create GitHub Release
+        if: steps.semver.outputs.nextStrict != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.semver.outputs.next }}
+        # Auto-generate notes from PRs and commits since the previous tag.
+        # Idempotent on retry: if the release already exists (manual rerun
+        # of this job after a tag was created in a prior partial run), skip
+        # creation rather than failing the whole job.
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists, skipping."
+          else
+            gh release create "${TAG}" --title "${TAG}" --generate-notes
+          fi
