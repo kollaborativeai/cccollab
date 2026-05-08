@@ -826,20 +826,18 @@ async function ensureBroker(): Promise<number> {
 
     const isCompiled = import.meta.url.endsWith('.js')
     const brokerFile = isCompiled ? 'broker.js' : 'broker.ts'
-    const brokerPath = new URL(`./${brokerFile}`, import.meta.url).pathname
+    const brokerPath = fileURLToPath(new URL(`./${brokerFile}`, import.meta.url))
 
-    let command: string
+    const command = process.execPath
     let args: string[]
     if (isCompiled) {
-      command = process.execPath
       args = [brokerPath]
     } else {
-      const tsx = resolveTsx(dirname(fileURLToPath(import.meta.url)))
-      if (!tsx) {
-        throw new Error('cccollab: unable to locate tsx binary (node_modules/.bin/tsx not found on any ancestor)')
+      const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+      if (!tsxCli) {
+        throw new Error('cccollab: unable to locate tsx CLI (require.resolve("tsx/cli") failed)')
       }
-      command = tsx
-      args = [brokerPath]
+      args = [tsxCli, brokerPath]
     }
 
     const child = spawn(command, args, {

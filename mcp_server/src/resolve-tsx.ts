@@ -1,26 +1,24 @@
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
 
 /**
- * Resolve the path to the `tsx` CLI binary.
+ * Resolve the path to the `tsx` CLI module.
  *
- * In a Yarn workspace setup dependencies are hoisted to the repo root, so the
- * tsx binary does not live at `<workspace>/node_modules/.bin/tsx` - it lives
- * at `<repo-root>/node_modules/.bin/tsx`. When installed as an npm package
- * outside a workspace, `node_modules/` is a sibling of the package directory,
- * so the same walk succeeds one level up.
+ * Returns the absolute path to tsx's `dist/cli.mjs` (the package's `tsx/cli`
+ * subpath export). The caller should invoke it with `process.execPath` as the
+ * runtime, e.g. `spawn(process.execPath, [tsxCli, scriptPath])`. This avoids
+ * going through `node_modules/.bin/tsx`, which on Windows is a sh shim that
+ * `child_process.spawn` cannot exec without `shell: true`.
  *
- * Walks upward from `startDir` looking for the first `node_modules/.bin/tsx`
- * it finds. Returns the absolute path on success, or `null` when tsx cannot be
- * located (e.g. the package has been installed without dev dependencies).
+ * Resolution is rooted at `startDir` and uses Node's standard module lookup,
+ * so it transparently handles hoisted workspace installs (tsx at the repo
+ * root) and standalone npm installs (tsx as a sibling of the package).
  */
 export function resolveTsx(startDir: string): string | null {
-  let current = startDir
-  while (true) {
-    const candidate = join(current, 'node_modules', '.bin', 'tsx')
-    if (existsSync(candidate)) return candidate
-    const parent = dirname(current)
-    if (parent === current) return null
-    current = parent
+  const req = createRequire(join(startDir, '__cccollab_resolve_tsx__.js'))
+  try {
+    return req.resolve('tsx/cli')
+  } catch {
+    return null
   }
 }

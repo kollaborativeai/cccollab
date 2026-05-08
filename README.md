@@ -234,6 +234,14 @@ claude --dangerously-load-development-channels plugin:cccollab@cccollab-test
 The `bin` launcher prefers `src/` + `tsx` when available (hot source), and
 falls back to `dist/server.js`.
 
+**Windows note:** `test-marketplace/plugins/cccollab` is a tracked symlink
+to `plugin/`. Windows blocks symlink creation for non-admin users by
+default, so `git checkout` will either fail or write the symlink target
+as a plain file. To fix once per machine: enable **Developer Mode**
+(Settings → Privacy & security → For developers → Developer Mode = On),
+then in this clone run `git config core.symlinks true && git checkout --
+test-marketplace/plugins/cccollab`. macOS and Linux need no setup.
+
 ## Development
 
 From the repo root:

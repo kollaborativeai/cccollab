@@ -1,8 +1,26 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveTsx } from '../src/resolve-tsx.js'
+
+function plantFakeTsx(modulesRoot: string): string {
+  const pkgDir = join(modulesRoot, 'node_modules', 'tsx')
+  const distDir = join(pkgDir, 'dist')
+  mkdirSync(distDir, { recursive: true })
+  writeFileSync(
+    join(pkgDir, 'package.json'),
+    JSON.stringify({
+      name: 'tsx',
+      version: '0.0.0-fake',
+      type: 'module',
+      exports: { './cli': './dist/cli.mjs' },
+    }),
+  )
+  const cliPath = join(distDir, 'cli.mjs')
+  writeFileSync(cliPath, '// fake tsx cli\n')
+  return cliPath
+}
 
 describe('resolveTsx', () => {
   let root: string
@@ -16,26 +34,18 @@ describe('resolveTsx', () => {
   })
 
   it('finds tsx in the starting directory', () => {
-    const bin = join(root, 'node_modules', '.bin')
-    mkdirSync(bin, { recursive: true })
-    const tsxPath = join(bin, 'tsx')
-    writeFileSync(tsxPath, '#!/bin/sh\n', { mode: 0o755 })
-    chmodSync(tsxPath, 0o755)
-    expect(resolveTsx(root)).toBe(tsxPath)
+    const cliPath = plantFakeTsx(root)
+    expect(resolveTsx(root)).toBe(cliPath)
   })
 
   it('walks up ancestors to find tsx (hoisted workspace case)', () => {
+    const cliPath = plantFakeTsx(root)
     const workspace = join(root, 'mcp_server', 'src')
     mkdirSync(workspace, { recursive: true })
-    const bin = join(root, 'node_modules', '.bin')
-    mkdirSync(bin, { recursive: true })
-    const tsxPath = join(bin, 'tsx')
-    writeFileSync(tsxPath, '#!/bin/sh\n', { mode: 0o755 })
-    chmodSync(tsxPath, 0o755)
-    expect(resolveTsx(workspace)).toBe(tsxPath)
+    expect(resolveTsx(workspace)).toBe(cliPath)
   })
 
-  it('returns null when no ancestor contains node_modules/.bin/tsx', () => {
+  it('returns null when no ancestor contains a tsx package', () => {
     const deep = join(root, 'a', 'b', 'c')
     mkdirSync(deep, { recursive: true })
     expect(resolveTsx(deep)).toBeNull()

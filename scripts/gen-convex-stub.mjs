@@ -13,10 +13,11 @@
 
 import { readdirSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const FORCE = process.argv.includes('--force')
 
-const convexDir = new URL('../convex/', import.meta.url).pathname.replace(/\/$/, '')
+const convexDir = fileURLToPath(new URL('../convex/', import.meta.url)).replace(/[\\/]$/, '')
 const generatedDir = join(convexDir, '_generated')
 mkdirSync(generatedDir, { recursive: true })
 

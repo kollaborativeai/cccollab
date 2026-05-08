@@ -131,10 +131,10 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
   let brokerPort: number
 
   beforeAll(async () => {
-    const tsx = resolveTsx(dirname(fileURLToPath(import.meta.url)))
-    if (!tsx) throw new Error('tsx binary not found on any ancestor')
-    const brokerPath = new URL('../src/broker.ts', import.meta.url).pathname
-    broker = spawn(tsx, [brokerPath], {
+    const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
+    const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
+    broker = spawn(process.execPath, [tsxCli, brokerPath], {
       env: { ...process.env, CCCOLLAB_PROFILE: PROFILE },
       stdio: 'ignore',
     })
