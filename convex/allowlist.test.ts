@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { ALLOWED_EMAIL_DOMAINS, emailDomain, isAllowedEmail } from './allowlist'
+import { ALLOWED_EMAIL_ADDRESSES, ALLOWED_EMAIL_DOMAINS, emailDomain, isAllowedEmail } from './allowlist'
 
 describe('emailDomain', () => {
   it('returns the lowercase domain portion', () => {
@@ -33,6 +33,18 @@ describe('isAllowedEmail', () => {
     expect(isAllowedEmail('bob@gmail.com')).toBe(false)
   })
 
+  it('accepts individually-allowed addresses outside an allowed domain', () => {
+    expect(isAllowedEmail('samuel.asseg@gmail.com')).toBe(true)
+  })
+
+  it('accepts case-variant individually-allowed addresses', () => {
+    expect(isAllowedEmail('Samuel.Asseg@Gmail.com')).toBe(true)
+  })
+
+  it('rejects other addresses on a domain that hosts an individually-allowed address', () => {
+    expect(isAllowedEmail('someone-else@gmail.com')).toBe(false)
+  })
+
   it('rejects emails from other FlatOut domains until they are added', () => {
     // flatout.ventures is a sibling brand; until it is explicitly added the
     // allow-list rejects it so we fail closed rather than fail open.
@@ -56,5 +68,11 @@ describe('ALLOWED_EMAIL_DOMAINS', () => {
     // accidental mutation by asserting the export shape. If the list
     // changes legitimately the assertion fails loudly.
     expect(ALLOWED_EMAIL_DOMAINS).toEqual(['flatout.solutions'])
+  })
+})
+
+describe('ALLOWED_EMAIL_ADDRESSES', () => {
+  it('is frozen at module scope', () => {
+    expect(ALLOWED_EMAIL_ADDRESSES).toEqual(['samuel.asseg@gmail.com'])
   })
 })
