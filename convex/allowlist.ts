@@ -12,6 +12,14 @@
 export const ALLOWED_EMAIL_DOMAINS: readonly string[] = ['flatout.solutions']
 
 /**
+ * Individual addresses allowed in addition to `ALLOWED_EMAIL_DOMAINS`. Use
+ * sparingly - prefer adding a domain when a whole org should be granted
+ * access. Entries must be lowercase and trimmed; matching is
+ * case-insensitive against the full address.
+ */
+export const ALLOWED_EMAIL_ADDRESSES: readonly string[] = ['samuel.asseg@gmail.com']
+
+/**
  * Extract the domain portion of an email address in lowercase. Returns an
  * empty string for input without an `@`, including non-string inputs that
  * upstream code should have rejected.
@@ -24,11 +32,14 @@ export function emailDomain(email: string): string {
 
 /**
  * True if `email` is a non-empty string whose domain is in
- * `ALLOWED_EMAIL_DOMAINS`. Narrows `email` to `string` on success so
+ * `ALLOWED_EMAIL_DOMAINS` or whose full address is in
+ * `ALLOWED_EMAIL_ADDRESSES`. Narrows `email` to `string` on success so
  * callers can use the value directly after the check.
  */
 export function isAllowedEmail(email: string | undefined | null): email is string {
   if (typeof email !== 'string' || email.length === 0) return false
+  const normalized = email.toLowerCase()
+  if (ALLOWED_EMAIL_ADDRESSES.includes(normalized)) return true
   const domain = emailDomain(email)
   if (domain.length === 0) return false
   return ALLOWED_EMAIL_DOMAINS.includes(domain)
