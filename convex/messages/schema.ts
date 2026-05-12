@@ -25,8 +25,13 @@ import { v } from 'convex/values'
  * Indexes:
  * - `by_topic_and_ts` - per-topic chronological feed (the Phase 4
  *   reactive subscription).
- * - `by_channel_and_ts` - per-channel chronological feed for channel-wide
- *   views. Topic messages surface here via their denormalised `channelId`.
+ * - `by_channel_and_ts` - per-channel chronological feed. Topic messages
+ *   and DMs land on this index too (both store a `channelId` — topic for
+ *   denormalisation, DM for shared-channel routing) but the
+ *   `listByChannel` query filters to `kind === 'broadcast'` to keep
+ *   topic content out of the channel feed and DMs out of bystanders'
+ *   views. A future channel-wide activity view would need its own
+ *   query rather than relaxing that filter.
  * - `by_toSessionId_and_ts` - the recipient's DM inbox. The remote
  *   transport subscribes to this index to push DMs reactively without
  *   scanning the whole messages table.

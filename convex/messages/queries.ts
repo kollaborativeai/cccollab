@@ -44,10 +44,22 @@ export const listByTopic = authenticatedQuery({
 })
 
 /**
- * Reactive per-channel feed: DMs AND broadcasts AND topic messages in this
- * channel, chronological. Exposed so the remote transport can subscribe to
- * a channel-wide feed (e.g. for the `list_channels` UI showing activity),
- * but most production reads happen through `listByTopic`.
+ * Reactive per-channel broadcast feed, chronological.
+ *
+ * Returns ONLY `kind === 'broadcast'` rows even though the underlying
+ * `by_channel_and_ts` index also covers topic messages and DMs (both
+ * carry a `channelId` for indexing / routing). The MCP server's
+ * `RemoteTransport.subscribeChannelMessages` treats every row from this
+ * query as a top-level broadcast (`threadTs: undefined`), so surfacing
+ * non-broadcast kinds here would:
+ *   - duplicate every topic message for peers subscribed to both the
+ *     channel and the topic (once via topic sub, once as a fake broadcast)
+ *   - leak topic-only content to channel subscribers who haven't joined
+ *     the topic
+ *   - leak DMs that route through the channel to every channel subscriber
+ *
+ * A future "channel-wide activity" view that legitimately wants all
+ * kinds should be a separate query rather than re-opening this one.
  */
 export const listByChannel = authenticatedQuery({
   args: {
@@ -90,6 +102,13 @@ export const listByChannel = authenticatedQuery({
         if (cutoff === undefined) return scoped
         return useExclusive ? scoped.gt('ts', cutoff) : scoped.gte('ts', cutoff)
       })
+      // The index narrows to one channel within the cursor window; the
+      // post-filter only removes topic/DM rows from that already-small
+      // set, so it isn't the "filter instead of index" anti-pattern the
+      // rule guards against. A compound `(channelId, kind, ts)` index
+      // would be tidier but isn't worth the schema migration today.
+      // eslint-disable-next-line @convex-dev/no-filter-in-query
+      .filter((q) => q.eq(q.field('kind'), 'broadcast'))
       .collect()
   },
 })
