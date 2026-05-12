@@ -66,6 +66,104 @@ describe('messages.sendToChannel', () => {
   })
 })
 
+describe('messages.listByChannel kind filter (topic + DM leak)', () => {
+  // Regression: `messages` rows for topic messages and DMs both carry a
+  // denormalised `channelId` (topic for the by_channel_and_ts index, DM
+  // for the shared-channel routing record). The MCP server's
+  // `subscribeChannelMessages` treats every row from `listByChannel` as
+  // a top-level broadcast (threadTs: undefined), so without a server-
+  // side `kind === 'broadcast'` filter:
+  //   - a peer subscribed to channel X who joined a topic in X receives
+  //     every topic message twice (once via topic sub, once via channel
+  //     sub as a fake broadcast)
+  //   - a peer subscribed to channel X who has NOT joined the topic
+  //     still receives that topic's messages as channel broadcasts
+  //   - any DM routed via channel X leaks to every channel subscriber
+  // The fix is in the query; these tests pin the contract.
+
+  it('does not surface topic messages even though their channelId is denormalised', async () => {
+    const t = convexTest(schema, modules)
+    const userId = await seedUser(t, 'stefan@flatout.solutions')
+    const asStefan = t.withIdentity(identityFor(userId))
+    const sessionId = await asStefan.mutation(api.sessions.mutations.introduce, { sessionName: 's' })
+    const { channelId } = await asStefan.mutation(api.channels.mutations.join, { sessionId, channel: 'eng' })
+    const { topicId } = await asStefan.mutation(api.topics.mutations.start, {
+      sessionId,
+      channel: 'eng',
+      topic: 't',
+    })
+    await asStefan.mutation(api.messages.mutations.sendToTopic, { sessionId, topicId, text: 'in topic' })
+
+    const channelFeed = await asStefan.query(api.messages.queries.listByChannel, { channelId })
+    expect(channelFeed).toEqual([])
+  })
+
+  it('does not surface DMs even though their channelId is set for routing', async () => {
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const carol = await seedUser(t, 'carol@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const asCarol = t.withIdentity(identityFor(carol))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const bobSession = await asBob.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    const carolSession = await asCarol.mutation(api.sessions.mutations.introduce, { sessionName: 'c' })
+    const { channelId } = await asAlice.mutation(api.channels.mutations.join, {
+      sessionId: aliceSession,
+      channel: 'eng',
+    })
+    await asBob.mutation(api.channels.mutations.join, { sessionId: bobSession, channel: 'eng' })
+    await asCarol.mutation(api.channels.mutations.join, { sessionId: carolSession, channel: 'eng' })
+
+    // Alice DMs Bob through the shared "eng" channel.
+    await asAlice.mutation(api.messages.mutations.sendToSession, {
+      sessionId: aliceSession,
+      toSessionName: 'b',
+      text: 'private',
+    })
+
+    // Carol — a bystander in the same channel — must not see the DM.
+    const carolView = await asCarol.query(api.messages.queries.listByChannel, { channelId })
+    expect(carolView).toEqual([])
+  })
+
+  it('returns the broadcast and drops the co-existing topic and DM messages in the same channel', async () => {
+    const t = convexTest(schema, modules)
+    const alice = await seedUser(t, 'alice@flatout.solutions')
+    const bob = await seedUser(t, 'bob@flatout.solutions')
+    const asAlice = t.withIdentity(identityFor(alice))
+    const asBob = t.withIdentity(identityFor(bob))
+    const aliceSession = await asAlice.mutation(api.sessions.mutations.introduce, { sessionName: 'a' })
+    const bobSession = await asBob.mutation(api.sessions.mutations.introduce, { sessionName: 'b' })
+    const { channelId } = await asAlice.mutation(api.channels.mutations.join, {
+      sessionId: aliceSession,
+      channel: 'eng',
+    })
+    await asBob.mutation(api.channels.mutations.join, { sessionId: bobSession, channel: 'eng' })
+    const { topicId } = await asAlice.mutation(api.topics.mutations.start, {
+      sessionId: aliceSession,
+      channel: 'eng',
+      topic: 't',
+    })
+
+    await asAlice.mutation(api.messages.mutations.sendToTopic, { sessionId: aliceSession, topicId, text: 'topic-msg' })
+    await asAlice.mutation(api.messages.mutations.sendToChannel, {
+      sessionId: aliceSession,
+      channel: 'eng',
+      text: 'broadcast-msg',
+    })
+    await asAlice.mutation(api.messages.mutations.sendToSession, {
+      sessionId: aliceSession,
+      toSessionName: 'b',
+      text: 'dm-msg',
+    })
+
+    const rows = await asAlice.query(api.messages.queries.listByChannel, { channelId })
+    expect(rows.map((r) => ({ kind: r.kind, text: r.text }))).toEqual([{ kind: 'broadcast', text: 'broadcast-msg' }])
+  })
+})
+
 describe('messages.sendToSession (DM)', () => {
   it('delivers a DM when sender and recipient share a channel', async () => {
     const t = convexTest(schema, modules)
