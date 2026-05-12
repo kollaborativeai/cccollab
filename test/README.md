@@ -42,22 +42,32 @@ Each launch:
 
 - `cd`s into `test/`, so `.cccollab.json` is found by walking up from `cwd`.
 - Prepends the repo's `mcp_server/bin/` to PATH so the spawned MCP server resolves to local `mcp_server/src/` via tsx, not the global install.
+- Exports `CCCOLLAB_PROFILE=test` to isolate the harness's broker socket from any developer's real cccollab profile.
 - Exports `CCCOLLAB_NAME=<positional>` so the session pre-seeds its identity.
 - Runs `claude --dangerously-skip-permissions --dangerously-load-development-channels plugin:cccollab@cccollab-test -n <name>`.
 
-`test/.cccollab.json` pins both sessions to:
+`test/.cccollab.json` pins both sessions to a shared local channel:
 
 ```json
 {
-  "profile": "test",
-  "default_channels": ["cccollab-test"]
+  "locations": {
+    "local": {
+      "active": true,
+      "channels": {
+        "cccollab-test": {
+          "active": true
+        }
+      }
+    }
+  }
 }
 ```
 
-The `profile: "test"` value gives the harness its own per-profile broker socket
-(`~/.cccollab/run/test/`), isolated from any developer's real `cccollab`
-profile. The `default_channels` value subscribes both sessions to
-`cccollab-test` on startup.
+`locations.local.channels.cccollab-test` subscribes both sessions to that
+channel on startup. The per-profile broker socket (`~/.cccollab/run/test/`)
+that isolates the harness from any production session comes from the
+`CCCOLLAB_PROFILE=test` env var exported by `start.sh`, not from this
+file. Full schema: `mcp_server/src/config/schema.ts`.
 
 ## Verification
 
@@ -67,7 +77,7 @@ In `left`, ask Claude to call `whoami`. Expect:
 
 - `name: "left"`
 - `objective`: present only if you exported `CCCOLLAB_OBJECTIVE`
-- `subscribedChannels` includes `{ name: "cccollab-test", source: "cccollab.json" }`
+- `subscribedChannels` includes `{ name: "cccollab-test", location: "local", source: "cccollab.json" }`
 
 Repeat in `right`, expecting `name: "right"`. Env-var name beats any `name`
 in `.cccollab.json` per the loader precedence.
@@ -97,11 +107,11 @@ other's message arrive as a channel event scoped to the `demo` topic.
 
 ### 5. Zero Slack traffic
 
-The runtime has no Slack code post-CCC-28. Verify from the repo root:
+The runtime has no Slack code. Verify from the repo root:
 
 ```bash
-grep -r "@slack" src/                                                    # expect: no output
-node -e "const p=require('./package.json'); console.log(Object.keys(p.dependencies).filter(k=>k.startsWith('@slack')))"
+grep -r "@slack" mcp_server/src/ convex/                                 # expect: no output
+node -e "const p=require('./mcp_server/package.json'); console.log(Object.keys({...p.dependencies, ...p.devDependencies}).filter(k=>k.startsWith('@slack')))"
                                                                          # expect: []
 ```
 
@@ -114,7 +124,7 @@ lsof -i -nP 2>/dev/null | grep -i slack                                  # expec
 ## Customizing per-session objective
 
 `CCCOLLAB_OBJECTIVE` set in the parent shell flows through `exec claude`
-automatically and is read by `src/initial-identity.ts`:
+automatically and is read by `mcp_server/src/config/env.ts`:
 
 ```bash
 CCCOLLAB_OBJECTIVE="be the picky reviewer" ./test/start.sh left
