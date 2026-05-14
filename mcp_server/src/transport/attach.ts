@@ -359,7 +359,7 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
     userEmail: location.userEmail,
     userId: location.userId,
   })
-  return new RemoteTransport({ client, source: location.name })
+  return new RemoteTransport({ client, source: location.name, authType: location.authType })
 }
 
 /** Type guard: does this transport expose a DM reactive subscription?
