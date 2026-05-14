@@ -11,7 +11,7 @@ import {
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
-import { UserCccollabConfigSchema, type LocationConfig, type UserLocationConfig } from './schema.js'
+import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
 export interface ConvexGoogleLocationAuth {
   /** Optional for back-compat: existing call sites omit this field and the
@@ -261,9 +261,11 @@ export async function withConfigLock<T>(
  * call this from within `withConfigLock`.
  *
  * Returns `authType` so the refresh path can decide which flow to use,
- * `accessTokenExpiresAt` so it can determine whether the access token is
- * still live, and `clerkIssuer` / `clerkClientId` so it can reconstruct
- * the token-refresh request URL without re-reading the project config.
+ * and `accessTokenExpiresAt` so it can determine whether the access token is
+ * still live. Also surfaces `clerkIssuer` / `clerkClientId` if present on
+ * disk — in normal operation these fields come from the resolved (merged)
+ * project config, not from this file; they appear here only for
+ * user-hand-edited configs and as a forward-compatibility hook.
  */
 export function loadPersistedLocationAuth(
   locationName: string,
