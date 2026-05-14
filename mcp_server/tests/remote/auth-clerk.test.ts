@@ -88,8 +88,10 @@ describe('exchangeCodeForTokens', () => {
     expect(result.refreshToken).toBe('rt_456')
     expect(result.accessTokenExpiresAt).toBeGreaterThan(Date.now())
     expect(calls).toHaveLength(1)
-    expect(calls[0].url).toBe('https://x.clerk.accounts.dev/oauth/token')
-    const body = new URLSearchParams(calls[0].body)
+    const [firstCall] = calls
+    expect(firstCall).toBeDefined()
+    expect(firstCall?.url).toBe('https://x.clerk.accounts.dev/oauth/token')
+    const body = new URLSearchParams(firstCall?.body ?? '')
     expect(body.get('grant_type')).toBe('authorization_code')
     expect(body.get('code')).toBe('code-abc')
     expect(body.get('code_verifier')).toBe('verifier-xyz')
@@ -138,6 +140,20 @@ describe('refreshAccessToken', () => {
   it('preserves prior refresh token if server omits one', async () => {
     const fetchMock = (async () =>
       new Response(JSON.stringify({ access_token: 'new_at', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    const result = await refreshAccessToken(
+      { issuer: 'https://x.clerk.accounts.dev', clientId: 'cccollab-cli', refreshToken: 'old_rt' },
+      fetchMock,
+    )
+    expect(result.refreshToken).toBe('old_rt')
+  })
+
+  it('preserves prior refresh token if server returns empty string', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: '', expires_in: 60 }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch

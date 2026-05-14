@@ -132,9 +132,13 @@ export async function refreshAccessToken(
     throw new Error(`Clerk refresh failed: ${errorCode}`)
   }
   const accessToken = json.access_token
-  const refreshToken = json.refresh_token ?? args.refreshToken
+  const rawRefresh = json.refresh_token
+  const refreshToken =
+    typeof rawRefresh === 'string' && rawRefresh.length > 0
+      ? rawRefresh
+      : args.refreshToken
   const expiresIn = json.expires_in
-  if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || typeof expiresIn !== 'number') {
+  if (typeof accessToken !== 'string' || typeof expiresIn !== 'number') {
     throw new Error(`Unexpected refresh response shape: ${JSON.stringify(json)}`)
   }
   return {
