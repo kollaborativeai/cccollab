@@ -3,7 +3,7 @@ import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
 import { loadPersistedLocationAuth, withConfigLock } from '../config/save.js'
-import { refreshAccessToken } from './auth-clerk.js'
+import { CLERK_CONVEX_AUDIENCE, refreshAccessToken } from './auth-clerk.js'
 
 /** See `remote/auth.ts` for rationale on runtime-typed action references. */
 const SIGNIN_ACTION = (anyApi as { auth: { signIn: unknown } }).auth.signIn as FunctionReference<'action'>
@@ -109,6 +109,7 @@ export function makeClerkAuthFetcher(
               issuer: clerkIssuer,
               clientId: clerkClientId,
               refreshToken: currentRefreshToken,
+              resource: CLERK_CONVEX_AUDIENCE,
             })
             currentAccessToken = next.accessToken
             currentRefreshToken = next.refreshToken

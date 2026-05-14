@@ -8,6 +8,7 @@ import {
   refreshAccessToken,
   runClerkPkce,
   DEFAULT_CLERK_REDIRECT_PORT,
+  CLERK_CONVEX_AUDIENCE,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/auth.js'
 
@@ -53,6 +54,19 @@ describe('buildAuthorizeUrl', () => {
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
     expect(u.searchParams.get('state')).toBe('state-xyz')
     expect(u.searchParams.get('scope')).toBe('openid profile email')
+    expect(u.searchParams.has('resource')).toBe(false)
+  })
+
+  it('includes resource param when provided (RFC 8707)', () => {
+    const url = buildAuthorizeUrl({
+      issuer: 'https://x.clerk.accounts.dev',
+      clientId: 'cccollab-cli',
+      redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
+      codeChallenge: 'abc123',
+      state: 'state-xyz',
+      resource: CLERK_CONVEX_AUDIENCE,
+    })
+    expect(new URL(url).searchParams.get('resource')).toBe('convex')
   })
 })
 
@@ -118,6 +132,30 @@ describe('exchangeCodeForTokens', () => {
       ),
     ).rejects.toThrow(/invalid_grant/)
   })
+
+  it('includes resource in the form body when provided (RFC 8707)', async () => {
+    const captured: { body: string } = { body: '' }
+    const fetchMock = (async (_url: string, init: RequestInit) => {
+      captured.body = init.body as string
+      return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await exchangeCodeForTokens(
+      {
+        issuer: 'https://x.clerk.accounts.dev',
+        clientId: 'cccollab-cli',
+        redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
+        code: 'c',
+        codeVerifier: 'v',
+        resource: CLERK_CONVEX_AUDIENCE,
+      },
+      fetchMock,
+    )
+    expect(new URLSearchParams(captured.body).get('resource')).toBe('convex')
+  })
 })
 
 describe('refreshAccessToken', () => {
@@ -166,6 +204,28 @@ describe('refreshAccessToken', () => {
       fetchMock,
     )
     expect(result.refreshToken).toBe('old_rt')
+  })
+
+  it('includes resource in the form body when provided (RFC 8707)', async () => {
+    const captured: { body: string } = { body: '' }
+    const fetchMock = (async (_url: string, init: RequestInit) => {
+      captured.body = init.body as string
+      return new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await refreshAccessToken(
+      {
+        issuer: 'https://x.clerk.accounts.dev',
+        clientId: 'cccollab-cli',
+        refreshToken: 'old_rt',
+        resource: CLERK_CONVEX_AUDIENCE,
+      },
+      fetchMock,
+    )
+    expect(new URLSearchParams(captured.body).get('resource')).toBe('convex')
   })
 })
 
@@ -329,5 +389,40 @@ describe('runClerkPkce', () => {
     })
 
     expect(receivedPort).toBe(54321)
+  })
+
+  it('threads resource through to both authorize URL and token exchange', async () => {
+    let capturedAuthorizeUrl = ''
+    const tokenCalls: { body: string }[] = []
+    const fetchMock = (async (_url: string, init: RequestInit) => {
+      tokenCalls.push({ body: init.body as string })
+      return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    let capturedState = ''
+    await runClerkPkce({
+      issuer: 'https://x.clerk.accounts.dev',
+      clientId: 'cccollab-cli',
+      resource: CLERK_CONVEX_AUDIENCE,
+      onAuthorizeUrl: (url) => {
+        capturedAuthorizeUrl = url
+        capturedState = new URL(url).searchParams.get('state') ?? ''
+      },
+      fetchImpl: fetchMock,
+      startListenerImpl: (async () => ({
+        port: DEFAULT_CLERK_REDIRECT_PORT,
+        waitForCallback: async () => ({ code: 'c', state: capturedState }),
+        shutdown: () => {},
+      })) as typeof startLoopbackListener,
+    })
+
+    expect(new URL(capturedAuthorizeUrl).searchParams.get('resource')).toBe('convex')
+    expect(tokenCalls).toHaveLength(1)
+    const firstCall = tokenCalls[0]
+    expect(firstCall).toBeDefined()
+    expect(new URLSearchParams(firstCall?.body ?? '').get('resource')).toBe('convex')
   })
 })

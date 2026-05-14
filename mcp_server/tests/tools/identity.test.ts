@@ -7,13 +7,19 @@ import { TransportRouter } from '../../src/transport/router.js'
 
 // Mock runClerkPkce so tests for the Clerk branch don't open a browser
 // or start a loopback listener.
-vi.mock('../../src/remote/auth-clerk.js', () => ({
-  runClerkPkce: vi.fn(async () => ({
-    accessToken: 'clerk-access-token',
-    refreshToken: 'clerk-refresh-token',
-    accessTokenExpiresAt: 9999999999000,
-  })),
-}))
+vi.mock('../../src/remote/auth-clerk.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/remote/auth-clerk.js')>(
+    '../../src/remote/auth-clerk.js',
+  )
+  return {
+    ...actual,
+    runClerkPkce: vi.fn(async () => ({
+      accessToken: 'clerk-access-token',
+      refreshToken: 'clerk-refresh-token',
+      accessTokenExpiresAt: 9999999999000,
+    })),
+  }
+})
 
 // Mock saveLocationAuth so the Clerk branch can be tested without
 // touching ~/.cccollab/config.json or needing HOME redirection.
@@ -235,10 +241,12 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
 
-        // runClerkPkce must have been called with the correct issuer + clientId
+        // runClerkPkce must have been called with the correct issuer + clientId + resource
         expect(runClerkPkce).toHaveBeenCalledWith({
           issuer: 'https://x.clerk.accounts.dev',
           clientId: 'cccollab-cli',
+          redirectPort: undefined,
+          resource: 'convex',
         })
 
         // saveLocationAuth must persist the clerk tokens

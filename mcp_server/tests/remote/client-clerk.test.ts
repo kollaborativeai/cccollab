@@ -79,9 +79,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
   })
 
   it('returns cached token when expiry is exactly at the freshness margin boundary + 1ms', async () => {
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }))
 
     const token = await fetcher({ forceRefreshToken: false })
 
@@ -96,9 +94,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
       accessTokenExpiresAt: freshExpiresAt(3600_000),
     })
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
 
     const token = await fetcher({ forceRefreshToken: false })
 
@@ -108,6 +104,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
       issuer: TEST_ISSUER,
       clientId: TEST_CLIENT_ID,
       refreshToken: 'initial-rt',
+      resource: 'convex',
     })
   })
 
@@ -119,9 +116,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
       accessTokenExpiresAt: newExpiresAt,
     })
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
     await fetcher({ forceRefreshToken: false })
 
     // Import save after the write so we read the latest state
@@ -140,9 +135,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
       accessTokenExpiresAt: freshExpiresAt(3600_000),
     })
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: freshExpiresAt(60_000) }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: freshExpiresAt(60_000) }))
 
     const token = await fetcher({ forceRefreshToken: true })
 
@@ -162,9 +155,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
     })
 
     // Our in-process state has a stale access token with an older expiry.
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessToken: 'stale-at', accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessToken: 'stale-at', accessTokenExpiresAt: staleExpiresAt() }))
 
     // refreshAccessToken should NOT be called — we should adopt disk.
     mockRefreshAccessToken.mockRejectedValue(new Error('should not be called'))
@@ -192,9 +183,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
       accessTokenExpiresAt: freshExpiresAt(3600_000),
     })
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
 
     const token = await fetcher({ forceRefreshToken: false })
 
@@ -205,9 +194,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
   it('returns null and clears access token when refreshAccessToken throws', async () => {
     mockRefreshAccessToken.mockRejectedValueOnce(new Error('invalid_grant'))
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
 
     const token = await fetcher({ forceRefreshToken: false })
 
@@ -215,9 +202,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
   })
 
   it('returns null when refreshToken is empty string', async () => {
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ refreshToken: '', accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ refreshToken: '', accessTokenExpiresAt: staleExpiresAt() }))
 
     const token = await fetcher({ forceRefreshToken: false })
 
@@ -232,9 +217,7 @@ describe('clerk setAuth callback (makeClerkAuthFetcher)', () => {
     })
     mockRefreshAccessToken.mockReturnValueOnce(refreshPromise)
 
-    const fetcher = makeClerkAuthFetcher(
-      baseInit({ accessTokenExpiresAt: staleExpiresAt() }),
-    )
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
 
     // Fire two concurrent calls.
     const call1 = fetcher({ forceRefreshToken: false })

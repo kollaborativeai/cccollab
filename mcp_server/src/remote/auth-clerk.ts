@@ -11,6 +11,18 @@ import { startLoopbackListener } from './auth.js'
 export const DEFAULT_CLERK_REDIRECT_PORT = 53682
 
 /**
+ * OAuth audience requested when the target is a Convex deployment. Matches
+ * KAI's `auth.config.ts` `applicationID: 'convex'` — Convex's JWT verification
+ * requires `aud === 'convex'`.
+ *
+ * Threaded as the `resource` parameter (RFC 8707, Resource Indicators for
+ * OAuth 2.0) on both /oauth/authorize and /oauth/token requests so Clerk
+ * mints the access-token JWT with this audience. Without it Clerk's OAuth
+ * access tokens omit `aud` entirely and Convex rejects every request.
+ */
+export const CLERK_CONVEX_AUDIENCE = 'convex'
+
+/**
  * Generate a cryptographically-random PKCE code verifier per RFC 7636 §4.1.
  * 64 bytes of randomness → 86-char base64url string (well within the 43-128
  * char limit).
@@ -37,6 +49,10 @@ export interface AuthorizeUrlArgs {
   codeChallenge: string
   state: string
   scopes?: string[]
+  /** Resource indicator (RFC 8707). When set, Clerk includes this value as
+   *  the `aud` claim on the issued access token JWT. Required for Convex
+   *  targets — see CLERK_CONVEX_AUDIENCE. */
+  resource?: string
 }
 
 /**
@@ -53,6 +69,7 @@ export function buildAuthorizeUrl(args: AuthorizeUrlArgs): string {
   url.searchParams.set('code_challenge_method', 'S256')
   url.searchParams.set('state', args.state)
   url.searchParams.set('scope', (args.scopes ?? ['openid', 'profile', 'email']).join(' '))
+  if (args.resource !== undefined) url.searchParams.set('resource', args.resource)
   return url.toString()
 }
 
@@ -62,6 +79,9 @@ export interface TokenExchangeArgs {
   redirectUri: string
   code: string
   codeVerifier: string
+  /** Resource indicator (RFC 8707). Must match the value passed to
+   *  buildAuthorizeUrl so Clerk's issued JWT carries the expected `aud`. */
+  resource?: string
 }
 
 export interface TokenSet {
@@ -88,6 +108,7 @@ export async function exchangeCodeForTokens(
     client_id: args.clientId,
     redirect_uri: args.redirectUri,
   })
+  if (args.resource !== undefined) body.set('resource', args.resource)
   const res = await fetchImpl(url, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -118,7 +139,7 @@ export async function exchangeCodeForTokens(
  * rotation is always returned, so we fall back to the input.
  */
 export async function refreshAccessToken(
-  args: { issuer: string; clientId: string; refreshToken: string },
+  args: { issuer: string; clientId: string; refreshToken: string; resource?: string },
   fetchImpl: typeof fetch = fetch,
 ): Promise<TokenSet> {
   const url = new URL('/oauth/token', args.issuer).toString()
@@ -127,6 +148,7 @@ export async function refreshAccessToken(
     refresh_token: args.refreshToken,
     client_id: args.clientId,
   })
+  if (args.resource !== undefined) body.set('resource', args.resource)
   const res = await fetchImpl(url, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -161,6 +183,11 @@ export interface RunClerkPkceArgs {
    *  allowlisted in Clerk Dashboard — Clerk rejects wildcards in the
    *  port position (RFC 8252 §7.3 non-compliance). */
   redirectPort?: number
+  /** Resource indicator (RFC 8707). Threaded into both the authorize
+   *  redirect and the token exchange so Clerk's access-token JWT carries
+   *  this as its `aud` claim. For Convex targets, set to
+   *  CLERK_CONVEX_AUDIENCE. */
+  resource?: string
   /** Test hook: called with the authorize URL instead of opening the browser. */
   onAuthorizeUrl?: (url: string) => void
   /** Test hook: inject a fetch implementation. */
@@ -198,6 +225,7 @@ export async function runClerkPkce(args: RunClerkPkceArgs): Promise<TokenSet> {
       codeChallenge,
       state,
       scopes: args.scopes,
+      resource: args.resource,
     })
 
     if (args.onAuthorizeUrl) {
@@ -218,6 +246,7 @@ export async function runClerkPkce(args: RunClerkPkceArgs): Promise<TokenSet> {
         redirectUri,
         code: callback.code,
         codeVerifier,
+        resource: args.resource,
       },
       args.fetchImpl,
     )
