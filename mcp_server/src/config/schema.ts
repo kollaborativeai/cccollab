@@ -42,18 +42,39 @@ export const ChannelConfigSchema = z
   })
   .strict()
 
-export const LocationConfigSchema = z
+const BaseLocationFields = {
+  url: z.string().optional(),
+  active: z.boolean().optional(),
+  userEmail: z.string().optional(),
+  userId: z.string().optional(),
+  updatedAt: z.number().optional(),
+  channels: z.record(z.string(), ChannelConfigSchema).optional(),
+}
+
+/** Existing Convex Auth flow (Google OAuth → Convex Auth tokens). */
+const ConvexGoogleLocationSchema = z
   .object({
-    url: z.string().optional(),
-    active: z.boolean().optional(),
+    ...BaseLocationFields,
+    authType: z.literal('convex-google').optional(), // optional for back-compat
     accessToken: z.string().optional(),
     refreshToken: z.string().optional(),
-    userEmail: z.string().optional(),
-    userId: z.string().optional(),
-    updatedAt: z.number().optional(),
-    channels: z.record(z.string(), ChannelConfigSchema).optional(),
   })
   .strict()
+
+/** New Clerk PKCE flow. */
+const ClerkLocationSchema = z
+  .object({
+    ...BaseLocationFields,
+    authType: z.literal('clerk'),
+    clerkIssuer: z.string(),
+    clerkClientId: z.string(),
+    accessToken: z.string().optional(),
+    refreshToken: z.string().optional(),
+    accessTokenExpiresAt: z.number().optional(),
+  })
+  .strict()
+
+export const LocationConfigSchema = z.union([ClerkLocationSchema, ConvexGoogleLocationSchema])
 
 export const CccollabConfigSchema = z
   .object({
