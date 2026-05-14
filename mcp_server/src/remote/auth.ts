@@ -183,13 +183,14 @@ export interface LoopbackListener {
   shutdown(): void
 }
 
-export async function startLoopbackListener(timeoutMs: number): Promise<LoopbackListener> {
+export async function startLoopbackListener(timeoutMs: number, listenPort?: number): Promise<LoopbackListener> {
   // Deferred promise settled once by the FIRST event: either a valid
   // callback arrives or the timeout fires. Eagerly created so the
   // listener can receive a callback BEFORE `waitForCallback()` is awaited
   // (the browser can race ahead of the caller).
-  let settle: (value: { kind: 'callback'; callback: LoopbackCallback } | { kind: 'error'; err: Error }) => void =
-    () => {}
+  let settle: (
+    value: { kind: 'callback'; callback: LoopbackCallback } | { kind: 'error'; err: Error },
+  ) => void = () => {}
   const settled: Promise<{ kind: 'callback'; callback: LoopbackCallback } | { kind: 'error'; err: Error }> =
     new Promise((resolve) => {
       settle = resolve
@@ -219,7 +220,7 @@ export async function startLoopbackListener(timeoutMs: number): Promise<Loopback
 
   const port: number = await new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(listenPort ?? 0, '127.0.0.1', () => {
       const addr = server.address() as AddressInfo
       resolve(addr.port)
     })

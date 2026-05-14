@@ -7,6 +7,7 @@ import {
   exchangeCodeForTokens,
   refreshAccessToken,
   runClerkPkce,
+  DEFAULT_CLERK_REDIRECT_PORT,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/auth.js'
 
@@ -218,8 +219,7 @@ describe('runClerkPkce', () => {
   })
 
   it('rejects when the callback state does not match', async () => {
-    const fetchMock = (async () =>
-      new Response('{}', { status: 200 })) as typeof fetch
+    const fetchMock = (async () => new Response('{}', { status: 200 })) as typeof fetch
 
     const mockListener = {
       port: 54321,
@@ -270,5 +270,64 @@ describe('runClerkPkce', () => {
     ).rejects.toThrow(/invalid_grant/)
 
     expect(shutdownCalled).toBe(true)
+  })
+
+  it('uses DEFAULT_CLERK_REDIRECT_PORT when redirectPort is absent', async () => {
+    let receivedPort: number | undefined
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    let capturedState = ''
+    await runClerkPkce({
+      issuer: 'https://x.clerk.accounts.dev',
+      clientId: 'cccollab-cli',
+      onAuthorizeUrl: (url) => {
+        capturedState = new URL(url).searchParams.get('state') ?? ''
+      },
+      fetchImpl: fetchMock,
+      startListenerImpl: (async (timeoutMs: number, port?: number) => {
+        receivedPort = port
+        return {
+          port: DEFAULT_CLERK_REDIRECT_PORT,
+          waitForCallback: async () => ({ code: 'c', state: capturedState }),
+          shutdown: () => {},
+        }
+      }) as typeof startLoopbackListener,
+    })
+
+    expect(receivedPort).toBe(DEFAULT_CLERK_REDIRECT_PORT)
+  })
+
+  it('honors caller-supplied redirectPort', async () => {
+    let receivedPort: number | undefined
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    let capturedState = ''
+    await runClerkPkce({
+      issuer: 'https://x.clerk.accounts.dev',
+      clientId: 'cccollab-cli',
+      redirectPort: 54321,
+      onAuthorizeUrl: (url) => {
+        capturedState = new URL(url).searchParams.get('state') ?? ''
+      },
+      fetchImpl: fetchMock,
+      startListenerImpl: (async (timeoutMs: number, port?: number) => {
+        receivedPort = port
+        return {
+          port: 54321,
+          waitForCallback: async () => ({ code: 'c', state: capturedState }),
+          shutdown: () => {},
+        }
+      }) as typeof startLoopbackListener,
+    })
+
+    expect(receivedPort).toBe(54321)
   })
 })

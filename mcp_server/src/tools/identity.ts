@@ -271,6 +271,7 @@ async function handleAuthenticate(
       const tokens = await runClerkPkce({
         issuer: locationInfo.clerkIssuer,
         clientId: locationInfo.clerkClientId,
+        redirectPort: locationInfo.clerkRedirectPort,
       })
       saveLocationAuth(targetName, {
         authType: 'clerk',

@@ -147,4 +147,26 @@ describe('LocationConfigSchema discriminated union', () => {
     })
     expect(result.success).toBe(false)
   })
+
+  it('accepts clerk location with clerkRedirectPort', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      clerkRedirectPort: 54321,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects clerk location with non-integer clerkRedirectPort', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      clerkRedirectPort: 54321.5,
+    })
+    expect(result.success).toBe(false)
+  })
 })

@@ -34,6 +34,7 @@ export interface ResolvedLocation {
   accessTokenExpiresAt?: number
   clerkIssuer?: string
   clerkClientId?: string
+  clerkRedirectPort?: number
   userEmail?: string
   userId?: string
   updatedAt?: number
@@ -98,6 +99,7 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
       accessTokenExpiresAt: 'accessTokenExpiresAt' in loc ? loc.accessTokenExpiresAt : undefined,
       clerkIssuer: 'clerkIssuer' in loc ? loc.clerkIssuer : undefined,
       clerkClientId: 'clerkClientId' in loc ? loc.clerkClientId : undefined,
+      clerkRedirectPort: 'clerkRedirectPort' in loc ? loc.clerkRedirectPort : undefined,
       userEmail: loc.userEmail,
       userId: loc.userId,
       updatedAt: loc.updatedAt,

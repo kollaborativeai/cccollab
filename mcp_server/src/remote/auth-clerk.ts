@@ -1,7 +1,14 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { openBrowser } from './browser.js'
 import { startLoopbackListener } from './auth.js'
-import type { LoopbackListener } from './auth.js'
+
+/**
+ * Default loopback port for the Clerk OAuth callback. Clerk's Dashboard
+ * rejects wildcards in redirect-URL port position (RFC 8252 §7.3 non-compliance),
+ * so the redirect URL must be allowlisted with an exact port. Locations can
+ * override via clerkRedirectPort if 53682 collides locally.
+ */
+export const DEFAULT_CLERK_REDIRECT_PORT = 53682
 
 /**
  * Generate a cryptographically-random PKCE code verifier per RFC 7636 §4.1.
@@ -20,11 +27,7 @@ export function deriveCodeChallenge(verifier: string): string {
 }
 
 function base64UrlEncode(buf: Buffer): string {
-  return buf
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '')
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 export interface AuthorizeUrlArgs {
@@ -136,10 +139,7 @@ export async function refreshAccessToken(
   }
   const accessToken = json.access_token
   const rawRefresh = json.refresh_token
-  const refreshToken =
-    typeof rawRefresh === 'string' && rawRefresh.length > 0
-      ? rawRefresh
-      : args.refreshToken
+  const refreshToken = typeof rawRefresh === 'string' && rawRefresh.length > 0 ? rawRefresh : args.refreshToken
   const expiresIn = json.expires_in
   if (typeof accessToken !== 'string' || typeof expiresIn !== 'number') {
     throw new Error(`Unexpected refresh response shape: ${JSON.stringify(json)}`)
@@ -156,12 +156,17 @@ export interface RunClerkPkceArgs {
   clientId: string
   scopes?: string[]
   timeoutMs?: number
+  /** Override the loopback port for the OAuth callback. Defaults to
+   *  DEFAULT_CLERK_REDIRECT_PORT (53682). Must match an exact URL
+   *  allowlisted in Clerk Dashboard — Clerk rejects wildcards in the
+   *  port position (RFC 8252 §7.3 non-compliance). */
+  redirectPort?: number
   /** Test hook: called with the authorize URL instead of opening the browser. */
   onAuthorizeUrl?: (url: string) => void
   /** Test hook: inject a fetch implementation. */
   fetchImpl?: typeof fetch
   /** Test hook: inject a loopback listener factory. */
-  startListenerImpl?: (timeoutMs: number) => Promise<LoopbackListener>
+  startListenerImpl?: typeof startLoopbackListener
 }
 
 /**
@@ -180,8 +185,9 @@ export async function runClerkPkce(args: RunClerkPkceArgs): Promise<TokenSet> {
   const state = generateCodeVerifier().slice(0, 32)
   const timeoutMs = args.timeoutMs ?? 5 * 60 * 1000
 
+  const redirectPort = args.redirectPort ?? DEFAULT_CLERK_REDIRECT_PORT
   const startListener = args.startListenerImpl ?? startLoopbackListener
-  const listener = await startListener(timeoutMs)
+  const listener = await startListener(timeoutMs, redirectPort)
 
   try {
     const redirectUri = `http://127.0.0.1:${listener.port}/cccollab-oauth-callback`
@@ -202,9 +208,7 @@ export async function runClerkPkce(args: RunClerkPkceArgs): Promise<TokenSet> {
 
     const callback = await listener.waitForCallback()
     if (callback.state !== state) {
-      throw new Error(
-        `OAuth state mismatch: expected ${state}, got ${callback.state ?? '(missing)'}`,
-      )
+      throw new Error(`OAuth state mismatch: expected ${state}, got ${callback.state ?? '(missing)'}`)
     }
 
     return await exchangeCodeForTokens(
