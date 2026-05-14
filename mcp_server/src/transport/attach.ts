@@ -350,8 +350,12 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
+    authType: location.authType,
     accessToken: location.accessToken ?? '',
     refreshToken: location.refreshToken ?? '',
+    accessTokenExpiresAt: location.accessTokenExpiresAt,
+    clerkIssuer: location.clerkIssuer,
+    clerkClientId: location.clerkClientId,
     userEmail: location.userEmail,
     userId: location.userId,
   })
