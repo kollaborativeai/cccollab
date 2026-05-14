@@ -74,6 +74,49 @@ describe('stripProjectCredentials', () => {
     expect(input).toEqual(snapshot)
     warn.mockRestore()
   })
+
+  it('strips accessTokenExpiresAt but preserves authType, clerkIssuer, and clerkClientId', () => {
+    // accessTokenExpiresAt is a credential field and must be stripped.
+    // authType, clerkIssuer, and clerkClientId are configuration (not
+    // credentials) and must survive so teams can share the Clerk app
+    // pointer via a committed .cccollab.json.
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const input: CccollabConfig = {
+      locations: {
+        kai: {
+          authType: 'clerk',
+          url: 'https://x.convex.cloud',
+          clerkIssuer: 'https://clerk.example.com',
+          clerkClientId: 'client-123',
+          accessToken: 'tok',
+          refreshToken: 'rt',
+          accessTokenExpiresAt: 1_700_000_000_000,
+        },
+      },
+    }
+    const { stripped, warnings } = stripProjectCredentials(input, '.cccollab.json')
+
+    // Credential fields stripped.
+    expect(stripped.locations?.['kai']?.accessToken).toBeUndefined()
+    expect(stripped.locations?.['kai']?.refreshToken).toBeUndefined()
+    expect(
+      (stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['accessTokenExpiresAt'],
+    ).toBeUndefined()
+
+    // Configuration fields preserved.
+    expect(stripped.locations?.['kai']?.authType).toBe('clerk')
+    expect(
+      (stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkIssuer'],
+    ).toBe('https://clerk.example.com')
+    expect(
+      (stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkClientId'],
+    ).toBe('client-123')
+    expect(stripped.locations?.['kai']?.url).toBe('https://x.convex.cloud')
+
+    // One warning since the location had credential fields.
+    expect(warnings).toBe(1)
+    warn.mockRestore()
+  })
 })
 
 describe('mergeConfigs', () => {

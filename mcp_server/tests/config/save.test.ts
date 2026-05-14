@@ -10,8 +10,9 @@ const TMP_HOME = mkdtempSync(join(tmpdir(), 'cccollab-save-test-'))
 process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
-const { saveLocationAuth, clearUserConfig } = await import('../../src/config/save.js')
+const { saveLocationAuth, loadPersistedLocationAuth, clearUserConfig } = await import('../../src/config/save.js')
 const { CCCOLLAB_CONFIG_FILE } = await import('../../src/constants.js')
+const { LocationConfigSchema } = await import('../../src/config/schema.js')
 
 describe('saveLocationAuth', () => {
   beforeEach(() => {
@@ -192,5 +193,137 @@ describe('saveLocationAuth', () => {
     const entries = readdirSync(dir)
     const backups = entries.filter((e) => e.startsWith('config.json.bak.'))
     expect(backups.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('saveLocationAuth with authType=clerk', () => {
+  beforeEach(() => {
+    clearUserConfig()
+  })
+  afterEach(() => {
+    clearUserConfig()
+  })
+
+  it('persists authType, accessToken, refreshToken, and accessTokenExpiresAt', () => {
+    saveLocationAuth('kai', {
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+      accessTokenExpiresAt: 1_700_000_000_000,
+    })
+    const onDisk = loadPersistedLocationAuth('kai')
+    expect(onDisk).toMatchObject({
+      authType: 'clerk',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+      accessTokenExpiresAt: 1_700_000_000_000,
+    })
+  })
+
+  it('persists userEmail, userId, and url for clerk auth', () => {
+    saveLocationAuth('kai', {
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+      accessTokenExpiresAt: 1_700_000_000_000,
+      userEmail: 'test@example.com',
+      userId: 'u-999',
+    })
+    const onDisk = loadPersistedLocationAuth('kai')
+    expect(onDisk?.userEmail).toBe('test@example.com')
+    expect(onDisk?.userId).toBe('u-999')
+    expect(onDisk?.url).toBe('https://x.convex.cloud')
+  })
+
+  it('preserves convex-google semantics when authType is absent', () => {
+    saveLocationAuth('kai', {
+      url: 'https://y.convex.cloud',
+      accessToken: 'convex-tok',
+      refreshToken: 'convex-rt',
+    })
+    const onDisk = loadPersistedLocationAuth('kai')
+    expect(onDisk).not.toBeNull()
+    // authType absent for legacy convex-google saves.
+    expect(onDisk?.authType).toBeUndefined()
+    expect(onDisk?.accessToken).toBe('convex-tok')
+    expect(onDisk?.refreshToken).toBe('convex-rt')
+    // Clerk-only fields absent.
+    expect(onDisk?.accessTokenExpiresAt).toBeUndefined()
+  })
+
+  it('does NOT persist accessTokenExpiresAt for convex-google saves', () => {
+    saveLocationAuth('kai', {
+      accessToken: 'a',
+      refreshToken: 'b',
+    })
+    const raw = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')) as Record<string, unknown>
+    const loc = (raw.locations as Record<string, unknown>)['kai'] as Record<string, unknown>
+    expect(loc['authType']).toBeUndefined()
+    expect(loc['accessTokenExpiresAt']).toBeUndefined()
+  })
+
+  it('round-trip via schema parse is valid for clerk auth', () => {
+    saveLocationAuth('kai', {
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+      accessTokenExpiresAt: 1_700_000_000_000,
+    })
+    // Write clerkIssuer and clerkClientId manually (they come from static
+    // project config, not from saveLocationAuth).
+    const raw = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')) as {
+      locations: Record<string, Record<string, unknown>>
+    }
+    raw.locations['kai']!['clerkIssuer'] = 'https://clerk.example.com'
+    raw.locations['kai']!['clerkClientId'] = 'client-123'
+    writeFileSync(CCCOLLAB_CONFIG_FILE, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 })
+
+    const loc = raw.locations['kai']
+    const result = LocationConfigSchema.safeParse(loc)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toMatchObject({
+        authType: 'clerk',
+        accessToken: 'tok',
+        refreshToken: 'rt',
+        accessTokenExpiresAt: 1_700_000_000_000,
+        clerkIssuer: 'https://clerk.example.com',
+        clerkClientId: 'client-123',
+      })
+    }
+  })
+
+  it('loadPersistedLocationAuth surfaces clerkIssuer and clerkClientId from disk', () => {
+    // Simulate a location written by both static config (clerkIssuer/clerkClientId)
+    // and saveLocationAuth (tokens).
+    writeFileSync(
+      CCCOLLAB_CONFIG_FILE,
+      JSON.stringify(
+        {
+          locations: {
+            kai: {
+              authType: 'clerk',
+              url: 'https://x.convex.cloud',
+              clerkIssuer: 'https://issuer.example.com',
+              clerkClientId: 'cid-abc',
+              accessToken: 'tok',
+              refreshToken: 'rt',
+              accessTokenExpiresAt: 1_700_000_000_000,
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    )
+    const onDisk = loadPersistedLocationAuth('kai')
+    expect(onDisk?.clerkIssuer).toBe('https://issuer.example.com')
+    expect(onDisk?.clerkClientId).toBe('cid-abc')
+    expect(onDisk?.authType).toBe('clerk')
+    expect(onDisk?.accessTokenExpiresAt).toBe(1_700_000_000_000)
   })
 })

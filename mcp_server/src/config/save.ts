@@ -11,9 +11,12 @@ import {
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
-import { CccollabConfigSchema, type LocationConfig } from './schema.js'
+import { UserCccollabConfigSchema, type LocationConfig, type UserLocationConfig } from './schema.js'
 
-export interface LocationAuth {
+export interface ConvexGoogleLocationAuth {
+  /** Optional for back-compat: existing call sites omit this field and the
+   *  legacy convex-google path is assumed. */
+  authType?: 'convex-google'
   url?: string
   accessToken: string
   refreshToken: string
@@ -21,6 +24,22 @@ export interface LocationAuth {
   userId?: string
   updatedAt?: number
 }
+
+export interface ClerkLocationAuth {
+  authType: 'clerk'
+  url?: string
+  accessToken: string
+  refreshToken: string
+  /** Unix epoch milliseconds at which the access token expires. Required for
+   *  the Clerk flow so the refresh path can determine token liveness without
+   *  an introspection round-trip. */
+  accessTokenExpiresAt: number
+  userEmail?: string
+  userId?: string
+  updatedAt?: number
+}
+
+export type LocationAuth = ConvexGoogleLocationAuth | ClerkLocationAuth
 
 /**
  * Cross-process lock around the read-modify-write of the user-level
@@ -178,12 +197,18 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
   const existing = readExisting()
   const next = existing
   next.locations = next.locations ?? {}
-  const prior = (next.locations[locationName] as LocationConfig | undefined) ?? {}
+  const prior = (next.locations[locationName] as UserLocationConfig | undefined) ?? {}
   next.locations[locationName] = {
     ...prior,
     ...(auth.url !== undefined ? { url: auth.url } : {}),
+    // Only write `authType` for clerk. For convex-google we leave it absent so
+    // legacy configs that pre-date the discriminated union continue to round-trip
+    // cleanly through the schema's optional back-compat branch.
+    ...(auth.authType === 'clerk' ? { authType: 'clerk' as const } : {}),
     accessToken: auth.accessToken,
     refreshToken: auth.refreshToken,
+    // `accessTokenExpiresAt` is a Clerk-only credential field.
+    ...(auth.authType === 'clerk' ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}),
     ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
     ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
     updatedAt: auth.updatedAt ?? Date.now(),
@@ -234,17 +259,38 @@ export async function withConfigLock<T>(
  * is absent / unreadable / has no entry for this location. Does NOT
  * acquire the lock; callers that need a coherent read+write should
  * call this from within `withConfigLock`.
+ *
+ * Returns `authType` so the refresh path can decide which flow to use,
+ * `accessTokenExpiresAt` so it can determine whether the access token is
+ * still live, and `clerkIssuer` / `clerkClientId` so it can reconstruct
+ * the token-refresh request URL without re-reading the project config.
  */
 export function loadPersistedLocationAuth(
   locationName: string,
-): { url?: string; accessToken?: string; refreshToken?: string; userEmail?: string; userId?: string } | null {
+): {
+  url?: string
+  authType?: 'clerk' | 'convex-google'
+  accessToken?: string
+  refreshToken?: string
+  accessTokenExpiresAt?: number
+  clerkIssuer?: string
+  clerkClientId?: string
+  userEmail?: string
+  userId?: string
+} | null {
   const existing = readExisting()
-  const loc = existing.locations?.[locationName] as LocationConfig | undefined
+  const loc = existing.locations?.[locationName] as UserLocationConfig | undefined
   if (!loc) return null
   return {
     url: loc.url,
+    authType: loc.authType,
     accessToken: loc.accessToken,
     refreshToken: loc.refreshToken,
+    // The `in` guards are required because `loc` is now a discriminated union
+    // and the clerk-only fields are not present on the convex-google branch.
+    accessTokenExpiresAt: 'accessTokenExpiresAt' in loc ? loc.accessTokenExpiresAt : undefined,
+    clerkIssuer: 'clerkIssuer' in loc ? loc.clerkIssuer : undefined,
+    clerkClientId: 'clerkClientId' in loc ? loc.clerkClientId : undefined,
     userEmail: loc.userEmail,
     userId: loc.userId,
   }
@@ -260,16 +306,16 @@ export function clearUserConfig(): void {
   }
 }
 
-function readExisting(): { locations?: Record<string, LocationConfig>; [key: string]: unknown } {
+function readExisting(): { locations?: Record<string, UserLocationConfig>; [key: string]: unknown } {
   if (!existsSync(CCCOLLAB_CONFIG_FILE)) {
     return {}
   }
   try {
     const raw = readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')
     const parsed: unknown = JSON.parse(raw)
-    const validated = CccollabConfigSchema.parse(parsed)
+    const validated = UserCccollabConfigSchema.parse(parsed)
     // Cast to the looser shape we merge against.
-    return validated as { locations?: Record<string, LocationConfig>; [key: string]: unknown }
+    return validated as { locations?: Record<string, UserLocationConfig>; [key: string]: unknown }
   } catch (err) {
     // Corrupt or schema-violating user-level file. Preserve the bad
     // content for forensics by renaming it to a timestamped sibling
