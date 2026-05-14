@@ -173,6 +173,94 @@ export async function refreshAccessToken(
   }
 }
 
+/** Discriminated error codes from KAI's /cccollab/exchangeToken endpoint. */
+export type ConvexJwtExchangeErrorCode =
+  | 'INVALID_OAUTH_TOKEN'
+  | 'MISSING_SESSION'
+  | 'SESSION_NOT_FOUND'
+  | 'TEMPLATE_NOT_FOUND'
+  | 'EXCHANGE_FAILED'
+
+/**
+ * Thrown by exchangeOAuthTokenForConvexJwt when KAI's endpoint returns an
+ * error. `code` is the structured error code from KAI's response body so
+ * callers can branch on the specific failure (e.g. retry after OAuth
+ * refresh on INVALID_OAUTH_TOKEN).
+ */
+export class ConvexJwtExchangeError extends Error {
+  constructor(
+    public readonly code: ConvexJwtExchangeErrorCode,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'ConvexJwtExchangeError'
+  }
+}
+
+export interface ExchangeOAuthTokenArgs {
+  /** KAI Convex deployment URL (the `url` field on the clerk location). */
+  kaiUrl: string
+  /** The OAuth access token JWT minted by Clerk's /oauth/token endpoint. */
+  oauthToken: string
+}
+
+export interface ConvexJwtResult {
+  jwt: string
+  /** Epoch ms at which the templated JWT expires. */
+  expiresAt: number
+}
+
+/**
+ * Exchange a Clerk-issued OAuth access token for a Convex-audience JWT via
+ * KAI's /cccollab/exchangeToken HTTP action. KAI uses CLERK_SECRET_KEY +
+ * Clerk Backend SDK to mint a JWT with `aud: 'convex'` matching the
+ * deployment's auth.config.ts applicationID.
+ *
+ * Why this exists: Clerk OAuth Application JWTs don't carry `aud` and
+ * Clerk doesn't honor RFC 8707 `resource` indicator on this plan, so the
+ * OAuth token alone cannot authenticate Convex calls. The exchange is the
+ * minimal hop that bridges OAuth → templated-JWT semantics.
+ *
+ * Note on URL construction: `new URL('/cccollab/exchangeToken', kaiUrl)` —
+ * the leading `/` on the path replaces any path component in `kaiUrl`. KAI's
+ * URL is the Convex deployment root (no path, e.g. https://x.convex.cloud),
+ * so this resolves correctly. Do not pass a URL with a meaningful path.
+ *
+ * @throws {ConvexJwtExchangeError} on 401 with a structured code.
+ * @throws {Error} on network errors or unexpected response shape.
+ */
+export async function exchangeOAuthTokenForConvexJwt(
+  args: ExchangeOAuthTokenArgs,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ConvexJwtResult> {
+  const url = new URL('/cccollab/exchangeToken', args.kaiUrl).toString()
+  const res = await fetchImpl(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.oauthToken}`,
+    },
+  })
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
+  if (!res.ok) {
+    const rawCode = typeof json.code === 'string' ? json.code : 'EXCHANGE_FAILED'
+    const code: ConvexJwtExchangeErrorCode =
+      rawCode === 'INVALID_OAUTH_TOKEN' ||
+      rawCode === 'MISSING_SESSION' ||
+      rawCode === 'SESSION_NOT_FOUND' ||
+      rawCode === 'TEMPLATE_NOT_FOUND'
+        ? rawCode
+        : 'EXCHANGE_FAILED'
+    const message = typeof json.message === 'string' ? json.message : `Convex JWT exchange failed (${res.status})`
+    throw new ConvexJwtExchangeError(code, message)
+  }
+  const jwt = json.jwt
+  const expiresAt = json.expiresAt
+  if (typeof jwt !== 'string' || typeof expiresAt !== 'number') {
+    throw new Error(`Unexpected /cccollab/exchangeToken response shape: ${JSON.stringify(json)}`)
+  }
+  return { jwt, expiresAt }
+}
+
 export interface RunClerkPkceArgs {
   issuer: string
   clientId: string

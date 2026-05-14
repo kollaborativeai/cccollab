@@ -9,6 +9,8 @@ import {
   runClerkPkce,
   DEFAULT_CLERK_REDIRECT_PORT,
   CLERK_CONVEX_AUDIENCE,
+  exchangeOAuthTokenForConvexJwt,
+  ConvexJwtExchangeError,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/auth.js'
 
@@ -424,5 +426,81 @@ describe('runClerkPkce', () => {
     const firstCall = tokenCalls[0]
     expect(firstCall).toBeDefined()
     expect(new URLSearchParams(firstCall?.body ?? '').get('resource')).toBe('convex')
+  })
+})
+
+describe('exchangeOAuthTokenForConvexJwt', () => {
+  it('POSTs to /cccollab/exchangeToken with Bearer auth and returns parsed result', async () => {
+    const calls: { url: string; method: string; headers: Record<string, string> }[] = []
+    const futureExpiresAt = Date.now() + 60_000
+    const fetchMock = (async (url: string, init: RequestInit) => {
+      calls.push({
+        url,
+        method: init.method as string,
+        headers: init.headers as Record<string, string>,
+      })
+      return new Response(JSON.stringify({ jwt: 'cv-jwt-abc', expiresAt: futureExpiresAt }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    const result = await exchangeOAuthTokenForConvexJwt(
+      { kaiUrl: 'https://x.convex.cloud', oauthToken: 'oauth-token-123' },
+      fetchMock,
+    )
+
+    expect(result.jwt).toBe('cv-jwt-abc')
+    expect(result.expiresAt).toBe(futureExpiresAt)
+    expect(calls).toHaveLength(1)
+    const [call] = calls
+    expect(call).toBeDefined()
+    expect(call?.url).toBe('https://x.convex.cloud/cccollab/exchangeToken')
+    expect(call?.method).toBe('POST')
+    expect(call?.headers['Authorization']).toBe('Bearer oauth-token-123')
+  })
+
+  it('throws ConvexJwtExchangeError with INVALID_OAUTH_TOKEN code on 401', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ code: 'INVALID_OAUTH_TOKEN', message: 'Token verification failed' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'bad-token' }, fetchMock),
+    ).rejects.toSatisfy((err) => {
+      return (
+        err instanceof ConvexJwtExchangeError &&
+        err.code === 'INVALID_OAUTH_TOKEN' &&
+        err.name === 'ConvexJwtExchangeError'
+      )
+    })
+  })
+
+  it('maps unknown 401 codes to EXCHANGE_FAILED', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ code: 'SOME_UNKNOWN_ERROR', message: 'Something went wrong' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
+    ).rejects.toSatisfy((err) => {
+      return err instanceof ConvexJwtExchangeError && err.code === 'EXCHANGE_FAILED'
+    })
+  })
+
+  it('throws on malformed response shape (missing jwt or expiresAt)', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ something: 'else' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
+    ).rejects.toThrow(/Unexpected \/cccollab\/exchangeToken response shape/)
   })
 })
