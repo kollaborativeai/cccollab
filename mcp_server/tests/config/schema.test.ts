@@ -127,4 +127,24 @@ describe('LocationConfigSchema discriminated union', () => {
     })
     expect(result.success).toBe(true)
   })
+
+  it('rejects clerk location missing clerkClientId', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects clerk location with unknown extra field (.strict)', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      randomUnknownField: 'should-be-rejected',
+    })
+    expect(result.success).toBe(false)
+  })
 })

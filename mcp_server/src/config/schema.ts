@@ -74,6 +74,17 @@ const ClerkLocationSchema = z
   })
   .strict()
 
+// Order matters: ClerkLocationSchema first so a payload with
+// authType: 'clerk' binds its required clerkIssuer/clerkClientId
+// before the convex-google fallback is attempted. Reordering or
+// inserting a more permissive predecessor would silently drop
+// Clerk-required fields.
+//
+// Plain z.union (not z.discriminatedUnion): the legacy branch's
+// authType is optional for back-compat with pre-existing
+// ~/.cccollab/config.json files, which z.discriminatedUnion does
+// not support (it requires the discriminator literal on every
+// branch).
 export const LocationConfigSchema = z.union([ClerkLocationSchema, ConvexGoogleLocationSchema])
 
 export const CccollabConfigSchema = z
