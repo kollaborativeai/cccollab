@@ -119,7 +119,7 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
     // abort if the user gives up.
   }
 
-  const code = await listener.waitForCode()
+  const { code } = await listener.waitForCallback()
 
   let second: SignInResult
   try {
@@ -172,21 +172,28 @@ export async function runAuthenticate(options: AuthenticateOptions): Promise<Aut
   }
 }
 
-interface LoopbackListener {
+export interface LoopbackCallback {
+  code: string
+  state: string | null
+}
+
+export interface LoopbackListener {
   port: number
-  waitForCode(): Promise<string>
+  waitForCallback(): Promise<LoopbackCallback>
   shutdown(): void
 }
 
-async function startLoopbackListener(timeoutMs: number): Promise<LoopbackListener> {
+export async function startLoopbackListener(timeoutMs: number): Promise<LoopbackListener> {
   // Deferred promise settled once by the FIRST event: either a valid
   // callback arrives or the timeout fires. Eagerly created so the
-  // listener can receive a callback BEFORE `waitForCode()` is awaited
+  // listener can receive a callback BEFORE `waitForCallback()` is awaited
   // (the browser can race ahead of the caller).
-  let settle: (value: { kind: 'code'; code: string } | { kind: 'error'; err: Error }) => void = () => {}
-  const settled: Promise<{ kind: 'code'; code: string } | { kind: 'error'; err: Error }> = new Promise((resolve) => {
-    settle = resolve
-  })
+  let settle: (value: { kind: 'callback'; callback: LoopbackCallback } | { kind: 'error'; err: Error }) => void =
+    () => {}
+  const settled: Promise<{ kind: 'callback'; callback: LoopbackCallback } | { kind: 'error'; err: Error }> =
+    new Promise((resolve) => {
+      settle = resolve
+    })
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -202,11 +209,12 @@ async function startLoopbackListener(timeoutMs: number): Promise<LoopbackListene
       settle({ kind: 'error', err: new Error('OAuth callback missing code parameter') })
       return
     }
+    const state = url.searchParams.get('state') // may be null for legacy convex-google flow
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(
       `<!doctype html><html><head><meta charset="utf-8"><title>cccollab</title></head><body style="font-family:system-ui;padding:3em;text-align:center;"><h1>You're signed in.</h1><p>You can close this tab and return to your terminal.</p></body></html>`,
     )
-    settle({ kind: 'code', code })
+    settle({ kind: 'callback', callback: { code, state } })
   })
 
   const port: number = await new Promise((resolve, reject) => {
@@ -224,14 +232,14 @@ async function startLoopbackListener(timeoutMs: number): Promise<LoopbackListene
 
   return {
     port,
-    waitForCode: async () => {
+    waitForCallback: async () => {
       const result = await settled
       clearTimeout(timeoutHandle)
       // Close the server off-tick so an in-flight 200 response has a
       // chance to flush to the browser.
       setImmediate(() => server.close())
       if (result.kind === 'error') throw result.err
-      return result.code
+      return result.callback
     },
     shutdown: () => {
       clearTimeout(timeoutHandle)

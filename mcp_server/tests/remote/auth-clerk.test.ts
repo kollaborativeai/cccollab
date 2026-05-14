@@ -6,7 +6,9 @@ import {
   buildAuthorizeUrl,
   exchangeCodeForTokens,
   refreshAccessToken,
+  runClerkPkce,
 } from '../../src/remote/auth-clerk.js'
+import type { startLoopbackListener } from '../../src/remote/auth.js'
 
 describe('PKCE primitives', () => {
   it('generateCodeVerifier produces an 86-char base64url string', () => {
@@ -163,5 +165,110 @@ describe('refreshAccessToken', () => {
       fetchMock,
     )
     expect(result.refreshToken).toBe('old_rt')
+  })
+})
+
+describe('runClerkPkce', () => {
+  it('completes the full PKCE flow and returns a TokenSet', async () => {
+    let capturedAuthorizeUrl: string | undefined
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'flow_at',
+          refresh_token: 'flow_rt',
+          expires_in: 60,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+
+    // Mock listener that resolves immediately with a callback whose state
+    // matches whatever runClerkPkce generates — we intercept via onAuthorizeUrl
+    // to read the state out of the authorize URL.
+    let resolveCallback: (cb: { code: string; state: string | null }) => void = () => {}
+    const callbackPromise = new Promise<{ code: string; state: string | null }>((resolve) => {
+      resolveCallback = resolve
+    })
+    const mockListener = {
+      port: 54321,
+      waitForCallback: () => callbackPromise,
+      shutdown: () => {},
+    }
+    const startListenerImpl = (async () => mockListener) as typeof startLoopbackListener
+
+    const promise = runClerkPkce({
+      issuer: 'https://x.clerk.accounts.dev',
+      clientId: 'cccollab-cli',
+      onAuthorizeUrl: (url) => {
+        capturedAuthorizeUrl = url
+        const state = new URL(url).searchParams.get('state')
+        // Resolve callback with the matching state
+        resolveCallback({ code: 'flow-code', state })
+      },
+      fetchImpl: fetchMock,
+      startListenerImpl,
+    })
+
+    const result = await promise
+    expect(result.accessToken).toBe('flow_at')
+    expect(result.refreshToken).toBe('flow_rt')
+    expect(capturedAuthorizeUrl).toBeDefined()
+    expect(capturedAuthorizeUrl).toContain('/oauth/authorize')
+    expect(capturedAuthorizeUrl).toContain('code_challenge=')
+    expect(capturedAuthorizeUrl).toContain('code_challenge_method=S256')
+  })
+
+  it('rejects when the callback state does not match', async () => {
+    const fetchMock = (async () =>
+      new Response('{}', { status: 200 })) as typeof fetch
+
+    const mockListener = {
+      port: 54321,
+      waitForCallback: async () => ({ code: 'c', state: 'WRONG_STATE' }),
+      shutdown: () => {},
+    }
+    const startListenerImpl = (async () => mockListener) as typeof startLoopbackListener
+
+    await expect(
+      runClerkPkce({
+        issuer: 'https://x.clerk.accounts.dev',
+        clientId: 'cccollab-cli',
+        onAuthorizeUrl: () => {},
+        fetchImpl: fetchMock,
+        startListenerImpl,
+      }),
+    ).rejects.toThrow(/state mismatch/)
+  })
+
+  it('shuts down the listener even if token exchange fails', async () => {
+    let shutdownCalled = false
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })) as typeof fetch
+
+    const mockListener = {
+      port: 54321,
+      waitForCallback: async () => ({ code: 'c', state: 'matching' }),
+      shutdown: () => {
+        shutdownCalled = true
+      },
+    }
+
+    // We need state to match — capture it from authorizeUrl
+    let capturedState = ''
+    await expect(
+      runClerkPkce({
+        issuer: 'https://x.clerk.accounts.dev',
+        clientId: 'cccollab-cli',
+        onAuthorizeUrl: (url) => {
+          capturedState = new URL(url).searchParams.get('state') ?? ''
+        },
+        fetchImpl: fetchMock,
+        startListenerImpl: (async () => ({
+          ...mockListener,
+          waitForCallback: async () => ({ code: 'c', state: capturedState }),
+        })) as typeof startLoopbackListener,
+      }),
+    ).rejects.toThrow(/invalid_grant/)
+
+    expect(shutdownCalled).toBe(true)
   })
 })

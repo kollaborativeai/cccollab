@@ -1,4 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { openBrowser } from './browser.js'
+import { startLoopbackListener } from './auth.js'
+import type { LoopbackListener } from './auth.js'
 
 /**
  * Generate a cryptographically-random PKCE code verifier per RFC 7636 §4.1.
@@ -145,5 +148,76 @@ export async function refreshAccessToken(
     accessToken,
     refreshToken,
     accessTokenExpiresAt: Date.now() + expiresIn * 1000,
+  }
+}
+
+export interface RunClerkPkceArgs {
+  issuer: string
+  clientId: string
+  scopes?: string[]
+  timeoutMs?: number
+  /** Test hook: called with the authorize URL instead of opening the browser. */
+  onAuthorizeUrl?: (url: string) => void
+  /** Test hook: inject a fetch implementation. */
+  fetchImpl?: typeof fetch
+  /** Test hook: inject a loopback listener factory. */
+  startListenerImpl?: (timeoutMs: number) => Promise<LoopbackListener>
+}
+
+/**
+ * Drive a full OAuth 2.0 Authorization Code + PKCE flow against Clerk:
+ * generate verifier+challenge, open the user's browser to Clerk's
+ * /oauth/authorize, capture the callback on a loopback listener,
+ * verify state matches, and exchange the code for a TokenSet.
+ *
+ * Reuses the cccollab loopback listener (mcp_server/src/remote/auth.ts)
+ * and the platform-minimal browser opener
+ * (mcp_server/src/remote/browser.ts). RFC 6749 §4.1 + RFC 7636.
+ */
+export async function runClerkPkce(args: RunClerkPkceArgs): Promise<TokenSet> {
+  const codeVerifier = generateCodeVerifier()
+  const codeChallenge = deriveCodeChallenge(codeVerifier)
+  const state = generateCodeVerifier().slice(0, 32)
+  const timeoutMs = args.timeoutMs ?? 5 * 60 * 1000
+
+  const startListener = args.startListenerImpl ?? startLoopbackListener
+  const listener = await startListener(timeoutMs)
+
+  try {
+    const redirectUri = `http://127.0.0.1:${listener.port}/cccollab-oauth-callback`
+    const authorizeUrl = buildAuthorizeUrl({
+      issuer: args.issuer,
+      clientId: args.clientId,
+      redirectUri,
+      codeChallenge,
+      state,
+      scopes: args.scopes,
+    })
+
+    if (args.onAuthorizeUrl) {
+      args.onAuthorizeUrl(authorizeUrl)
+    } else {
+      await openBrowser(authorizeUrl)
+    }
+
+    const callback = await listener.waitForCallback()
+    if (callback.state !== state) {
+      throw new Error(
+        `OAuth state mismatch: expected ${state}, got ${callback.state ?? '(missing)'}`,
+      )
+    }
+
+    return await exchangeCodeForTokens(
+      {
+        issuer: args.issuer,
+        clientId: args.clientId,
+        redirectUri,
+        code: callback.code,
+        codeVerifier,
+      },
+      args.fetchImpl,
+    )
+  } finally {
+    listener.shutdown()
   }
 }
