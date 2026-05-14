@@ -5,6 +5,8 @@ import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runAuthenticate } from '../remote/auth.js'
+import { runClerkPkce } from '../remote/auth-clerk.js'
+import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -262,7 +264,25 @@ async function handleAuthenticate(
 
   let authResult: { locationName: string; url: string; userEmail?: string }
   try {
-    authResult = await runAuthenticate({ locationName: targetName, url })
+    if (locationInfo?.authType === 'clerk') {
+      if (!locationInfo.clerkIssuer || !locationInfo.clerkClientId) {
+        return `Location "${targetName}" has authType='clerk' but is missing clerkIssuer or clerkClientId. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json.`
+      }
+      const tokens = await runClerkPkce({
+        issuer: locationInfo.clerkIssuer,
+        clientId: locationInfo.clerkClientId,
+      })
+      saveLocationAuth(targetName, {
+        authType: 'clerk',
+        url,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      })
+      authResult = { locationName: targetName, url }
+    } else {
+      authResult = await runAuthenticate({ locationName: targetName, url })
+    }
   } catch (err) {
     return `Authentication failed: ${err instanceof Error ? err.message : String(err)}`
   }

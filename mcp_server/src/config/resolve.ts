@@ -28,8 +28,12 @@ export interface ResolvedLocation {
   name: string
   isLocal: boolean
   url?: string
+  authType?: 'convex-google' | 'clerk'
   accessToken?: string
   refreshToken?: string
+  accessTokenExpiresAt?: number
+  clerkIssuer?: string
+  clerkClientId?: string
   userEmail?: string
   userId?: string
   updatedAt?: number
@@ -88,8 +92,12 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
       name,
       isLocal: name === LOCAL_LOCATION,
       url: loc.url,
+      authType: 'authType' in loc ? loc.authType : undefined,
       accessToken: loc.accessToken,
       refreshToken: loc.refreshToken,
+      accessTokenExpiresAt: 'accessTokenExpiresAt' in loc ? loc.accessTokenExpiresAt : undefined,
+      clerkIssuer: 'clerkIssuer' in loc ? loc.clerkIssuer : undefined,
+      clerkClientId: 'clerkClientId' in loc ? loc.clerkClientId : undefined,
       userEmail: loc.userEmail,
       userId: loc.userId,
       updatedAt: loc.updatedAt,
