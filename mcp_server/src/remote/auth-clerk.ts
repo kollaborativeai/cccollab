@@ -244,6 +244,28 @@ export interface ConvexJwtResult {
 }
 
 /**
+ * Translate a Convex deployment URL into its HTTP-action base URL.
+ *
+ * Convex serves the SDK/WebSocket API at `<slug>.convex.cloud` and HTTP
+ * actions (registered via `httpRouter`) at the sibling hostname
+ * `<slug>.convex.site`. The two share a deployment but are routed on
+ * different domains to avoid path collisions between user-defined HTTP
+ * action paths and Convex's own SDK API paths.
+ *
+ * For any URL with a `.convex.cloud` hostname suffix, this returns the
+ * same URL with that suffix swapped for `.convex.site`. Other URLs pass
+ * through unchanged (covers self-hosted deployments and tests that use
+ * arbitrary hostnames).
+ */
+export function deploymentUrlToHttpActionUrl(deploymentUrl: string): string {
+  const u = new URL(deploymentUrl)
+  if (u.hostname.endsWith('.convex.cloud')) {
+    u.hostname = u.hostname.slice(0, -'.convex.cloud'.length) + '.convex.site'
+  }
+  return u.toString().replace(/\/$/, '')
+}
+
+/**
  * Exchange a Clerk-issued OAuth access token for a Convex-audience JWT via
  * KAI's /cccollab/exchangeToken HTTP action. KAI uses CLERK_SECRET_KEY +
  * Clerk Backend SDK to mint a JWT with `aud: 'convex'` matching the
@@ -254,10 +276,10 @@ export interface ConvexJwtResult {
  * OAuth token alone cannot authenticate Convex calls. The exchange is the
  * minimal hop that bridges OAuth → templated-JWT semantics.
  *
- * Note on URL construction: `new URL('/cccollab/exchangeToken', kaiUrl)` —
- * the leading `/` on the path replaces any path component in `kaiUrl`. KAI's
- * URL is the Convex deployment root (no path, e.g. https://x.convex.cloud),
- * so this resolves correctly. Do not pass a URL with a meaningful path.
+ * URL routing: HTTP actions on a Convex deployment are served at
+ * `<slug>.convex.site` rather than `<slug>.convex.cloud` (where the SDK
+ * lives). We translate via deploymentUrlToHttpActionUrl before joining
+ * the action path.
  *
  * @throws {ConvexJwtExchangeError} on 401 with a structured code.
  * @throws {Error} on network errors or unexpected response shape.
@@ -266,7 +288,8 @@ export async function exchangeOAuthTokenForConvexJwt(
   args: ExchangeOAuthTokenArgs,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ConvexJwtResult> {
-  const url = new URL('/cccollab/exchangeToken', args.kaiUrl).toString()
+  const httpActionBase = deploymentUrlToHttpActionUrl(args.kaiUrl)
+  const url = new URL('/cccollab/exchangeToken', httpActionBase).toString()
   const res = await fetchImpl(url, {
     method: 'POST',
     headers: {

@@ -11,6 +11,7 @@ import {
   CLERK_CONVEX_AUDIENCE,
   exchangeOAuthTokenForConvexJwt,
   ConvexJwtExchangeError,
+  deploymentUrlToHttpActionUrl,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/auth.js'
 
@@ -429,6 +430,33 @@ describe('runClerkPkce', () => {
   })
 })
 
+describe('deploymentUrlToHttpActionUrl', () => {
+  it('swaps .convex.cloud → .convex.site on the hostname', () => {
+    expect(deploymentUrlToHttpActionUrl('https://clear-yak-990.convex.cloud')).toBe('https://clear-yak-990.convex.site')
+  })
+
+  it('preserves the scheme and slug exactly', () => {
+    expect(deploymentUrlToHttpActionUrl('https://wonderful-narwhal-409.convex.cloud')).toBe(
+      'https://wonderful-narwhal-409.convex.site',
+    )
+  })
+
+  it('strips trailing slash from the output', () => {
+    expect(deploymentUrlToHttpActionUrl('https://x.convex.cloud/')).toBe('https://x.convex.site')
+  })
+
+  it('passes non-.convex.cloud URLs through unchanged (self-hosted, tests)', () => {
+    expect(deploymentUrlToHttpActionUrl('https://convex.example.com')).toBe('https://convex.example.com')
+    expect(deploymentUrlToHttpActionUrl('http://127.0.0.1:8001')).toBe('http://127.0.0.1:8001')
+  })
+
+  it('only matches .convex.cloud as a suffix, not a substring', () => {
+    expect(deploymentUrlToHttpActionUrl('https://foo.convex.cloud.example.com')).toBe(
+      'https://foo.convex.cloud.example.com',
+    )
+  })
+})
+
 describe('exchangeOAuthTokenForConvexJwt', () => {
   it('POSTs to /cccollab/exchangeToken with Bearer auth and returns parsed result', async () => {
     const calls: { url: string; method: string; headers: Record<string, string> }[] = []
@@ -455,7 +483,9 @@ describe('exchangeOAuthTokenForConvexJwt', () => {
     expect(calls).toHaveLength(1)
     const [call] = calls
     expect(call).toBeDefined()
-    expect(call?.url).toBe('https://x.convex.cloud/cccollab/exchangeToken')
+    // Convex HTTP actions are served on .convex.site, not .convex.cloud —
+    // deploymentUrlToHttpActionUrl translates the input URL.
+    expect(call?.url).toBe('https://x.convex.site/cccollab/exchangeToken')
     expect(call?.method).toBe('POST')
     expect(call?.headers['Authorization']).toBe('Bearer oauth-token-123')
   })
