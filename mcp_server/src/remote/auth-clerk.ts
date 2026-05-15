@@ -173,13 +173,35 @@ export async function refreshAccessToken(
   }
 }
 
-/** Discriminated error codes from KAI's /cccollab/exchangeToken endpoint. */
+/**
+ * Discriminated error codes from KAI's /cccollab/exchangeToken endpoint.
+ *
+ * Only INVALID_OAUTH_TOKEN triggers the fetcher's OAuth-refresh-and-retry
+ * path; every other code is terminal (returns null from setAuth, user
+ * re-runs `authenticate`). The 500-level codes signal misconfiguration
+ * or Clerk-side issues that the CLI cannot self-heal from.
+ */
 export type ConvexJwtExchangeErrorCode =
+  | 'MISSING_AUTH_HEADER'
   | 'INVALID_OAUTH_TOKEN'
   | 'MISSING_SESSION'
   | 'SESSION_NOT_FOUND'
   | 'TEMPLATE_NOT_FOUND'
+  | 'TEMPLATE_RESPONSE_INVALID'
+  | 'SERVER_MISCONFIGURED'
   | 'EXCHANGE_FAILED'
+
+/** All ConvexJwtExchangeErrorCode values for runtime narrowing. */
+const KNOWN_EXCHANGE_ERROR_CODES: readonly ConvexJwtExchangeErrorCode[] = [
+  'MISSING_AUTH_HEADER',
+  'INVALID_OAUTH_TOKEN',
+  'MISSING_SESSION',
+  'SESSION_NOT_FOUND',
+  'TEMPLATE_NOT_FOUND',
+  'TEMPLATE_RESPONSE_INVALID',
+  'SERVER_MISCONFIGURED',
+  'EXCHANGE_FAILED',
+]
 
 /**
  * Thrown by exchangeOAuthTokenForConvexJwt when KAI's endpoint returns an
@@ -243,13 +265,9 @@ export async function exchangeOAuthTokenForConvexJwt(
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (!res.ok) {
     const rawCode = typeof json.code === 'string' ? json.code : 'EXCHANGE_FAILED'
-    const code: ConvexJwtExchangeErrorCode =
-      rawCode === 'INVALID_OAUTH_TOKEN' ||
-      rawCode === 'MISSING_SESSION' ||
-      rawCode === 'SESSION_NOT_FOUND' ||
-      rawCode === 'TEMPLATE_NOT_FOUND'
-        ? rawCode
-        : 'EXCHANGE_FAILED'
+    const code: ConvexJwtExchangeErrorCode = (KNOWN_EXCHANGE_ERROR_CODES as readonly string[]).includes(rawCode)
+      ? (rawCode as ConvexJwtExchangeErrorCode)
+      : 'EXCHANGE_FAILED'
     const message = typeof json.message === 'string' ? json.message : `Convex JWT exchange failed (${res.status})`
     throw new ConvexJwtExchangeError(code, message)
   }

@@ -503,4 +503,20 @@ describe('exchangeOAuthTokenForConvexJwt', () => {
       exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
     ).rejects.toThrow(/Unexpected \/cccollab\/exchangeToken response shape/)
   })
+
+  it.each([
+    ['MISSING_AUTH_HEADER', 401],
+    ['TEMPLATE_RESPONSE_INVALID', 500],
+    ['SERVER_MISCONFIGURED', 500],
+  ] as const)('preserves the %s code from KAI (status %i)', async (code, status) => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ code, message: `synthetic ${code}` }), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
+    ).rejects.toSatisfy((err) => err instanceof ConvexJwtExchangeError && err.code === code)
+  })
 })
