@@ -176,10 +176,17 @@ export async function refreshAccessToken(
 /**
  * Discriminated error codes from KAI's /cccollab/exchangeToken endpoint.
  *
- * Only INVALID_OAUTH_TOKEN triggers the fetcher's OAuth-refresh-and-retry
- * path; every other code is terminal (returns null from setAuth, user
- * re-runs `authenticate`). The 500-level codes signal misconfiguration
- * or Clerk-side issues that the CLI cannot self-heal from.
+ * Retry semantics per code:
+ *  - INVALID_OAUTH_TOKEN → fetcher force-refreshes OAuth and retries
+ *    exchange once.
+ *  - UPSTREAM_RATE_LIMITED, UPSTREAM_UNAVAILABLE → transient Clerk-side
+ *    issues; intended to be retryable with backoff. Currently surfaced
+ *    through the fetcher as null (terminal) until empirical smoke
+ *    testing motivates a retry layer — user re-runs the MCP tool to
+ *    recover.
+ *  - All other codes → terminal. The 500-level codes signal
+ *    misconfiguration or Clerk-API-contract regressions the CLI cannot
+ *    self-heal from.
  */
 export type ConvexJwtExchangeErrorCode =
   | 'MISSING_AUTH_HEADER'
@@ -189,6 +196,8 @@ export type ConvexJwtExchangeErrorCode =
   | 'TEMPLATE_NOT_FOUND'
   | 'TEMPLATE_RESPONSE_INVALID'
   | 'SERVER_MISCONFIGURED'
+  | 'UPSTREAM_RATE_LIMITED'
+  | 'UPSTREAM_UNAVAILABLE'
   | 'EXCHANGE_FAILED'
 
 /** All ConvexJwtExchangeErrorCode values for runtime narrowing. */
@@ -200,6 +209,8 @@ const KNOWN_EXCHANGE_ERROR_CODES: readonly ConvexJwtExchangeErrorCode[] = [
   'TEMPLATE_NOT_FOUND',
   'TEMPLATE_RESPONSE_INVALID',
   'SERVER_MISCONFIGURED',
+  'UPSTREAM_RATE_LIMITED',
+  'UPSTREAM_UNAVAILABLE',
   'EXCHANGE_FAILED',
 ]
 

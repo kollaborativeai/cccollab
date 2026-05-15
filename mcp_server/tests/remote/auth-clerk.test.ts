@@ -508,6 +508,8 @@ describe('exchangeOAuthTokenForConvexJwt', () => {
     ['MISSING_AUTH_HEADER', 401],
     ['TEMPLATE_RESPONSE_INVALID', 500],
     ['SERVER_MISCONFIGURED', 500],
+    ['UPSTREAM_RATE_LIMITED', 429],
+    ['UPSTREAM_UNAVAILABLE', 503],
   ] as const)('preserves the %s code from KAI (status %i)', async (code, status) => {
     const fetchMock = (async () =>
       new Response(JSON.stringify({ code, message: `synthetic ${code}` }), {
