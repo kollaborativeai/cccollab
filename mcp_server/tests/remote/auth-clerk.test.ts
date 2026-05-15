@@ -536,6 +536,7 @@ describe('exchangeOAuthTokenForConvexJwt', () => {
 
   it.each([
     ['MISSING_AUTH_HEADER', 401],
+    ['NO_ACTIVE_SESSION', 401],
     ['TEMPLATE_RESPONSE_INVALID', 500],
     ['SERVER_MISCONFIGURED', 500],
     ['UPSTREAM_RATE_LIMITED', 429],
