@@ -143,6 +143,7 @@ export type ChannelConfig = z.infer<typeof ChannelConfigSchema>
 export type LocationConfig = z.infer<typeof LocationConfigSchema>
 export type UserLocationConfig = z.infer<typeof UserLocationConfigSchema>
 export type CccollabConfig = z.infer<typeof CccollabConfigSchema>
+export type UserCccollabConfig = z.infer<typeof UserCccollabConfigSchema>
 
 /** Reserved name for the in-process broker location. Always implicitly
  *  available even without an entry in `locations`. */

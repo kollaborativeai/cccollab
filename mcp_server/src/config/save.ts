@@ -267,9 +267,7 @@ export async function withConfigLock<T>(
  * project config, not from this file; they appear here only for
  * user-hand-edited configs and as a forward-compatibility hook.
  */
-export function loadPersistedLocationAuth(
-  locationName: string,
-): {
+export function loadPersistedLocationAuth(locationName: string): {
   url?: string
   authType?: 'clerk' | 'convex-google'
   accessToken?: string
@@ -280,7 +278,16 @@ export function loadPersistedLocationAuth(
   userEmail?: string
   userId?: string
 } | null {
-  const existing = readExisting()
+  // `readExisting` throws on a corrupt / schema-violating file. The
+  // documented contract here is "absent or unreadable → null", so a
+  // throw is caught and folded into null: the refresh path then degrades
+  // to unauthenticated rather than crashing on a bad config.
+  let existing: { locations?: Record<string, UserLocationConfig>; [key: string]: unknown }
+  try {
+    existing = readExisting()
+  } catch {
+    return null
+  }
   const loc = existing.locations?.[locationName] as UserLocationConfig | undefined
   if (!loc) return null
   return {
@@ -312,32 +319,34 @@ function readExisting(): { locations?: Record<string, UserLocationConfig>; [key:
   if (!existsSync(CCCOLLAB_CONFIG_FILE)) {
     return {}
   }
+  const raw = readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')
+  // A prior config that exists but cannot be parsed is NOT treated as an
+  // empty baseline: doing so let `writeLocationAuthInLock` overwrite the
+  // file with a fresh config that dropped every other location and the
+  // clerk app-pointer fields (clerkIssuer / clerkClientId), which then
+  // crashed the next server start. Throw instead — the caller aborts the
+  // write, the file is left untouched (so a transient read can be retried
+  // and a genuine corruption can be hand-fixed), and the failure is loud.
+  let parsed: unknown
   try {
-    const raw = readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')
-    const parsed: unknown = JSON.parse(raw)
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(
+      `cccollab: ${CCCOLLAB_CONFIG_FILE} is not valid JSON (${err instanceof Error ? err.message : String(err)}); ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+      { cause: err },
+    )
+  }
+  try {
     const validated = UserCccollabConfigSchema.parse(parsed)
     // Cast to the looser shape we merge against.
     return validated as { locations?: Record<string, UserLocationConfig>; [key: string]: unknown }
   } catch (err) {
-    // Corrupt or schema-violating user-level file. Preserve the bad
-    // content for forensics by renaming it to a timestamped sibling
-    // before the caller's `saveLocationAuth` overwrites the path. The
-    // backup rename is best-effort: if it fails (permissions, missing
-    // directory, etc.) we still fall through to the `{}` baseline so the
-    // save path stays robust. The user gets one console.error line so
-    // the incident isn't completely silent.
-    const backupPath = `${CCCOLLAB_CONFIG_FILE}.bak.${Date.now()}`
-    try {
-      renameSync(CCCOLLAB_CONFIG_FILE, backupPath)
-      process.stderr.write(
-        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backed up to ${backupPath}\n`,
-      )
-    } catch (backupErr) {
-      process.stderr.write(
-        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backup also failed (${backupErr instanceof Error ? backupErr.message : String(backupErr)})\n`,
-      )
-    }
-    return {}
+    throw new Error(
+      `cccollab: ${CCCOLLAB_CONFIG_FILE} failed schema validation (${err instanceof Error ? err.message : String(err)}); ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+      { cause: err },
+    )
   }
 }
 

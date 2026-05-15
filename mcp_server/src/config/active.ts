@@ -1,4 +1,4 @@
-import { LOCAL_LOCATION, type CccollabConfig } from './schema.js'
+import { LOCAL_LOCATION, type UserCccollabConfig } from './schema.js'
 
 /**
  * Resolved active-state triple produced by `resolveActive`. Each level
@@ -32,7 +32,7 @@ export interface ResolvedActive {
  *
  * - Any non-`local` location in the config MUST have a `url` string.
  */
-export function resolveActive(config: CccollabConfig): ResolvedActive {
+export function resolveActive(config: UserCccollabConfig): ResolvedActive {
   const locations = config.locations ?? {}
 
   // 1. Validate url-on-non-local across every configured location,

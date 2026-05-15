@@ -2,7 +2,7 @@ import { resolveActive, type ResolvedActive } from './active.js'
 import { applyEnvOverrides } from './env.js'
 import { loadProjectConfig, loadUserConfig } from './load.js'
 import { mergeConfigs, stripProjectCredentials } from './merge.js'
-import { LOCAL_LOCATION, type CccollabConfig, type LocationConfig } from './schema.js'
+import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from './schema.js'
 
 /**
  * Fully-resolved configuration handed to `server.ts` at startup.
@@ -18,7 +18,7 @@ import { LOCAL_LOCATION, type CccollabConfig, type LocationConfig } from './sche
  * `local` is always implicitly available.
  */
 export interface ResolvedConfig {
-  config: CccollabConfig
+  config: UserCccollabConfig
   active: ResolvedActive
   projectFilePath: string | null
   locations: ResolvedLocation[]
@@ -73,7 +73,7 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
   const withEnv = applyEnvOverrides(merged, env)
 
   // Always ensure `local` is present in the resolved view.
-  const final: CccollabConfig = withEnv
+  const final: UserCccollabConfig = withEnv
   if (!final.locations) {
     final.locations = {}
   }
@@ -84,7 +84,7 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
   const active = resolveActive(final)
 
   const locations = Object.entries(final.locations).map(([name, raw]): ResolvedLocation => {
-    const loc = (raw ?? {}) as LocationConfig
+    const loc = (raw ?? {}) as UserLocationConfig
     const channels = Object.entries(loc.channels ?? {}).map(([channelName, channelRaw]): ResolvedChannel => {
       const topics = Object.entries(channelRaw?.topics ?? {}).map(([topicName]): ResolvedTopic => ({ name: topicName }))
       return { name: channelName, topics }

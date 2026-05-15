@@ -1,6 +1,6 @@
 import deepmerge from 'deepmerge'
 
-import { AUTH_FIELDS, type CccollabConfig, type LocationConfig } from './schema.js'
+import { AUTH_FIELDS, type CccollabConfig, type LocationConfig, type UserCccollabConfig } from './schema.js'
 
 /**
  * Merge a user-level config (from `~/.cccollab/config.json`) with a
@@ -14,7 +14,7 @@ import { AUTH_FIELDS, type CccollabConfig, type LocationConfig } from './schema.
  * explicitly; guard with a targeted helper rather than silently picking
  * one of deepmerge's array strategies.
  */
-export function mergeConfigs(user: CccollabConfig, project: CccollabConfig): CccollabConfig {
+export function mergeConfigs(user: UserCccollabConfig, project: CccollabConfig): UserCccollabConfig {
   return deepmerge(user, project, {
     // No arrays appear in the schema today; tripping this guard
     // indicates a schema change that needs explicit merge semantics.
@@ -23,7 +23,7 @@ export function mergeConfigs(user: CccollabConfig, project: CccollabConfig): Ccc
         'cccollab config: unexpected array field; merge semantics must be declared explicitly (no array fields in schema).',
       )
     },
-  }) as CccollabConfig
+  }) as UserCccollabConfig
 }
 
 export interface StripCredentialsResult {

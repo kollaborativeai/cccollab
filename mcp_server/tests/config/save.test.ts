@@ -172,27 +172,43 @@ describe('saveLocationAuth', () => {
     }
   }, 20_000)
 
-  it('preserves a corrupt prior config as a timestamped backup before overwriting', async () => {
-    // Write a file that passes JSON.parse but fails the zod schema
-    // (a zod failure should also trigger the backup path).
-    const dir = (await import('node:path')).dirname(CCCOLLAB_CONFIG_FILE)
-    const { readdirSync } = await import('node:fs')
-    writeFileSync(CCCOLLAB_CONFIG_FILE, '{this is not valid json', { mode: 0o600 })
+  it('throws rather than overwriting when the prior config cannot be parsed', () => {
+    // A prior config that exists but cannot be parsed must NOT be silently
+    // replaced — doing so drops every other location and any app-pointer
+    // fields (clerkIssuer/clerkClientId) the caller did not re-supply.
+    // saveLocationAuth must fail loudly and leave the file intact so a
+    // transient read can be retried and a genuine corruption can be fixed
+    // by hand.
+    const corrupt = '{this is not valid json'
+    writeFileSync(CCCOLLAB_CONFIG_FILE, corrupt, { mode: 0o600 })
 
-    saveLocationAuth('flatout', {
-      url: 'https://a.convex.cloud',
-      accessToken: 'new-token',
-      refreshToken: 'new-refresh',
-    })
+    expect(() =>
+      saveLocationAuth('flatout', {
+        url: 'https://a.convex.cloud',
+        accessToken: 'new-token',
+        refreshToken: 'new-refresh',
+      }),
+    ).toThrow(/not valid JSON|failed to parse/i)
 
-    // New file is healthy.
-    const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
-    expect(content.locations.flatout.accessToken).toBe('new-token')
+    // The original file is untouched — not overwritten, not destroyed.
+    expect(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')).toBe(corrupt)
+  })
 
-    // A backup file exists alongside.
-    const entries = readdirSync(dir)
-    const backups = entries.filter((e) => e.startsWith('config.json.bak.'))
-    expect(backups.length).toBeGreaterThanOrEqual(1)
+  it('throws rather than dropping app-pointer fields when the prior clerk config is unparseable', () => {
+    // Regression: a parse failure used to make saveLocationAuth write a
+    // fresh config containing only url + tokens, silently losing
+    // clerkIssuer/clerkClientId and crashing the next server start.
+    writeFileSync(CCCOLLAB_CONFIG_FILE, 'not json at all', { mode: 0o600 })
+
+    expect(() =>
+      saveLocationAuth('remote', {
+        authType: 'clerk',
+        url: 'https://x.convex.cloud',
+        accessToken: 'tok',
+        refreshToken: 'rt',
+        accessTokenExpiresAt: 1_700_000_000_000,
+      }),
+    ).toThrow()
   })
 })
 

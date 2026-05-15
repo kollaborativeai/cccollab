@@ -212,4 +212,26 @@ describe('resolveConfig', () => {
     const resolved = resolveConfig(nested, {})
     expect(resolved.active.activeLocation).toBe('local')
   })
+
+  it('loads a user config whose clerk location omits clerkIssuer/clerkClientId', () => {
+    // saveLocationAuth writes only authType + tokens; the app-pointer fields
+    // (clerkIssuer/clerkClientId) are optional in the user-level file — they
+    // may be supplied by project config. loadUserConfig must accept this
+    // shape, not reject it with the strict project-level schema.
+    writeUserConfig({
+      locations: {
+        remote: {
+          url: 'https://x.convex.cloud',
+          authType: 'clerk',
+          accessToken: 'tok',
+          refreshToken: 'rt',
+          accessTokenExpiresAt: 1_700_000_000_000,
+        },
+      },
+    })
+    const resolved = resolveConfig(projectRoot, {})
+    const remote = resolved.locations.find((l) => l.name === 'remote')
+    expect(remote?.authType).toBe('clerk')
+    expect(remote?.url).toBe('https://x.convex.cloud')
+  })
 })
