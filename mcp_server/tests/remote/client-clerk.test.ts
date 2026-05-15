@@ -363,6 +363,45 @@ describe('makeClerkAuthFetcher (outer Convex JWT exchange layer)', () => {
     expect(token).toBeNull()
   })
 
+  it('returns null (not throws) when retried exchange ALSO fails with INVALID_OAUTH_TOKEN', async () => {
+    // Durable failure: e.g. Clerk-instance mismatch between the OAuth app and
+    // KAI's trusted issuer. A new OAuth token won't help — the second exchange
+    // throws the same code. Must surface as null, not as an unhandled rejection.
+    mockRefreshAccessToken.mockResolvedValueOnce({
+      accessToken: 'fresh-oauth-at',
+      refreshToken: 'fresh-oauth-rt',
+      accessTokenExpiresAt: freshExpiresAt(3600_000),
+    })
+    mockExchangeOAuthTokenForConvexJwt
+      .mockRejectedValueOnce(new ConvexJwtExchangeError('INVALID_OAUTH_TOKEN', 'kid mismatch'))
+      .mockRejectedValueOnce(new ConvexJwtExchangeError('INVALID_OAUTH_TOKEN', 'kid mismatch'))
+
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: freshExpiresAt() }))
+    const token = await fetcher({ forceRefreshToken: false })
+
+    expect(token).toBeNull()
+    expect(mockExchangeOAuthTokenForConvexJwt).toHaveBeenCalledTimes(2)
+    expect(mockRefreshAccessToken).toHaveBeenCalledOnce()
+  })
+
+  it('returns null when retried exchange throws an unexpected error', async () => {
+    // Defensive: any error from the retry path (not just ConvexJwtExchangeError)
+    // must be caught so the process doesn't crash on an unhandled rejection.
+    mockRefreshAccessToken.mockResolvedValueOnce({
+      accessToken: 'fresh-oauth-at',
+      refreshToken: 'fresh-oauth-rt',
+      accessTokenExpiresAt: freshExpiresAt(3600_000),
+    })
+    mockExchangeOAuthTokenForConvexJwt
+      .mockRejectedValueOnce(new ConvexJwtExchangeError('INVALID_OAUTH_TOKEN', 'first failure'))
+      .mockRejectedValueOnce(new Error('network blew up on retry'))
+
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: freshExpiresAt() }))
+    const token = await fetcher({ forceRefreshToken: false })
+
+    expect(token).toBeNull()
+  })
+
   it('returns null on MISSING_SESSION (no retry)', async () => {
     mockExchangeOAuthTokenForConvexJwt.mockRejectedValueOnce(
       new ConvexJwtExchangeError('MISSING_SESSION', 'No session found'),

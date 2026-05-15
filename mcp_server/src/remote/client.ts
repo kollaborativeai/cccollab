@@ -206,15 +206,24 @@ export function makeClerkAuthFetcher(
         } catch (err) {
           if (err instanceof ConvexJwtExchangeError && err.code === 'INVALID_OAUTH_TOKEN') {
             // OAuth token rejected by KAI/Clerk — force-refresh and retry once.
-            oauthToken = await getOAuthToken({ forceRefresh: true })
-            if (oauthToken === null) {
+            // If the retry also throws (e.g. durable misconfig like a Clerk-
+            // instance mismatch where the kid never resolves), swallow it and
+            // surface null so Convex flips to unauthenticated rather than
+            // letting the rejection escape as an unhandled promise rejection.
+            try {
+              oauthToken = await getOAuthToken({ forceRefresh: true })
+              if (oauthToken === null) {
+                currentConvexJwt = ''
+                return null
+              }
+              const retried = await exchangeOAuthTokenForConvexJwt({ kaiUrl: init.url, oauthToken }, fetchImpl)
+              currentConvexJwt = retried.jwt
+              currentConvexJwtExpiresAt = retried.expiresAt
+              return retried.jwt
+            } catch {
               currentConvexJwt = ''
               return null
             }
-            const retried = await exchangeOAuthTokenForConvexJwt({ kaiUrl: init.url, oauthToken }, fetchImpl)
-            currentConvexJwt = retried.jwt
-            currentConvexJwtExpiresAt = retried.expiresAt
-            return retried.jwt
           }
           // Other exchange errors (MISSING_SESSION, SESSION_NOT_FOUND,
           // TEMPLATE_NOT_FOUND, EXCHANGE_FAILED, network failures) — return
