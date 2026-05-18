@@ -53,7 +53,9 @@ describe('makeRefs – clerk authType maps to KAI cccollab.* flat namespace', ()
   it('topics.queries paths resolve to cccollab/topics:*', () => {
     expect(getFunctionName(refs.topics.queries.listByChannel)).toBe('cccollab/topics:listByChannel')
     expect(getFunctionName(refs.topics.queries.getById)).toBe('cccollab/topics:getById')
-    expect(getFunctionName(refs.topics.queries.listJoinedForUser)).toBe('cccollab/topics:listJoinedForUser')
+    // KAI exposes the session-scoped query as `listJoinedForSession`; the
+    // clerk ref maps the (legacy-named) slot to it.
+    expect(getFunctionName(refs.topics.queries.listJoinedForUser)).toBe('cccollab/topics:listJoinedForSession')
   })
 
   it('messages.mutations paths resolve to cccollab/messages:*', () => {

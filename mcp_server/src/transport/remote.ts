@@ -115,7 +115,7 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
             unarchive: FunctionReference<'query' | 'mutation' | 'action'>
             listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
             getById: FunctionReference<'query' | 'mutation' | 'action'>
-            listJoinedForUser: FunctionReference<'query' | 'mutation' | 'action'>
+            listJoinedForSession: FunctionReference<'query' | 'mutation' | 'action'>
           }
           messages: {
             sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
@@ -160,7 +160,7 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
         queries: {
           listByChannel: c.topics.listByChannel,
           getById: c.topics.getById,
-          listJoinedForUser: c.topics.listJoinedForUser,
+          listJoinedForUser: c.topics.listJoinedForSession,
         },
       },
       messages: {
@@ -259,6 +259,11 @@ export class RemoteTransport implements Transport {
 
   private readonly client: ConvexClient
   private readonly refs: Refs
+  /** True when the remote deployment is the org-scoped KAI backend (`clerk`
+   *  auth). Its read queries require a `sessionId` to resolve the
+   *  organization; the single-tenant `convex-google` backend does not and
+   *  rejects the extra argument. */
+  private readonly orgScoped: boolean
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
@@ -310,7 +315,21 @@ export class RemoteTransport implements Transport {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
     this.refs = makeRefs(opts.authType ?? 'convex-google')
+    this.orgScoped = (opts.authType ?? 'convex-google') === 'clerk'
     this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.${this.source}] ${m}\n`))
+  }
+
+  /**
+   * Merges this session's `sessionId` into a read query's argument object
+   * when the remote deployment is org-scoped (KAI/clerk). A no-op for the
+   * single-tenant `convex-google` backend (whose queries reject the extra
+   * argument), and when no session has been introduced yet.
+   */
+  private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
+    if (this.orgScoped && this.sessionId !== null) {
+      return { ...args, sessionId: this.sessionId }
+    }
+    return args
   }
 
   /** Human-readable reason the transport self-disabled, or null. */
@@ -372,7 +391,10 @@ export class RemoteTransport implements Transport {
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
-        const topics = (await this.client.query(fn<'query'>(this.refs.topics.queries.listJoinedForUser), {})) as Array<{
+        const topics = (await this.client.query(
+          fn<'query'>(this.refs.topics.queries.listJoinedForUser),
+          this.orgScopedArgs({}),
+        )) as Array<{
           _id: string
         }>
         for (const t of topics) this.knownTopicIds.add(t._id)
@@ -421,7 +443,10 @@ export class RemoteTransport implements Transport {
     void args
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{
         name: string
         subscriberCount: number
       }>
@@ -524,10 +549,10 @@ export class RemoteTransport implements Transport {
     // this is fine; if no channel is supplied we return empty.
     if (!args.channel) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(this.refs.topics.queries.listByChannel), {
-        channel: args.channel,
-        includeArchived: args.includeArchived,
-      })) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.topics.queries.listByChannel),
+        this.orgScopedArgs({ channel: args.channel, includeArchived: args.includeArchived }),
+      )) as Array<{
         topicId: string
         name: string
         state: string
@@ -555,9 +580,10 @@ export class RemoteTransport implements Transport {
     if (!this.enabled) return null
     if (BROKER_UUID_PATTERN.test(args.topicId)) return null
     try {
-      const doc = (await this.client.query(fn<'query'>(this.refs.topics.queries.getById), {
-        topicId: args.topicId,
-      })) as {
+      const doc = (await this.client.query(
+        fn<'query'>(this.refs.topics.queries.getById),
+        this.orgScopedArgs({ topicId: args.topicId }),
+      )) as {
         _id: string
         topic: string
         channelId: string
@@ -570,7 +596,10 @@ export class RemoteTransport implements Transport {
       // user-facing channel string it expects. listAll is short in
       // practice; a future iteration could add a cheaper name-only
       // query.
-      const channels = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
+      const channels = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{
         channelId: string
         name: string
       }>
@@ -610,9 +639,10 @@ export class RemoteTransport implements Transport {
         topicId: args.topicId,
       })) as { topicId: string; channelId: string; name: string }
       this.knownTopicIds.add(res.topicId)
-      const rows = (await this.client.query(fn<'query'>(this.refs.messages.queries.listByTopic), {
-        topicId: args.topicId,
-      })) as Array<{ fromSessionId: string; text: string; ts: number }>
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.listByTopic),
+        this.orgScopedArgs({ topicId: args.topicId }),
+      )) as Array<{ fromSessionId: string; text: string; ts: number }>
       return {
         history: rows.map((r) => ({
           sender: r.fromSessionId,
@@ -687,9 +717,10 @@ export class RemoteTransport implements Transport {
   async listSessions(args: { channel?: string }): Promise<TransportSession[]> {
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(this.refs.sessions.queries.listByChannel), {
-        channel: args.channel,
-      })) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.sessions.queries.listByChannel),
+        this.orgScopedArgs({ channel: args.channel }),
+      )) as Array<{
         _id: string
         sessionName: string
         objective?: string
@@ -813,8 +844,9 @@ export class RemoteTransport implements Transport {
     // cursor (>= rather than >). The dedup happens client-side by `_id`
     // since `ts` alone can collide at millisecond resolution.
     const startingTs = this.topicMaxTs.get(args.topicId)
-    const queryArgs: { topicId: string; sinceTs?: number } =
+    const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
+    const queryArgs = this.orgScopedArgs(baseArgs)
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
@@ -945,7 +977,10 @@ export class RemoteTransport implements Transport {
     } else {
       void (async () => {
         try {
-          const rows = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
+          const rows = (await this.client.query(
+            fn<'query'>(this.refs.channels.queries.listAll),
+            this.orgScopedArgs({}),
+          )) as Array<{
             channelId: string
             name: string
           }>

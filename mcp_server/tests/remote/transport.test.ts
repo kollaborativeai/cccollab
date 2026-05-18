@@ -509,3 +509,35 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     })
   })
 })
+
+describe('RemoteTransport session-scoped query arguments', () => {
+  it('forwards sessionId to org-scoped reads on the clerk transport', async () => {
+    const { client, queryMock } = makeStubClient(
+      async () => [],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+
+    queryMock.mockClear()
+    await transport.listChannels({})
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock.mock.calls[0]![1]).toMatchObject({ sessionId: 'session_abc' })
+  })
+
+  it('omits sessionId on the convex-google transport', async () => {
+    const { client, queryMock } = makeStubClient(
+      async () => [],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'convex-google' })
+    await transport.introduce({ sessionName: 'tester' })
+
+    queryMock.mockClear()
+    await transport.listChannels({})
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock.mock.calls[0]![1]).toEqual({})
+  })
+})
