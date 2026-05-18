@@ -166,7 +166,7 @@ export async function handleIdentityTool(
       // Expose every transport's runtime state so the user sees
       // degradation on any location (not just "the first non-local")
       // without having to chase it through a silent stall.
-      const locationStates = buildLocationStates(deps.router)
+      const locationStates = await buildLocationStates(deps.router)
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -215,15 +215,30 @@ function hasDirectMessageSubscription(
  * `degradation` is only set on transports that expose it (the remote
  * transport carries it for auth / function-not-found / repeated-failure
  * cases). The local transport has no degradation surface.
+ *
+ * `organization` is `"local"` for the local broker, the bound
+ * organization name for a remote transport (via `getBoundOrganizationName`),
+ * or omitted when a remote transport has no session yet.
  */
-function buildLocationStates(router: TransportRouter): Record<string, { enabled: boolean; degradation?: string }> {
-  const out: Record<string, { enabled: boolean; degradation?: string }> = {}
+async function buildLocationStates(
+  router: TransportRouter,
+): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+  const out: Record<string, { enabled: boolean; degradation?: string; organization?: string }> = {}
   for (const transport of router.all()) {
     const maybeDegraded = transport as Partial<RemoteTransport>
     const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+
+    let organization: string | undefined
+    if (transport.source === 'local') {
+      organization = 'local'
+    } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
+      organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
+    }
+
     out[transport.source] = {
       enabled: transport.enabled,
       ...(degradation ? { degradation } : {}),
+      ...(organization ? { organization } : {}),
     }
   }
   return out

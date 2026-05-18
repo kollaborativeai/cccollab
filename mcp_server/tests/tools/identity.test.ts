@@ -44,8 +44,13 @@ function createMockDeps(): IdentityToolDeps {
  * Builds deps whose router contains both the local transport and an enabled
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
+ * Optional `remoteOverrides` can be used to add extra methods to the fake
+ * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
  */
-function makeDepsWithRemote(onIntroduce?: (args: Record<string, unknown>) => void): IdentityToolDeps {
+function makeDepsWithRemote(
+  onIntroduce?: (args: Record<string, unknown>) => void,
+  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
     source: 'remote' as const,
@@ -67,6 +72,7 @@ function makeDepsWithRemote(onIntroduce?: (args: Record<string, unknown>) => voi
     sendMessage: vi.fn(async () => {}),
     sendDirectMessage: vi.fn(async () => {}),
     hasTopic: vi.fn(() => false),
+    ...remoteOverrides,
   }
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
@@ -188,7 +194,7 @@ describe('Identity Tools', () => {
         vi.stubGlobal('fetch', mockFetch)
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
-        expect(result.locations).toEqual({ local: { enabled: true } })
+        expect(result.locations).toEqual({ local: { enabled: true, organization: 'local' } })
       })
     })
 
@@ -219,6 +225,33 @@ describe('Identity Tools', () => {
         const deps = makeLocalOnlyDeps()
         const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
         expect(result.name).toBe('reviewer')
+      })
+    })
+
+    describe('whoami — organization', () => {
+      beforeEach(() => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+      })
+
+      afterEach(() => {
+        vi.unstubAllGlobals()
+      })
+
+      it('reports "local" for the local location', async () => {
+        const deps = makeLocalOnlyDeps()
+        await handleIdentityTool('introduce', { name: 'reviewer' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local.organization).toBe('local')
+      })
+
+      it('reports the bound organization name for a remote location', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganizationName: async () => 'Acme',
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme')
       })
     })
 

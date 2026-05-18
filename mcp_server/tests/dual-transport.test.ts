@@ -349,7 +349,7 @@ describe('Dual transport: graceful degradation', () => {
     await handleIdentityTool('introduce', { name: 'architect' }, deps)
     const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
     expect(result.locations).toEqual({
-      local: { enabled: true },
+      local: { enabled: true, organization: 'local' },
     })
   })
 })
