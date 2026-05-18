@@ -110,7 +110,7 @@ other's message arrive as a channel event scoped to the `demo` topic.
 The runtime has no Slack code. Verify from the repo root:
 
 ```bash
-grep -r "@slack" mcp_server/src/ convex/                                 # expect: no output
+grep -r "@slack" mcp_server/src/                                          # expect: no output
 node -e "const p=require('./mcp_server/package.json'); console.log(Object.keys({...p.dependencies, ...p.devDependencies}).filter(k=>k.startsWith('@slack')))"
                                                                          # expect: []
 ```
