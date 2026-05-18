@@ -445,7 +445,7 @@ export class RemoteTransport implements Transport {
       }>
     } catch (err) {
       this.registerFailure('listOrganizations', err)
-      throw err
+      return []
     }
   }
 

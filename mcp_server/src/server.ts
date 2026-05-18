@@ -23,6 +23,7 @@ import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './con
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
+import { handleListOrganizations } from './tools/organizations.js'
 
 async function startServer(config: Config, brokerPort: number, resolved: ResolvedConfig) {
   let worktreeName: string | undefined
@@ -486,6 +487,24 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     async (args) => {
       try {
         return text(await handleIdentityTool('authenticate', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'list_organizations',
+    {
+      description:
+        'List the organizations you belong to on each remote location, as {id, name, location}. ' +
+        'Pick an id and pass it to introduce as the `organization` argument. ' +
+        'Callable before introduce.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return text(await handleListOrganizations({ router: deps.router }))
       } catch (err) {
         return error(err)
       }
