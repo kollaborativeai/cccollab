@@ -75,7 +75,7 @@ export async function handleIdentityTool(
         organization?: string
       }
 
-      const hasRemote = deps.router.enabled().some((t) => t.source !== 'local')
+      const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
       if (hasRemote && !organization) {
         return JSON.stringify({
           error: 'An organization is required. Call list_organizations and pass an id as `organization`.',
@@ -229,7 +229,7 @@ async function buildLocationStates(
     const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
 
     let organization: string | undefined
-    if (transport.source === 'local') {
+    if (transport.source === LOCAL_LOCATION) {
       organization = 'local'
     } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
       organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
