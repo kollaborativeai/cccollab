@@ -439,6 +439,13 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       inputSchema: {
         name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
+        organization: z
+          .string()
+          .optional()
+          .describe(
+            'Organization id (from list_organizations) to create this session in. ' +
+              'Required when connected to a remote location.',
+          ),
       },
     },
     async (args) => {

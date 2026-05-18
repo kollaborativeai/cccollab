@@ -65,7 +65,23 @@ export async function handleIdentityTool(
 ): Promise<string> {
   switch (name) {
     case 'introduce': {
-      const { name: displayName, objective } = args as { name: string; objective?: string }
+      const {
+        name: displayName,
+        objective,
+        organization,
+      } = args as {
+        name: string
+        objective?: string
+        organization?: string
+      }
+
+      const hasRemote = deps.router.enabled().some((t) => t.source !== 'local')
+      if (hasRemote && !organization) {
+        return JSON.stringify({
+          error: 'An organization is required. Call list_organizations and pass an id as `organization`.',
+        })
+      }
+
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
 
@@ -75,7 +91,7 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective })
+          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.

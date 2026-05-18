@@ -40,6 +40,56 @@ function createMockDeps(): IdentityToolDeps {
   }
 }
 
+/**
+ * Builds deps whose router contains both the local transport and an enabled
+ * fake remote transport. The remote transport's `introduce` records every
+ * call it receives (and forwards them to `onIntroduce` when provided).
+ */
+function makeDepsWithRemote(onIntroduce?: (args: Record<string, unknown>) => void): IdentityToolDeps {
+  const localTransport = new LocalTransport(7850)
+  const fakeRemote = {
+    source: 'remote' as const,
+    enabled: true,
+    introduce: vi.fn(async (args: Record<string, unknown>) => {
+      if (onIntroduce) onIntroduce(args)
+    }),
+    joinChannel: vi.fn(async () => {}),
+    deregisterSession: vi.fn(async () => {}),
+    leaveChannel: vi.fn(async () => {}),
+    listChannels: vi.fn(async () => []),
+    listTopics: vi.fn(async () => []),
+    createTopic: vi.fn(async () => ({ id: 'topic_1', topic: 'test', channel: 'default' })),
+    joinTopic: vi.fn(async () => ({ id: 'topic_1', topic: 'test', channel: 'default', history: [] })),
+    leaveTopic: vi.fn(async () => {}),
+    archiveTopic: vi.fn(async () => {}),
+    unarchiveTopic: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
+    sendMessage: vi.fn(async () => {}),
+    sendDirectMessage: vi.fn(async () => {}),
+    hasTopic: vi.fn(() => false),
+  }
+  return {
+    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    context: new ActiveContext(),
+    router: new TransportRouter([
+      localTransport,
+      fakeRemote as unknown as import('../../src/transport/index.js').Transport,
+    ]),
+  }
+}
+
+/**
+ * Builds deps whose router contains only the local transport (no remote).
+ */
+function makeLocalOnlyDeps(): IdentityToolDeps {
+  const transport = new LocalTransport(7850)
+  return {
+    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    context: new ActiveContext(),
+    router: new TransportRouter([transport]),
+  }
+}
+
 describe('Identity Tools', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -139,6 +189,36 @@ describe('Identity Tools', () => {
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations).toEqual({ local: { enabled: true } })
+      })
+    })
+
+    describe('introduce — organization argument', () => {
+      beforeEach(() => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+      })
+
+      afterEach(() => {
+        vi.unstubAllGlobals()
+      })
+
+      it('rejects introduce without an organization when a remote transport is enabled', async () => {
+        const deps = makeDepsWithRemote() // router with an enabled remote transport
+        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
+        expect(result.error).toMatch(/organization/i)
+      })
+
+      it('forwards the organization to the remote transport introduce', async () => {
+        const introduceCalls: Array<Record<string, unknown>> = []
+        const deps = makeDepsWithRemote((args) => introduceCalls.push(args))
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        expect(introduceCalls.some((c) => c.organizationId === 'org_a')).toBe(true)
+      })
+
+      it('allows introduce without an organization when only the local transport is present', async () => {
+        const deps = makeLocalOnlyDeps()
+        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
+        expect(result.name).toBe('reviewer')
       })
     })
 

@@ -35,7 +35,7 @@ class FakeTransport implements Transport {
   private readonly topics = new Map<string, TransportTopic>()
   private readonly sessions: TransportSession[] = []
 
-  introduce = vi.fn(async (_args: { sessionName: string; objective?: string }) => {})
+  introduce = vi.fn(async (_args: { sessionName: string; objective?: string; organizationId?: string }) => {})
   joinChannel = vi.fn(async (args: { sessionName: string; channel: string }) => {
     const existing = this.channels.get(args.channel) ?? { name: args.channel, subscriberCount: 0 }
     existing.subscriberCount += 1
@@ -975,8 +975,9 @@ describe('DM subscription re-install on introduce', () => {
 
     // Introduce for the first time. The handler must fan out and then
     // re-install the DM subscription since the prior subscribe was made
-    // before the session had a name.
-    await handleIdentityTool('introduce', { name: 'architect' }, identityDeps)
+    // before the session had a name. Pass organization since the router
+    // has a non-local transport (required by the org gate).
+    await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, identityDeps)
 
     // Must-fix assertion: a second subscribe call happened.
     expect(fake.subscribeCalls.length).toBe(2)
