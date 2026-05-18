@@ -1,33 +1,15 @@
 # CI & Release workflow for the cccollab monorepo.
 #
-# Pipeline shape (modeled on tow123/dispatcher):
+# Pipeline shape:
 #   Phase I   - Always-run checks (format, lint, typecheck, test, build) in parallel
 #   Phase II  - Detect which paths changed via dorny/paths-filter (push-only)
-#   Phase III - Conditional deploy/publish:
-#                 * sync-secrets + deploy-backend    - when Convex paths changed
-#                                                      AND vars.ENABLE_BACKEND_DEPLOY == 'true'
-#                 * release-mcp (npm publish + tag)  - when mcp_server/plugin paths changed
-#                                                      AND backend deploy either succeeded or was skipped
+#   Phase III - release-mcp (npm publish + tag) when mcp_server/plugin paths changed
 #
 # -------------------------------------------------------------------
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
 #
 #   Secrets:
-#     CONVEX_DEPLOY_KEY    - required for backend deploy + codegen cache warmup
-#     AUTH_GOOGLE_ID       - Google OAuth client ID, synced into Convex env
-#     AUTH_GOOGLE_SECRET   - Google OAuth client secret, synced into Convex env
-#     GITHUB_TOKEN         - auto-provided by Actions; used by npm publish
-#
-#   Variables:
-#     ENABLE_BACKEND_DEPLOY - set to the string "true" to enable sync-secrets
-#                              + deploy-backend. Defaults to unset (disabled) until
-#                              a prod Convex deployment exists.
-#     SITE_URL              - the Convex SITE_URL env var (constant, not a secret).
-#
-# NOTE on AUTH/JWT material: Convex Auth's JWKS/JWT_PRIVATE_KEY are auto-generated
-# on first run by @convex-dev/auth. Do NOT sync them from CI; overwriting them
-# rotates all existing sessions. Only AUTH_GOOGLE_ID and AUTH_GOOGLE_SECRET are
-# pushed from GitHub secrets into Convex env.
+#     GITHUB_TOKEN - auto-provided by Actions; used by npm publish
 # -------------------------------------------------------------------
 
 name: CI
@@ -68,13 +50,6 @@ jobs:
       - uses: flatoutsolutions/github-actions/setup@v1
         with:
           node-version: '24.x'
-          convex-codegen: 'true'
-          convex-deploy-key: ${{ secrets.CONVEX_DEPLOY_KEY }}
-      - name: Ensure Convex _generated/ exists (stub fallback)
-        # No-op when real codegen (above) produced output. When CONVEX_DEPLOY_KEY
-        # is unset or codegen failed, this produces a typed stub from the schema
-        # so typecheck + test can still run.
-        run: node scripts/gen-convex-stub.mjs
       - name: Lint
         run: yarn lint
         env:
@@ -87,13 +62,6 @@ jobs:
       - uses: flatoutsolutions/github-actions/setup@v1
         with:
           node-version: '24.x'
-          convex-codegen: 'true'
-          convex-deploy-key: ${{ secrets.CONVEX_DEPLOY_KEY }}
-      - name: Ensure Convex _generated/ exists (stub fallback)
-        # No-op when real codegen (above) produced output. When CONVEX_DEPLOY_KEY
-        # is unset or codegen failed, this produces a typed stub from the schema
-        # so typecheck + test can still run.
-        run: node scripts/gen-convex-stub.mjs
       - name: Typecheck
         run: yarn typecheck
 
@@ -104,13 +72,6 @@ jobs:
       - uses: flatoutsolutions/github-actions/setup@v1
         with:
           node-version: '24.x'
-          convex-codegen: 'true'
-          convex-deploy-key: ${{ secrets.CONVEX_DEPLOY_KEY }}
-      - name: Ensure Convex _generated/ exists (stub fallback)
-        # No-op when real codegen (above) produced output. When CONVEX_DEPLOY_KEY
-        # is unset or codegen failed, this produces a typed stub from the schema
-        # so typecheck + test can still run.
-        run: node scripts/gen-convex-stub.mjs
       - name: Run tests
         run: yarn test
 
@@ -121,66 +82,8 @@ jobs:
       - uses: flatoutsolutions/github-actions/setup@v1
         with:
           node-version: '24.x'
-          convex-codegen: 'true'
-          convex-deploy-key: ${{ secrets.CONVEX_DEPLOY_KEY }}
-      - name: Ensure Convex _generated/ exists (stub fallback)
-        # No-op when real codegen (above) produced output. When CONVEX_DEPLOY_KEY
-        # is unset or codegen failed, this produces a typed stub from the schema
-        # so typecheck + test can still run.
-        run: node scripts/gen-convex-stub.mjs
       - name: Build
         run: yarn build
-
-  # ============================================
-  # Phase I (parallel) - Sync secrets to Convex
-  # ============================================
-  # Runs alongside the Phase I checks so it doesn't add wall-clock time.
-  # Must complete before deploy-backend to avoid the Convex
-  # "Environment variables have changed during push" race condition.
-  #
-  # Gated on ENABLE_BACKEND_DEPLOY because `npx convex env set` requires a
-  # live deployment. Until the user provisions one and flips the variable,
-  # this job is a no-op.
-  sync-secrets:
-    if: github.event_name == 'push' && vars.ENABLE_BACKEND_DEPLOY == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: flatoutsolutions/github-actions/setup@v1
-        with:
-          node-version: '24.x'
-
-      - name: Sync secrets to Convex
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-          AUTH_GOOGLE_ID: ${{ secrets.AUTH_GOOGLE_ID }}
-          AUTH_GOOGLE_SECRET: ${{ secrets.AUTH_GOOGLE_SECRET }}
-          SITE_URL: ${{ vars.SITE_URL }}
-        run: |
-          set_convex_env() {
-            local key=$1
-            local value=$2
-            if [ -n "$value" ]; then
-              local max_attempts=3
-              local attempt=1
-              while [ $attempt -le $max_attempts ]; do
-                if echo "$value" | npx convex env set "$key"; then
-                  echo "set $key"
-                  return 0
-                fi
-                if [ $attempt -lt $max_attempts ]; then
-                  sleep $((2 ** attempt))
-                fi
-                attempt=$((attempt + 1))
-              done
-              echo "failed to set $key"
-              return 1
-            fi
-          }
-
-          set_convex_env "AUTH_GOOGLE_ID" "$AUTH_GOOGLE_ID"
-          set_convex_env "AUTH_GOOGLE_SECRET" "$AUTH_GOOGLE_SECRET"
-          set_convex_env "SITE_URL" "$SITE_URL"
 
   # ============================================
   # Phase II - Detect which components changed
@@ -190,7 +93,6 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
       mcp_server: ${{ steps.filter.outputs.mcp_server }}
     steps:
       - uses: actions/checkout@v6
@@ -198,38 +100,10 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           filters: |
-            backend:
-              - 'convex/**'
-              - 'convex.json'
-              - 'package.json'
-              - 'yarn.lock'
-              - 'tsconfig.json'
-              - 'tsconfig.node.json'
             mcp_server:
               - 'mcp_server/**'
               - 'plugin/**'
               - 'yarn.lock'
-
-  # ============================================
-  # Phase III - Deploy Convex backend
-  # ============================================
-  deploy-backend:
-    needs: [detect-changes, sync-secrets]
-    if: |
-      github.event_name == 'push' &&
-      needs.detect-changes.outputs.backend == 'true' &&
-      vars.ENABLE_BACKEND_DEPLOY == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: flatoutsolutions/github-actions/setup@v1
-        with:
-          node-version: '24.x'
-
-      - name: Deploy to Convex
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: npx convex deploy --yes
 
   # ============================================
   # Phase III - Release @flatoutsolutions/cccollab
@@ -238,12 +112,10 @@ jobs:
   #   * Phase I jobs must have succeeded (explicit result checks because the
   #     outer `!cancelled()` relaxes the default success requirement).
   #   * On workflow_dispatch: always release (manual trigger, no path filter).
-  #   * On push to main: require mcp_server paths to have changed, skip the
-  #     auto-bump commit, and require backend deploy to have succeeded OR
-  #     skipped (skipped covers both "backend didn't change" and
-  #     "ENABLE_BACKEND_DEPLOY is off" - both are safe to publish against).
+  #   * On push to main: require mcp_server paths to have changed and skip
+  #     the auto-bump commit.
   release-mcp:
-    needs: [format, lint, typecheck, test, build, detect-changes, deploy-backend]
+    needs: [format, lint, typecheck, test, build, detect-changes]
     if: |
       !cancelled() &&
       needs.format.result == 'success' &&
@@ -255,10 +127,7 @@ jobs:
         (github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           needs.detect-changes.outputs.mcp_server == 'true' &&
-          !startsWith(github.event.head_commit.message, 'chore: bump version to') &&
-          (needs.detect-changes.outputs.backend != 'true' ||
-            needs.deploy-backend.result == 'success' ||
-            needs.deploy-backend.result == 'skipped')))
+          !startsWith(github.event.head_commit.message, 'chore: bump version to')))
     runs-on: ubuntu-latest
     permissions:
       contents: write
