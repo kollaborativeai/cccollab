@@ -30,6 +30,7 @@ export type Refs = {
     queries: {
       whoami: FunctionReference<'query' | 'mutation' | 'action'>
       listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
     }
   }
   channels: {
@@ -69,6 +70,11 @@ export type Refs = {
       listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
     }
   }
+  organizations: {
+    queries: {
+      listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+  }
 }
 
 /**
@@ -93,6 +99,7 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
             remove: FunctionReference<'query' | 'mutation' | 'action'>
             whoami: FunctionReference<'query' | 'mutation' | 'action'>
             listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
           }
           channels: {
             join: FunctionReference<'query' | 'mutation' | 'action'>
@@ -119,6 +126,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
             listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
             listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
           }
+          organizations: {
+            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+          }
         }
       }
     ).cccollab
@@ -129,7 +139,11 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
           updateLastSeen: c.sessions.updateLastSeen,
           remove: c.sessions.remove,
         },
-        queries: { whoami: c.sessions.whoami, listByChannel: c.sessions.listByChannel },
+        queries: {
+          whoami: c.sessions.whoami,
+          listByChannel: c.sessions.listByChannel,
+          getSessionContext: c.sessions.getSessionContext,
+        },
       },
       channels: {
         mutations: { join: c.channels.join, leave: c.channels.leave },
@@ -161,6 +175,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
           listByChannel: c.messages.listByChannel,
           listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
         },
+      },
+      organizations: {
+        queries: { listForUser: c.organizations.listForUser },
       },
     }
   }
@@ -341,7 +358,7 @@ export class RemoteTransport implements Transport {
    * counts this against the failure window — a transient blip at startup
    * is a failure just like one mid-session.
    */
-  async introduce(args: { sessionName: string; objective?: string }): Promise<void> {
+  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
@@ -349,6 +366,7 @@ export class RemoteTransport implements Transport {
       const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
         sessionName: args.sessionName,
         objective: args.objective,
+        organizationId: args.organizationId,
       })) as string
       this.sessionId = id
       // Preload the topic-id cache so `hasTopic` answers correctly on
@@ -359,7 +377,7 @@ export class RemoteTransport implements Transport {
         }>
         for (const t of topics) this.knownTopicIds.add(t._id)
       } catch {
-        // Best-effort hydration; failure is non-fatal.
+        /* best-effort preload */
       }
     } catch (err) {
       this.registerFailure('introduce', err)
@@ -411,6 +429,40 @@ export class RemoteTransport implements Transport {
     } catch (err) {
       this.registerFailure('listChannels', err)
       return []
+    }
+  }
+
+  /**
+   * Lists the authenticated user's organizations on this remote deployment.
+   * Backs the `list_organizations` tool.
+   */
+  async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+    if (!this.enabled) return []
+    try {
+      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+        id: string
+        name: string
+      }>
+    } catch (err) {
+      this.registerFailure('listOrganizations', err)
+      throw err
+    }
+  }
+
+  /**
+   * Returns the name of the organization this transport's session is bound
+   * to, or null when no session has been introduced or the lookup fails.
+   * Backs the `organization` field of `whoami`.
+   */
+  async getBoundOrganizationName(): Promise<string | null> {
+    if (!this.enabled || !this.sessionId) return null
+    try {
+      const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
+        sessionId: this.sessionId,
+      })) as { organizationName: string }
+      return ctx.organizationName
+    } catch {
+      return null
     }
   }
 

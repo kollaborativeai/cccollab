@@ -28,21 +28,26 @@ class SchemaDriftError extends Error {
 interface StubClientHandle {
   client: ConvexClient
   queryMock: ReturnType<typeof vi.fn>
+  mutationMock: ReturnType<typeof vi.fn>
 }
 
-function makeStubClient(queryImpl: () => Promise<unknown>): StubClientHandle {
+function makeStubClient(
+  queryImpl: (...args: unknown[]) => Promise<unknown>,
+  mutationImpl?: (...args: unknown[]) => Promise<unknown>,
+): StubClientHandle {
   // Only the methods RemoteTransport touches need to exist. The rest of
   // ConvexClient's surface isn't relevant to this test. Cast through
   // `unknown` to satisfy the structural type without importing the
   // whole client.
   const queryMock = vi.fn(queryImpl)
+  const mutationMock = vi.fn(mutationImpl ?? (async () => undefined))
   const stub = {
     query: queryMock,
-    mutation: vi.fn(async () => undefined),
+    mutation: mutationMock,
     onUpdate: vi.fn(() => () => {}),
     setAuth: vi.fn(),
   }
-  return { client: stub as unknown as ConvexClient, queryMock }
+  return { client: stub as unknown as ConvexClient, queryMock, mutationMock }
 }
 
 describe('RemoteTransport graceful degradation', () => {
@@ -347,6 +352,49 @@ describe('RemoteTransport.subscribeDirectMessages dedup', () => {
     ])
 
     expect(delivered.map((d) => d.text).sort()).toEqual(['a', 'b'])
+  })
+})
+
+describe('RemoteTransport — organizations', () => {
+  it('listOrganizations returns the rows from the listForUser query', async () => {
+    const { client } = makeStubClient(async () => [
+      { id: 'org_a', name: 'Acme' },
+      { id: 'org_b', name: 'Beta' },
+    ])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([
+      { id: 'org_a', name: 'Acme' },
+      { id: 'org_b', name: 'Beta' },
+    ])
+  })
+
+  it('introduce forwards organizationId to the introduce mutation', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [], // query: listJoinedForUser preload returns empty array
+      async () => 'session_1', // mutation: introduce returns a session id
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
+    expect(mutationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionName: 'reviewer', organizationId: 'org_a' }),
+    )
+  })
+
+  it('getBoundOrganizationName returns the org name from getSessionContext', async () => {
+    let queryCallCount = 0
+    const { client } = makeStubClient(
+      async () => {
+        queryCallCount++
+        if (queryCallCount === 1) return [] // introduce's listJoinedForUser preload
+        return { sessionName: 'reviewer', organizationName: 'Acme' } // getSessionContext
+      },
+      async () => 'session_1', // introduce mutation
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
+    expect(await transport.getBoundOrganizationName()).toBe('Acme')
   })
 })
 
