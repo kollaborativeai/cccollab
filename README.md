@@ -7,8 +7,9 @@ events via the Claude Code Channel protocol; no polling. Two modes:
 - **Local mode (default, always on)**: a per-machine in-process broker lets
   sessions on the same machine coordinate with zero configuration.
 - **Remote mode (opt-in, additive)**: sessions on different machines
-  coordinate through a shared Convex backend. Enabling remote mode does not
-  disable local mode - the two transports run side by side.
+  coordinate through KAI's Convex deployment (authenticated via Clerk).
+  Enabling remote mode does not disable local mode - the two transports run
+  side by side.
 
 ## Install
 
@@ -54,14 +55,13 @@ alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatou
 ## Repo layout
 
 This repo is a yarn 4 monorepo. Everything lands together under
-`@flatoutsolutions/cccollab` (the published npm package) and one shared Convex
-deployment.
+`@flatoutsolutions/cccollab` (the published npm package). The Convex backend
+lives in KAI's deployment — this repo does not own or host a backend.
 
 | Path          | What it holds                                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@flatoutsolutions/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
 | `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.         |
-| `convex/`     | The shared Convex backend: schema, queries, mutations, and auth. Both the local MCP server's remote transport and the future hosted HTTP MCP server call into it.         |
 
 See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
@@ -88,7 +88,7 @@ channel; `send_message_to_topic` in A arrives as a `<channel>` tag in B.
 
 ## Remote mode
 
-Remote mode adds a second transport that points at a Convex deployment.
+Remote mode adds a second transport that points at KAI's Convex deployment.
 When enabled, outbound operations fan out to both transports and inbound
 events from both feed the same Channel-protocol stream. A channel at the
 reserved `local` location is always distinct from a channel at a named
@@ -103,7 +103,7 @@ export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
 ```
 
 This registers a location named `remote` with that URL. Start Claude Code,
-then call the `authenticate` tool. A browser opens for Google OAuth. After
+then call the `authenticate` tool. A browser opens for Clerk sign-in. After
 sign-in the tokens are persisted in `~/.cccollab/config.json` and the remote
 transport hot-attaches to the running session - no restart needed.
 
@@ -191,7 +191,7 @@ by profile.
 ```text
 introduce                 - set your role name and optional objective
 whoami                    - show your identity and per-location transport status
-authenticate              - sign in to a remote location (Google OAuth, hot-attach)
+authenticate              - sign in to a remote location (Clerk auth, hot-attach)
 list_channels             - channels across every enabled transport
 join_channel              - subscribe to a channel at a location
 leave_channel             - unsubscribe
@@ -253,19 +253,14 @@ yarn typecheck     # tsc --noEmit across workspaces
 yarn lint          # eslint across the repo
 yarn build         # compile mcp_server to dist/
 yarn format:check  # prettier check
-npx convex dev     # local Convex dev (against your personal deployment)
 ```
 
 ## Releasing
 
-Releases are fully automatic. Every push to `main` runs the CI workflow,
-which path-filters changes:
-
-- Changes under `convex/` trigger a `convex deploy` against the
-  production Convex deployment.
-- Changes under `mcp_server/` or `plugin/` trigger a version bump and
-  an `npm publish` to GitHub Packages, gated so the Convex deploy must
-  succeed first if both paths changed in the same push.
+Releases are fully automatic. Every push to `main` runs the CI workflow.
+Changes under `mcp_server/` or `plugin/` trigger a version bump and an
+`npm publish` to GitHub Packages. The Convex backend is deployed from KAI's
+repository, not this one.
 
 Use [conventional commit](https://www.conventionalcommits.org/) prefixes
 (`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit
