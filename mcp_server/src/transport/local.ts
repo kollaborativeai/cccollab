@@ -32,7 +32,8 @@ export class LocalTransport implements Transport {
   }
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  async introduce(args: { sessionName: string; objective?: string }): Promise<void> {
+  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+    // The local broker is single-tenant; organizationId is intentionally ignored.
     await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
   }
 

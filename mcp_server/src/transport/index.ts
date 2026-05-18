@@ -87,7 +87,7 @@ export interface Transport {
   hasTopic(topicId: string): boolean
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  introduce(args: { sessionName: string; objective?: string }): Promise<void>
+  introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void>
 
   // ─── Channels ─────────────────────────────────────────────────────────
   joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }>
