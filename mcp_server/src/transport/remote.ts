@@ -446,11 +446,12 @@ export class RemoteTransport implements Transport {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.channels.queries.listAll),
         this.orgScopedArgs({}),
-      )) as Array<{
-        name: string
-        subscriberCount: number
-      }>
-      return rows.map((r) => ({ name: r.name, subscriberCount: r.subscriberCount }))
+      )) as Array<{ name: string; subscriberCount: number; messageCount?: number }>
+      return rows.map((r) => ({
+        name: r.name,
+        subscriberCount: r.subscriberCount,
+        messageCount: r.messageCount,
+      }))
     } catch (err) {
       this.registerFailure('listChannels', err)
       return []

@@ -66,6 +66,7 @@ interface ChannelRow {
   location: ChannelLocation
   source: ChannelSource | null
   subscriberCount: number
+  messageCount?: number
   subscribed: boolean
   isActive: boolean
 }
@@ -81,7 +82,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
   const channels: ChannelRow[] = []
 
   for (const transport of transports) {
-    let rows: Array<{ name: string; subscriberCount: number }> = []
+    let rows: Array<{ name: string; subscriberCount: number; messageCount?: number }> = []
     try {
       rows = await transport.listChannels({})
     } catch {
@@ -97,6 +98,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
         location: transport.source,
         source: sub ? sub.source : null,
         subscriberCount: c.subscriberCount,
+        messageCount: c.messageCount,
         subscribed: sub !== undefined,
         isActive: active?.name === c.name && active?.location === transport.source,
       })
@@ -115,6 +117,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
       location: sub.location,
       source: sub.source,
       subscriberCount: 1,
+      messageCount: undefined,
       subscribed: true,
       isActive: active?.name === sub.name && active?.location === sub.location,
     })

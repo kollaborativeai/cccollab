@@ -40,6 +40,7 @@ export interface TransportSession {
 export interface TransportChannel {
   name: string
   subscriberCount: number
+  messageCount?: number
 }
 
 /** Topic summary as surfaced by `list_topics`. */

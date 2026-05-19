@@ -297,6 +297,42 @@ describe('Channel Tools', () => {
       })
     })
 
+    it('list_channels surfaces messageCount from the transport', async () => {
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [{ name: 'dev', subscriberCount: 1, messageCount: 7 }],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+      }
+      const context = new ActiveContext()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: ChannelToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, stubDeps))
+      expect(result.channels[0].messageCount).toBe(7)
+    })
+
     it('degrades gracefully when broker is unreachable and returns subscribed-only entries', async () => {
       const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
       vi.stubGlobal('fetch', mockFetch)
