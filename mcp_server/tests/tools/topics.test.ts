@@ -459,9 +459,9 @@ describe('Topic Tools', () => {
 
     it('read_topic_messages returns paged topic history from the transport', async () => {
       const page = {
-        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'topic msg', ts: '2026-01-02T00:00:00.000Z' }],
+        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'topic msg', ts: 1_767_312_000_000 }],
         hasMore: false,
-        oldestTs: '2026-01-02T00:00:00.000Z',
+        oldestTs: 1_767_312_000_000,
       }
       const stubTransport = {
         source: 'local',
@@ -506,9 +506,9 @@ describe('Topic Tools', () => {
 
     it('read_dm_thread returns paged DM history from the transport', async () => {
       const page = {
-        messages: [{ sender: 'bob', senderSessionName: 'bob', text: 'dm msg', ts: '2026-01-03T00:00:00.000Z' }],
+        messages: [{ sender: 'bob', senderSessionName: 'bob', text: 'dm msg', ts: 1_767_398_400_000 }],
         hasMore: false,
-        oldestTs: '2026-01-03T00:00:00.000Z',
+        oldestTs: 1_767_398_400_000,
       }
       const stubTransport = {
         source: 'remote',

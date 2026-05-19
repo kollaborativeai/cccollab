@@ -370,9 +370,9 @@ describe('Channel Tools', () => {
 
     it('returns paged channel history from the transport', async () => {
       const page = {
-        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'hi', ts: '2026-01-01T00:00:00.000Z' }],
+        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'hi', ts: 1_767_225_600_000 }],
         hasMore: false,
-        oldestTs: '2026-01-01T00:00:00.000Z',
+        oldestTs: 1_767_225_600_000,
       }
       const stubTransport = {
         source: 'local',

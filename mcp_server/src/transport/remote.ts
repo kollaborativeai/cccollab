@@ -788,10 +788,10 @@ export class RemoteTransport implements Transport {
         sender: m.fromSessionId,
         senderSessionName: m.senderSessionName,
         text: m.text,
-        ts: new Date(m.ts).toISOString(),
+        ts: m.ts,
       })),
       hasMore: raw.hasMore,
-      oldestTs: raw.messages.length > 0 ? new Date(raw.messages[0]!.ts).toISOString() : undefined,
+      oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
     }
   }
 

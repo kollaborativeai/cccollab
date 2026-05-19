@@ -535,6 +535,8 @@ describe('RemoteTransport read-history methods', () => {
     })
     expect(page.messages[0]!.text).toBe('hi')
     expect(page.hasMore).toBe(false)
+    expect(typeof page.messages[0]!.ts).toBe('number')
+    expect(page.oldestTs).toBe(1_700_000_000_000)
   })
 })
 

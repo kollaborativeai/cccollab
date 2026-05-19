@@ -61,19 +61,19 @@ export interface TransportTopicMessage {
   ts: string
 }
 
-/** One message in a paged read-history result. */
+/** One message in a paged read-history result. `ts` is epoch-ms. */
 export interface TransportHistoryMessage {
   sender: string
   senderSessionName?: string
   text: string
-  ts: string
+  ts: number
 }
 
-/** A page of read history. `oldestTs` is the cursor for the next `before`. */
+/** A page of read history. `oldestTs` (epoch-ms) is the cursor for the next `before`. */
 export interface TransportHistoryPage {
   messages: TransportHistoryMessage[]
   hasMore: boolean
-  oldestTs?: string
+  oldestTs?: number
 }
 
 /**
