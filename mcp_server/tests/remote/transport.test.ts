@@ -540,6 +540,54 @@ describe('RemoteTransport read-history methods', () => {
   })
 })
 
+describe('RemoteTransport.listTopics', () => {
+  it('passes through the per-topic messageCount reported by the backend', async () => {
+    // The org-scoped KAI backend's `topics.listByChannel` reports a
+    // `messageCount` per topic. The transport must forward it so the
+    // `list_topics` tool shows a real count instead of 0.
+    const { client } = makeStubClient(
+      async () => [
+        {
+          topicId: 'topic_1',
+          name: 'plan',
+          state: 'active',
+          creatorSessionId: 'sess_1',
+          createdAt: 1_700_000_000_000,
+          messageCount: 3,
+        },
+      ],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+
+    const topics = await transport.listTopics({ channel: 'dev' })
+
+    expect(topics).toHaveLength(1)
+    expect(topics[0]!.messageCount).toBe(3)
+  })
+
+  it('leaves messageCount undefined when the backend omits it', async () => {
+    // The single-tenant convex-google backend does not report a count.
+    const { client } = makeStubClient(async () => [
+      {
+        topicId: 'topic_1',
+        name: 'plan',
+        state: 'active',
+        creatorSessionId: 'sess_1',
+        createdAt: 1_700_000_000_000,
+      },
+    ])
+    const transport = new RemoteTransport({ client, authType: 'convex-google' })
+    await transport.introduce({ sessionName: 'tester' })
+
+    const topics = await transport.listTopics({ channel: 'dev' })
+
+    expect(topics).toHaveLength(1)
+    expect(topics[0]!.messageCount).toBeUndefined()
+  })
+})
+
 describe('RemoteTransport session-scoped query arguments', () => {
   it('forwards sessionId to org-scoped reads on the clerk transport', async () => {
     const { client, queryMock } = makeStubClient(

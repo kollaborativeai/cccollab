@@ -569,6 +569,7 @@ export class RemoteTransport implements Transport {
         state: string
         creatorSessionId: string
         createdAt: number
+        messageCount?: number
       }>
       for (const r of rows) this.knownTopicIds.add(r.topicId)
       return rows.map((r) => ({
@@ -578,7 +579,7 @@ export class RemoteTransport implements Transport {
         creator: r.creatorSessionId,
         state: r.state,
         createdAt: new Date(r.createdAt).toISOString(),
-        messageCount: undefined,
+        messageCount: r.messageCount,
       }))
     } catch (err) {
       this.registerFailure('listTopics', err)
