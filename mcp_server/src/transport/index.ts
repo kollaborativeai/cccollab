@@ -61,6 +61,21 @@ export interface TransportTopicMessage {
   ts: string
 }
 
+/** One message in a paged read-history result. */
+export interface TransportHistoryMessage {
+  sender: string
+  senderSessionName?: string
+  text: string
+  ts: string
+}
+
+/** A page of read history. `oldestTs` is the cursor for the next `before`. */
+export interface TransportHistoryPage {
+  messages: TransportHistoryMessage[]
+  hasMore: boolean
+  oldestTs?: string
+}
+
 /**
  * A transport is the outbound face of one broker path: the in-process
  * local broker today, plus an optional remote Convex deployment.
@@ -116,6 +131,11 @@ export interface Transport {
     toSessionName: string
     text: string
   }): Promise<{ viaChannel?: string }>
+
+  // ─── Message history ──────────────────────────────────────────────────
+  readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  readDmThread(args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
 
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */

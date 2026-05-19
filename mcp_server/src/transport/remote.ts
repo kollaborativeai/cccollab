@@ -9,6 +9,7 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
@@ -68,6 +69,9 @@ export type Refs = {
       listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
       listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
       listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+      readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
     }
   }
   organizations: {
@@ -125,6 +129,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
             listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
             listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
             listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+            readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
           }
           organizations: {
             listForUser: FunctionReference<'query' | 'mutation' | 'action'>
@@ -174,6 +181,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
           listByTopic: c.messages.listByTopic,
           listByChannel: c.messages.listByChannel,
           listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
+          readChannelHistory: c.messages.readChannelHistory,
+          readTopicHistory: c.messages.readTopicHistory,
+          readDmThread: c.messages.readDmThread,
         },
       },
       organizations: {
@@ -764,6 +774,103 @@ export class RemoteTransport implements Transport {
       }
       this.registerFailure('sendDirectMessage', err)
       return {}
+    }
+  }
+
+  // ─── Message history ──────────────────────────────────────────────────
+
+  private static toHistoryPage(raw: {
+    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+    hasMore: boolean
+  }): TransportHistoryPage {
+    return {
+      messages: raw.messages.map((m) => ({
+        sender: m.fromSessionId,
+        senderSessionName: m.senderSessionName,
+        text: m.text,
+        ts: new Date(m.ts).toISOString(),
+      })),
+      hasMore: raw.hasMore,
+      oldestTs: raw.messages.length > 0 ? new Date(raw.messages[0]!.ts).toISOString() : undefined,
+    }
+  }
+
+  private async resolveChannelId(channelName: string): Promise<string | null> {
+    const cached = this.channelIdsByName.get(channelName)
+    if (cached !== undefined) return cached
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{ channelId: string; name: string }>
+      const match = rows.find((r) => r.name.toLowerCase() === channelName.toLowerCase())
+      if (match === undefined) return null
+      this.channelIdsByName.set(channelName, match.channelId)
+      return match.channelId
+    } catch (err) {
+      this.registerFailure('resolveChannelId', err)
+      return null
+    }
+  }
+
+  async readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    const channelId = await this.resolveChannelId(args.channel)
+    if (channelId === null) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readChannelHistory),
+        this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readChannelMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readTopicHistory),
+        this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readTopicMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readDmThread(args: {
+    peerSessionName: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readDmThread),
+        this.orgScopedArgs({
+          peerSessionName: args.peerSessionName,
+          limit: args.limit,
+          before: args.before,
+        }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readDmThread', err)
+      return { messages: [], hasMore: false }
     }
   }
 

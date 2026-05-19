@@ -510,6 +510,34 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
   })
 })
 
+describe('RemoteTransport read-history methods', () => {
+  it('readChannelMessages forwards sessionId and maps the page', async () => {
+    const { client, queryMock } = makeStubClient(
+      async () => ({
+        messages: [{ fromSessionId: 'peer', senderSessionName: 'peer', text: 'hi', ts: 1_700_000_000_000 }],
+        hasMore: false,
+      }),
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+    // Seed the channel-id cache so the name resolves without a listAll round-trip.
+    ;(transport as unknown as { channelIdsByName: Map<string, string> }).channelIdsByName.set('dev', 'chan_1')
+
+    queryMock.mockClear()
+    const page = await transport.readChannelMessages({ channel: 'dev', limit: 10 })
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock.mock.calls[0]![1]).toMatchObject({
+      sessionId: 'session_abc',
+      channelId: 'chan_1',
+      limit: 10,
+    })
+    expect(page.messages[0]!.text).toBe('hi')
+    expect(page.hasMore).toBe(false)
+  })
+})
+
 describe('RemoteTransport session-scoped query arguments', () => {
   it('forwards sessionId to org-scoped reads on the clerk transport', async () => {
     const { client, queryMock } = makeStubClient(

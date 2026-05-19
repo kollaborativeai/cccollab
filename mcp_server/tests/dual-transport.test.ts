@@ -10,6 +10,7 @@ import type { ResolvedLocation } from '../src/config/resolve.js'
 import {
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
@@ -104,6 +105,24 @@ class FakeTransport implements Transport {
     },
   )
   deregisterSession = vi.fn(async (_args: { sessionName: string }) => {})
+  readChannelMessages = vi.fn(
+    async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
+  readTopicMessages = vi.fn(
+    async (_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
+  readDmThread = vi.fn(
+    async (_args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
 
   constructor(source: string) {
     this.source = source
