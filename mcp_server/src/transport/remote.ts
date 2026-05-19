@@ -425,9 +425,17 @@ export class RemoteTransport implements Transport {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
         channel: args.channel,
-      })) as { channelId?: string }
+      })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
+        // Seed the per-channel cursor with the channel's ts at join time so
+        // `subscribeChannelMessages` starts the reactive feed past existing
+        // history instead of replaying it as fresh inbound notifications.
+        // Monotonic non-decreasing: a later rejoin can't regress it.
+        if (typeof res.latestTs === 'number') {
+          const prior = this.channelMaxTs.get(res.channelId) ?? 0
+          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
+        }
       }
       return { subscriberCount: 0 }
     } catch (err) {
@@ -963,9 +971,12 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    // Narrow the reactive window server-side with the inclusive `sinceTs`
-    // cursor (>= rather than >). The dedup happens client-side by `_id`
-    // since `ts` alone can collide at millisecond resolution.
+    // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
+    // cursor: the backend returns messages strictly after it. `topicMaxTs`
+    // is primed (via primeTopicCursor) to the last history ts already shown
+    // to the user on join, so that boundary message is not replayed. The
+    // `_id` dedup below still guards against the same row appearing in
+    // successive onUpdate batches within one subscription.
     const startingTs = this.topicMaxTs.get(args.topicId)
     const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
@@ -1037,6 +1048,13 @@ export class RemoteTransport implements Transport {
       // don't want to hard-fail if the order is ever violated.
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
+      // Narrow the initial reactive batch past the channel's join-time
+      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
+      // this callback). An explicit `sinceTs` overrides the server-side
+      // read cursor, so a first-ever join — which has no cursor yet — does
+      // not replay the channel's whole broadcast history.
+      const startingTs = this.channelMaxTs.get(channelId)
+      if (startingTs !== undefined) queryArgs.sinceTs = startingTs
       innerUnsubscribe = this.client.onUpdate(
         fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,

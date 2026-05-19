@@ -508,6 +508,41 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
       ts: 1_700_000_200_000,
     })
   })
+
+  it('seeds the channel cursor from joinChannel latestTs and subscribes past it', async () => {
+    // joinChannel returns the channel's join-time ts. The transport must
+    // seed it so the reactive listByChannel subscription starts strictly
+    // after it — otherwise the channel's pre-existing broadcast history
+    // replays as fresh inbound notifications on join.
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 4242 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, _cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+
+    expect(onUpdateCalls).toHaveLength(1)
+    expect(onUpdateCalls[0]!.args).toMatchObject({
+      channelId: 'chan_dev',
+      sessionId: 'session_1',
+      sinceTs: 4242,
+    })
+  })
 })
 
 describe('RemoteTransport read-history methods', () => {
