@@ -290,7 +290,11 @@ async function handleListTopics(
     location: t.location,
     state: t.state,
     messageCount: t.messageCount ?? 0,
-    isJoined: deps.context.isTopicJoined(t.id),
+    // Prefer the backend's per-session membership when the transport reports
+    // it: the in-memory context goes stale when the session is removed from a
+    // topic elsewhere (e.g. via the web hub). Fall back to context for
+    // transports that don't report `joined` (the local broker).
+    isJoined: t.joined ?? deps.context.isTopicJoined(t.id),
     isMyActive: t.id === activeThread,
     creator: t.creator,
     createdAt: t.createdAt,

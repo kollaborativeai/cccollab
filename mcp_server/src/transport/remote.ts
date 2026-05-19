@@ -579,6 +579,7 @@ export class RemoteTransport implements Transport {
         creatorSessionId: string
         createdAt: number
         messageCount?: number
+        joined?: boolean
       }>
       for (const r of rows) this.knownTopicIds.add(r.topicId)
       return rows.map((r) => ({
@@ -589,6 +590,10 @@ export class RemoteTransport implements Transport {
         state: r.state,
         createdAt: new Date(r.createdAt).toISOString(),
         messageCount: r.messageCount,
+        // The org-scoped backend reports whether this session has joined the
+        // topic. Pass it through so `list_topics` reflects the real backend
+        // membership rather than only the MCP server's in-memory context.
+        joined: r.joined,
       }))
     } catch (err) {
       this.registerFailure('listTopics', err)

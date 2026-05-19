@@ -58,6 +58,10 @@ export interface TransportTopic {
   state: string
   createdAt: string
   messageCount?: number
+  /** Whether the calling session has joined this topic, as reported by the
+   *  backend. Optional: a transport that cannot report it leaves it undefined,
+   *  and the tool layer falls back to local context. */
+  joined?: boolean
 }
 
 /** Historical message as returned by `joinTopic` to hydrate the UI. */

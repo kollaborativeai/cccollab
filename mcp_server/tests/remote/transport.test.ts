@@ -586,6 +586,39 @@ describe('RemoteTransport.listTopics', () => {
     expect(topics).toHaveLength(1)
     expect(topics[0]!.messageCount).toBeUndefined()
   })
+
+  it('passes through the per-session joined flag reported by the backend', async () => {
+    // The org-scoped backend reports whether the calling session has joined
+    // each topic. The transport must forward it so `list_topics` reflects the
+    // real backend membership instead of stale local context.
+    const { client } = makeStubClient(
+      async () => [
+        {
+          topicId: 'topic_1',
+          name: 'plan',
+          state: 'active',
+          creatorSessionId: 'sess_1',
+          createdAt: 1_700_000_000_000,
+          joined: true,
+        },
+        {
+          topicId: 'topic_2',
+          name: 'design',
+          state: 'active',
+          creatorSessionId: 'sess_1',
+          createdAt: 1_700_000_000_000,
+          joined: false,
+        },
+      ],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+
+    const topics = await transport.listTopics({ channel: 'dev' })
+
+    expect(topics.map((t) => t.joined)).toEqual([true, false])
+  })
 })
 
 describe('RemoteTransport.listChannels', () => {
