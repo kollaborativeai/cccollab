@@ -3,6 +3,7 @@ import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import {
   DmDeliveryError,
+  LOCAL_LOCATION,
   TopicNameConflictError,
   type ChannelLocation,
   type Transport,
@@ -184,6 +185,47 @@ export async function handleTopicTool(
       }
       return handleSendMessageToSession(deps, to, text)
     }
+    case 'read_topic_messages': {
+      const { topic, limit, before } = args as {
+        topic?: string
+        limit?: number
+        before?: number
+      }
+      const active = deps.context.hasTopic() ? deps.context.getThreadTs() : undefined
+      const topicId = topic ?? active
+      if (!topicId) {
+        return JSON.stringify({
+          error: 'No active topic. Pass a `topic` id, or join one with join_topic.',
+        })
+      }
+      let transport: Transport
+      try {
+        transport = resolveTopicTransport(deps, topicId)
+      } catch (err) {
+        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+      }
+      const page = await transport.readTopicMessages({ topicId, limit, before })
+      return JSON.stringify(page)
+    }
+
+    case 'read_dm_thread': {
+      const { sessionName, limit, before } = args as {
+        sessionName?: string
+        limit?: number
+        before?: number
+      }
+      if (!sessionName || sessionName.trim() === '') {
+        return JSON.stringify({ error: '`sessionName` (the DM peer) is required.' })
+      }
+      const enabledTransports = deps.router.enabled()
+      const transport = enabledTransports.find((tr) => tr.source !== LOCAL_LOCATION) ?? enabledTransports[0]
+      if (transport === undefined) {
+        return JSON.stringify({ error: 'No transport available.' })
+      }
+      const page = await transport.readDmThread({ peerSessionName: sessionName, limit, before })
+      return JSON.stringify(page)
+    }
+
     default:
       throw new Error(`Unknown topic tool: ${name}`)
   }

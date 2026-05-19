@@ -363,6 +363,58 @@ describe('Channel Tools', () => {
     })
   })
 
+  describe('read_channel_messages', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('returns paged channel history from the transport', async () => {
+      const page = {
+        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'hi', ts: '2026-01-01T00:00:00.000Z' }],
+        hasMore: false,
+        oldestTs: '2026-01-01T00:00:00.000Z',
+      }
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: vi.fn().mockResolvedValue(page),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('dev', 'manual', 'local')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: ChannelToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleChannelTool('read_channel_messages', { channel: 'dev' }, stubDeps))
+      expect(result.messages[0].text).toBe('hi')
+      expect(result.hasMore).toBe(false)
+    })
+  })
+
   describe('send_message_to_channel', () => {
     let deps: ChannelToolDeps
     beforeEach(() => {

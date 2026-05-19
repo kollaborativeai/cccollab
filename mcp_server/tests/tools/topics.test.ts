@@ -456,5 +456,140 @@ describe('Topic Tools', () => {
     it('throws on unknown tool', async () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
     })
+
+    it('read_topic_messages returns paged topic history from the transport', async () => {
+      const page = {
+        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'topic msg', ts: '2026-01-02T00:00:00.000Z' }],
+        hasMore: false,
+        oldestTs: '2026-01-02T00:00:00.000Z',
+      }
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: (id: string) => id === 'uuid-hist',
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: vi.fn().mockResolvedValue(page),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'local')
+      context.joinTopic('uuid-hist', 'History topic', 'default', 'local')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, stubDeps))
+      expect(result.messages[0].text).toBe('topic msg')
+      expect(result.hasMore).toBe(false)
+    })
+
+    it('read_dm_thread returns paged DM history from the transport', async () => {
+      const page = {
+        messages: [{ sender: 'bob', senderSessionName: 'bob', text: 'dm msg', ts: '2026-01-03T00:00:00.000Z' }],
+        hasMore: false,
+        oldestTs: '2026-01-03T00:00:00.000Z',
+      }
+      const stubTransport = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: vi.fn().mockResolvedValue(page),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
+      expect(result.messages[0].text).toBe('dm msg')
+      expect(result.hasMore).toBe(false)
+    })
+
+    it('read_dm_thread falls back to the local transport when no remote is enabled', async () => {
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'local')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
+      expect(result.error).toBeUndefined()
+      expect(result.hasMore).toBe(false)
+      expect(result.messages).toEqual([])
+    })
   })
 })

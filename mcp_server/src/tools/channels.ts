@@ -56,6 +56,41 @@ export async function handleChannelTool(
     }
     case 'send_message_to_channel':
       return handleSendMessageToChannel(deps, args as { text?: string; channel?: string; location?: ChannelLocation })
+    case 'read_channel_messages': {
+      const { channel, location, limit, before } = args as {
+        channel?: string
+        location?: ChannelLocation
+        limit?: number
+        before?: number
+      }
+      let targetName: string | undefined = channel ? normalizeChannelName(channel) : undefined
+      let targetLocation: ChannelLocation | undefined = location
+      if (!targetName) {
+        const active = deps.context.getActiveChannelRef()
+        if (active) {
+          targetName = active.name
+          targetLocation = active.location
+        }
+      }
+      if (!targetName) {
+        return JSON.stringify({
+          error: 'No active channel. Pass a `channel`, or join one with join_channel.',
+        })
+      }
+      targetLocation = targetLocation ?? deps.context.getChannelLocation(targetName) ?? 'local'
+      let transport
+      try {
+        transport = deps.router.get(targetLocation)
+      } catch (err) {
+        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+      }
+      const page = await transport.readChannelMessages({
+        channel: targetName,
+        limit,
+        before,
+      })
+      return JSON.stringify(page)
+    }
     default:
       throw new Error(`Unknown channel tool: ${name}`)
   }
