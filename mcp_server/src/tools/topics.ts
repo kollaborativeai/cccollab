@@ -591,6 +591,12 @@ async function handleListSessions(
 
   // Merged by session name. Channels union across transports, each
   // tagged by the location it came from.
+  //
+  // `scopedLocations` records locations whose transport already scopes
+  // `listSessions` server-side to peers sharing a channel with this
+  // session (every non-local transport does). Such a session is a
+  // confirmed peer even when the transport can't denormalize *which*
+  // channels — see the `visible` filter below.
   const merged = new Map<
     string,
     {
@@ -598,6 +604,7 @@ async function handleListSessions(
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      scopedLocations: Set<ChannelLocation>
     }
   >()
 
@@ -611,7 +618,7 @@ async function handleListSessions(
     for (const transport of eligible) {
       try {
         const sessions = await transport.listSessions({ channel })
-        mergeSessions(merged, sessions, transport.source)
+        mergeSessions(merged, sessions, transport.source, transport.source !== LOCAL_LOCATION)
       } catch {
         // transport unreachable, skip
       }
@@ -620,7 +627,7 @@ async function handleListSessions(
     for (const transport of transports) {
       try {
         const sessions = await transport.listSessions({})
-        mergeSessions(merged, sessions, transport.source)
+        mergeSessions(merged, sessions, transport.source, transport.source !== LOCAL_LOCATION)
       } catch {
         // transport unreachable, skip
       }
@@ -634,6 +641,12 @@ async function handleListSessions(
   const visible = channelArg
     ? [...merged.values()]
     : [...merged.values()].filter((s) => {
+        // A session reported by a server-scoped transport is already a
+        // confirmed shared-channel peer: the remote backend's
+        // `listSessions` only returns sessions sharing a channel with
+        // us, even though it doesn't denormalize which ones. Keep it
+        // regardless of the (empty) `channels` list.
+        if (s.scopedLocations.size > 0) return true
         if (s.channels.length === 0) return false
         return s.channels.some((ch) => mySubs.has(`${ch.location}::${ch.name}`))
       })
@@ -655,10 +668,14 @@ function mergeSessions(
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      scopedLocations: Set<ChannelLocation>
     }
   >,
   rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string }>,
   location: ChannelLocation,
+  /** True when this transport's `listSessions` is already scoped
+   *  server-side to peers sharing a channel with the caller. */
+  serverScoped: boolean,
 ): void {
   for (const r of rows) {
     const existing = merged.get(r.name)
@@ -676,12 +693,14 @@ function mergeSessions(
         }
       }
       existing.registeredAt = existing.registeredAt ?? r.registeredAt
+      if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(r.name, {
         name: r.name,
         objective: r.objective,
         channels: tagged,
         registeredAt: r.registeredAt,
+        scopedLocations: serverScoped ? new Set([location]) : new Set(),
       })
     }
   }

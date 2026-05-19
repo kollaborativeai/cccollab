@@ -426,6 +426,53 @@ describe('Topic Tools', () => {
       })
     })
 
+    it('list_sessions keeps remote sessions even though the transport reports no channels', async () => {
+      // The remote backend's listSessions is already scoped server-side
+      // to shared-channel peers but cannot denormalize which channels,
+      // so it returns `channels: []`. The no-channel filter must not
+      // drop those sessions.
+      const remoteTransport = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [
+          { name: 'reviewer', objective: 'Review', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
+        ],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const remoteDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([remoteTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, remoteDeps))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ name: 'reviewer', objective: 'Review', channels: [] })
+    })
+
     it('send_message_to_session posts to /direct-message', async () => {
       const mockFetch = vi
         .fn()
