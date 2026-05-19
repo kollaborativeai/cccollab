@@ -195,20 +195,24 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (pathname === '/channels' && method === 'GET') {
     const sessionId = searchParams.get('sessionId') ?? undefined
+    // The broker has no user accounts — every channel member is a session — so
+    // `subscriberCount` and `sessionCount` are the same value here. Both are
+    // reported so the `list_channels` tool output is uniform across transports.
     if (sessionId) {
       const info = sessions.get(sessionId)
-      const result: Array<{ name: string; subscriberCount: number }> = []
+      const result: Array<{ name: string; subscriberCount: number; sessionCount: number }> = []
       if (info) {
         for (const ch of info.channels) {
-          result.push({ name: ch, subscriberCount: channels.get(ch)?.size ?? 0 })
+          const size = channels.get(ch)?.size ?? 0
+          result.push({ name: ch, subscriberCount: size, sessionCount: size })
         }
       }
       jsonResponse(res, 200, { channels: result })
       return
     }
-    const result: Array<{ name: string; subscriberCount: number }> = []
+    const result: Array<{ name: string; subscriberCount: number; sessionCount: number }> = []
     for (const [name, members] of channels) {
-      result.push({ name, subscriberCount: members.size })
+      result.push({ name, subscriberCount: members.size, sessionCount: members.size })
     }
     jsonResponse(res, 200, { channels: result })
     return

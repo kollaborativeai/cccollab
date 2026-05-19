@@ -456,10 +456,19 @@ export class RemoteTransport implements Transport {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.channels.queries.listAll),
         this.orgScopedArgs({}),
-      )) as Array<{ name: string; subscriberCount: number; messageCount?: number }>
+      )) as Array<{
+        name: string
+        subscriberCount: number
+        presentSessionCount?: number
+        messageCount?: number
+      }>
       return rows.map((r) => ({
         name: r.name,
         subscriberCount: r.subscriberCount,
+        // The backend's `listAll` reports `presentSessionCount` — the count of
+        // sessions joined to the channel, as distinct from the user-level
+        // `subscriberCount`. Surface it as `sessionCount`.
+        sessionCount: r.presentSessionCount,
         messageCount: r.messageCount,
       }))
     } catch (err) {

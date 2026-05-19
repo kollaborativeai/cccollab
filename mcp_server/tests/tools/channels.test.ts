@@ -284,6 +284,7 @@ describe('Channel Tools', () => {
         location: 'local',
         source: 'manual',
         subscriberCount: 1,
+        sessionCount: 1,
         subscribed: true,
         isActive: true,
       })
@@ -297,7 +298,7 @@ describe('Channel Tools', () => {
       })
     })
 
-    it('list_channels surfaces messageCount from the transport', async () => {
+    it('list_channels surfaces messageCount and sessionCount from the transport', async () => {
       const stubTransport = {
         source: 'local',
         enabled: true,
@@ -305,7 +306,7 @@ describe('Channel Tools', () => {
         introduce: async () => {},
         joinChannel: async () => ({ subscriberCount: 1 }),
         leaveChannel: async () => {},
-        listChannels: async () => [{ name: 'dev', subscriberCount: 1, messageCount: 7 }],
+        listChannels: async () => [{ name: 'dev', subscriberCount: 2, sessionCount: 5, messageCount: 7 }],
         broadcast: async () => {},
         createTopic: async () => {
           throw new Error('not implemented')
@@ -331,6 +332,8 @@ describe('Channel Tools', () => {
       }
       const result = JSON.parse(await handleChannelTool('list_channels', {}, stubDeps))
       expect(result.channels[0].messageCount).toBe(7)
+      expect(result.channels[0].subscriberCount).toBe(2)
+      expect(result.channels[0].sessionCount).toBe(5)
     })
 
     it('degrades gracefully when broker is unreachable and returns subscribed-only entries', async () => {
@@ -347,6 +350,7 @@ describe('Channel Tools', () => {
             location: 'local',
             source: 'fallback',
             subscriberCount: 1,
+            sessionCount: 1,
             subscribed: true,
             isActive: true,
           },
@@ -355,6 +359,7 @@ describe('Channel Tools', () => {
             location: 'local',
             source: 'manual',
             subscriberCount: 1,
+            sessionCount: 1,
             subscribed: true,
             isActive: false,
           },

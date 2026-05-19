@@ -100,7 +100,11 @@ interface ChannelRow {
   name: string
   location: ChannelLocation
   source: ChannelSource | null
+  /** Distinct users subscribed to the channel. */
   subscriberCount: number
+  /** Sessions joined to the channel (>= `subscriberCount`; one user may have
+   *  several sessions). Undefined when the transport cannot report it. */
+  sessionCount?: number
   messageCount?: number
   subscribed: boolean
   isActive: boolean
@@ -117,7 +121,12 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
   const channels: ChannelRow[] = []
 
   for (const transport of transports) {
-    let rows: Array<{ name: string; subscriberCount: number; messageCount?: number }> = []
+    let rows: Array<{
+      name: string
+      subscriberCount: number
+      sessionCount?: number
+      messageCount?: number
+    }> = []
     try {
       rows = await transport.listChannels({})
     } catch {
@@ -133,6 +142,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
         location: transport.source,
         source: sub ? sub.source : null,
         subscriberCount: c.subscriberCount,
+        sessionCount: c.sessionCount,
         messageCount: c.messageCount,
         subscribed: sub !== undefined,
         isActive: active?.name === c.name && active?.location === transport.source,
@@ -151,7 +161,10 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
       name: sub.name,
       location: sub.location,
       source: sub.source,
+      // Transport didn't report this channel, but the caller is subscribed —
+      // so at minimum this session, and its owner, are in it.
       subscriberCount: 1,
+      sessionCount: 1,
       messageCount: undefined,
       subscribed: true,
       isActive: active?.name === sub.name && active?.location === sub.location,

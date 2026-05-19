@@ -588,6 +588,25 @@ describe('RemoteTransport.listTopics', () => {
   })
 })
 
+describe('RemoteTransport.listChannels', () => {
+  it('maps the backend presentSessionCount onto sessionCount', async () => {
+    // The backend's `listAll` reports a user-level `subscriberCount` and a
+    // session-level `presentSessionCount`. The transport must surface the
+    // latter as `sessionCount` so `list_channels` can show both.
+    const { client } = makeStubClient(
+      async () => [{ name: 'dev', subscriberCount: 2, presentSessionCount: 5, messageCount: 7 }],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+
+    const channels = await transport.listChannels({})
+
+    expect(channels).toHaveLength(1)
+    expect(channels[0]).toMatchObject({ subscriberCount: 2, sessionCount: 5, messageCount: 7 })
+  })
+})
+
 describe('RemoteTransport session-scoped query arguments', () => {
   it('forwards sessionId to org-scoped reads on the clerk transport', async () => {
     const { client, queryMock } = makeStubClient(

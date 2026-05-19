@@ -39,7 +39,13 @@ export interface TransportSession {
 /** Channel summary as surfaced by `list_channels`. */
 export interface TransportChannel {
   name: string
+  /** Distinct users subscribed to the channel. A user with several sessions
+   *  in the channel counts once. */
   subscriberCount: number
+  /** Sessions currently joined to the channel. A user with several sessions
+   *  counts once per session — so this is >= `subscriberCount`. Optional: a
+   *  transport that cannot report it leaves it undefined. */
+  sessionCount?: number
   messageCount?: number
 }
 
