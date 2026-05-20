@@ -32,7 +32,6 @@ End users put this in `~/.cccollab/config.json`:
   "locations": {
     "kai": {
       "url": "https://<kai-deployment>.convex.cloud",
-      "authType": "clerk",
       "clerkIssuer": "https://<clerk-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
       // Optional: override the default loopback port (53682).
@@ -42,6 +41,10 @@ End users put this in `~/.cccollab/config.json`:
   },
 }
 ```
+
+`authType: "clerk"` is also accepted (and is what the `authenticate` tool
+writes alongside the tokens — see below), but is optional today since
+Clerk is the only auth flow.
 
 After running `authenticate --location kai`, tokens are appended by the CLI:
 

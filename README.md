@@ -95,7 +95,7 @@ reserved `local` location is always distinct from a channel at a named
 remote location - same channel name, different scope.
 
 Clerk is the auth provider. Every non-local location must declare its Clerk
-app pointer: `authType: "clerk"`, `clerkIssuer`, and `clerkClientId`. See
+app pointer: `clerkIssuer` and `clerkClientId`. See
 [`docs/architecture/clerk-auth-setup.md`](docs/architecture/clerk-auth-setup.md)
 for how to obtain those values from your Clerk instance.
 
@@ -106,7 +106,6 @@ Add a location to `~/.cccollab/config.json`:
   "locations": {
     "flatout": {
       "url": "https://<your-deployment>.convex.cloud",
-      "authType": "clerk",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli"
     }
@@ -119,6 +118,11 @@ opens for Clerk sign-in (PKCE). After sign-in the tokens are persisted
 back to the same file under `locations.flatout` and the remote transport
 hot-attaches to the running session - no restart needed.
 
+`authType: "clerk"` is also accepted (and is what `authenticate` writes
+alongside the tokens) — it's a no-op marker today because Clerk is the
+only auth flow, but it reserves the discriminator slot for future
+providers.
+
 Channels configured under a remote location auto-subscribe on startup:
 
 ```json
@@ -126,7 +130,6 @@ Channels configured under a remote location auto-subscribe on startup:
   "locations": {
     "flatout": {
       "url": "https://<your-deployment>.convex.cloud",
-      "authType": "clerk",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
       "channels": {
@@ -141,11 +144,11 @@ Channels configured under a remote location auto-subscribe on startup:
 }
 ```
 
-The Clerk app pointer (`authType`, `clerkIssuer`, `clerkClientId`) may also
-live in a project-level `.cccollab.json` so a team can share it via source
-control while each developer keeps their own tokens in their user-level
-file. `CCCOLLAB_REMOTE_URL` can still register an env-driven `remote`
-location's URL, but the app pointer must come from a config file.
+The Clerk app pointer (`clerkIssuer`, `clerkClientId`) may also live in a
+project-level `.cccollab.json` so a team can share it via source control
+while each developer keeps their own tokens in their user-level file.
+`CCCOLLAB_REMOTE_URL` can still register an env-driven `remote` location's
+URL, but the app pointer must come from a config file.
 
 For the full schema (including project-level `.cccollab.json`, active-state
 cascade, env var overrides, and reserved keys), see

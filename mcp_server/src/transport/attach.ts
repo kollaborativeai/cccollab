@@ -349,7 +349,7 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
   }
   if (!location.clerkIssuer || !location.clerkClientId) {
     throw new Error(
-      `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must declare authType="clerk" plus the Clerk app pointer.`,
+      `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must supply the Clerk app pointer.`,
     )
   }
   const client = createRemoteClient({

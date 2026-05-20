@@ -42,12 +42,15 @@ identity pulled from the environment (or prompted for via `introduce`).
       url?: string               // required on every non-local location
       active?: boolean           // cascading active flag (see below)
 
-      // Auth-flow discriminator. Required for the Clerk path. May be
-      // omitted on a legacy convex-google location for back-compat.
-      authType?: 'clerk' | 'convex-google'
+      // Reserved auth-flow discriminator. Optional; only 'clerk' is
+      // accepted today, and Clerk is the only auth flow, so this is
+      // informational. The `authenticate` tool writes it alongside the
+      // persisted tokens.
+      authType?: 'clerk'
 
-      // Clerk app pointer (required when authType === 'clerk' on the
-      // resolved location - may be supplied by the project-level file).
+      // Clerk app pointer. clerkIssuer + clerkClientId are required at
+      // the use-site (the resolved location must carry both, though
+      // they may be split between project-level and user-level files).
       clerkIssuer?: string
       clerkClientId?: string
       clerkRedirectPort?: number // override the default loopback port (53682)
@@ -82,11 +85,15 @@ Every key is a free-form identifier. Reserved names:
   file. A `local` entry in the config is accepted but must not have a
   `url`.
 
-A non-local location using Clerk auth must resolve to a shape that
-includes `authType: "clerk"`, `clerkIssuer`, and `clerkClientId`. Those
-three fields may be split between the project-level `.cccollab.json` and
-the user-level `~/.cccollab/config.json` - they are merged before
-validation - but the resolved location must have all three.
+A non-local location must resolve to a shape that includes `clerkIssuer`
+and `clerkClientId`. Those two fields may be split between the
+project-level `.cccollab.json` and the user-level `~/.cccollab/config.json`
+
+- they are merged before validation - but the resolved location must
+  have both. `authType: "clerk"` is accepted and written by the
+  `authenticate` tool, but is optional and informational: Clerk is the
+  only auth flow today, so the field is a reserved slot for future
+  providers rather than a discriminator that's checked at runtime.
 
 ## Active-state cascade
 
@@ -122,7 +129,6 @@ and an active topic of `planning`.
     },
     "flatout": {
       "url": "https://wonderful-narwhal-409.convex.cloud",
-      "authType": "clerk",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
       "channels": {

@@ -275,9 +275,9 @@ async function handleAuthenticate(
     return (
       'Remote mode is not configured.\n\n' +
       'Add a non-local location under `locations` in ~/.cccollab/config.json ' +
-      'with `url`, `authType: "clerk"`, `clerkIssuer`, and `clerkClientId`, then ' +
-      'call this tool again. See docs/architecture/clerk-auth-setup.md for the ' +
-      'Clerk dashboard values.'
+      'with `url`, `clerkIssuer`, and `clerkClientId`, then call this tool ' +
+      'again. See docs/architecture/clerk-auth-setup.md for the Clerk ' +
+      'dashboard values.'
     )
   }
 
@@ -295,11 +295,8 @@ async function handleAuthenticate(
     return `Already authenticated to "${targetName}"${asEmail}. Pass force: true to re-authenticate.`
   }
 
-  if (locationInfo?.authType !== 'clerk') {
-    return `Location "${targetName}" must declare \`authType: "clerk"\`. The legacy convex-google flow has been removed; see docs/architecture/clerk-auth-setup.md.`
-  }
-  if (!locationInfo.clerkIssuer || !locationInfo.clerkClientId) {
-    return `Location "${targetName}" is missing \`clerkIssuer\` or \`clerkClientId\`. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json.`
+  if (!locationInfo?.clerkIssuer || !locationInfo.clerkClientId) {
+    return `Location "${targetName}" is missing \`clerkIssuer\` or \`clerkClientId\`. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json — see docs/architecture/clerk-auth-setup.md.`
   }
 
   let authResult: { locationName: string; url: string; userEmail?: string }

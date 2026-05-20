@@ -273,8 +273,8 @@ describe('Identity Tools', () => {
         // phantom URL.
         const result = await handleIdentityTool('authenticate', {}, deps)
         expect(result).toContain('Remote mode is not configured')
-        expect(result).toContain('authType')
         expect(result).toContain('clerkIssuer')
+        expect(result).toContain('clerkClientId')
       })
 
       it('short-circuits with the signed-in email when the location is already authenticated and userEmail is known', async () => {
