@@ -197,11 +197,13 @@ by profile.
 introduce                 - set your role name and optional objective
 whoami                    - show your identity and per-location transport status
 authenticate              - sign in to a remote location (Clerk auth, hot-attach)
+list_organizations        - organizations you belong to on each remote location
 list_channels             - channels across every enabled transport
 join_channel              - subscribe to a channel at a location
 leave_channel             - unsubscribe
 set_active_channel        - switch which channel is "active"
 send_message_to_channel   - top-level broadcast to a channel
+read_channel_messages     - paginate a channel's broadcast history
 list_topics               - topics across subscribed channels (optional location filter)
 start_topic               - create a topic in a channel
 join_topic                - join a topic by name (fuzzy) or id
@@ -210,8 +212,10 @@ set_active_topic          - switch which topic is "active"
 archive_topic             - mark a topic done (reversible)
 unarchive_topic           - restore an archived topic
 send_message_to_topic     - send a message to a topic
+read_topic_messages       - paginate a topic's message history
 list_sessions             - show other sessions (unions across every transport)
 send_message_to_session   - private DM to a session by name
+read_dm_thread            - paginate the DM thread with a peer session
 ```
 
 Messages from other sessions arrive as `<channel>` tags via push.
