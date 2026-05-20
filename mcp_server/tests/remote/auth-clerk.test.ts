@@ -13,7 +13,7 @@ import {
   ConvexJwtExchangeError,
   deploymentUrlToHttpActionUrl,
 } from '../../src/remote/auth-clerk.js'
-import type { startLoopbackListener } from '../../src/remote/auth.js'
+import type { startLoopbackListener } from '../../src/remote/loopback.js'
 
 describe('PKCE primitives', () => {
   it('generateCodeVerifier produces an 86-char base64url string', () => {

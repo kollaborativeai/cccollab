@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { openBrowser } from './browser.js'
-import { startLoopbackListener } from './auth.js'
+import { startLoopbackListener } from './loopback.js'
 
 /**
  * Default loopback port for the Clerk OAuth callback. Clerk's Dashboard
