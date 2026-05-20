@@ -347,10 +347,14 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
   if (location.isLocal || !location.url) {
     throw new Error(`defaultTransportFactory called with local or URL-less location: "${location.name}"`)
   }
+  if (!location.clerkIssuer || !location.clerkClientId) {
+    throw new Error(
+      `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must declare authType="clerk" plus the Clerk app pointer.`,
+    )
+  }
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
-    authType: location.authType,
     accessToken: location.accessToken ?? '',
     refreshToken: location.refreshToken ?? '',
     accessTokenExpiresAt: location.accessTokenExpiresAt,
@@ -359,7 +363,7 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
     userEmail: location.userEmail,
     userId: location.userId,
   })
-  return new RemoteTransport({ client, source: location.name, authType: location.authType })
+  return new RemoteTransport({ client, source: location.name })
 }
 
 /** Type guard: does this transport expose a DM reactive subscription?

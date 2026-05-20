@@ -4,22 +4,20 @@ import { getFunctionName } from 'convex/server'
 import { makeRefs } from '../../src/transport/remote.js'
 
 /**
- * Unit tests for `makeRefs` — the factory that maps authType to the
- * correct Convex function-reference paths.
+ * Unit tests for `makeRefs` — the factory that builds the Convex
+ * function-reference paths for KAI's deployment.
  *
- * KAI's Phase 1 port namespaced every callable under `cccollab/*` and
- * flattened the queries/mutations directory split. For `authType: 'clerk'`
- * we need refs that resolve to `cccollab/<module>:<name>`; for the default
- * `authType: 'convex-google'` they must resolve to the upstream
- * `<module>/<subdir>:<name>` shape.
+ * KAI namespaces every callable under `cccollab/*` and flattens the
+ * queries/mutations directory split, so each operation lives at
+ * `cccollab/<module>:<name>`.
  *
  * `getFunctionName` from `convex/server` is the canonical way to turn an
  * `anyApi` proxy into its string path and is used here to make the
  * assertions deterministic without wiring a real ConvexClient.
  */
 
-describe('makeRefs – clerk authType maps to KAI cccollab.* flat namespace', () => {
-  const refs = makeRefs('clerk')
+describe('makeRefs – cccollab/* flat namespace', () => {
+  const refs = makeRefs()
 
   it('sessions.mutations paths resolve to cccollab/sessions:*', () => {
     expect(getFunctionName(refs.sessions.mutations.introduce)).toBe('cccollab/sessions:introduce')
@@ -54,7 +52,7 @@ describe('makeRefs – clerk authType maps to KAI cccollab.* flat namespace', ()
     expect(getFunctionName(refs.topics.queries.listByChannel)).toBe('cccollab/topics:listByChannel')
     expect(getFunctionName(refs.topics.queries.getById)).toBe('cccollab/topics:getById')
     // KAI exposes the session-scoped query as `listJoinedForSession`; the
-    // clerk ref maps the (legacy-named) slot to it.
+    // (legacy-named) slot is mapped to it.
     expect(getFunctionName(refs.topics.queries.listJoinedForUser)).toBe('cccollab/topics:listJoinedForSession')
   })
 
@@ -71,52 +69,5 @@ describe('makeRefs – clerk authType maps to KAI cccollab.* flat namespace', ()
     expect(getFunctionName(refs.messages.queries.listDirectMessagesForSession)).toBe(
       'cccollab/messages:listDirectMessagesForSession',
     )
-  })
-})
-
-describe('makeRefs – convex-google authType maps to upstream queries/mutations paths', () => {
-  const refs = makeRefs('convex-google')
-
-  it('sessions.mutations.introduce resolves to the upstream path', () => {
-    expect(getFunctionName(refs.sessions.mutations.introduce)).toBe('sessions/mutations:introduce')
-  })
-
-  it('sessions.queries.listByChannel resolves to the upstream path', () => {
-    expect(getFunctionName(refs.sessions.queries.listByChannel)).toBe('sessions/queries:listByChannel')
-  })
-
-  it('channels.mutations.join resolves to the upstream path', () => {
-    expect(getFunctionName(refs.channels.mutations.join)).toBe('channels/mutations:join')
-  })
-
-  it('channels.queries.listAll resolves to the upstream path', () => {
-    expect(getFunctionName(refs.channels.queries.listAll)).toBe('channels/queries:listAll')
-  })
-
-  it('topics.mutations.start resolves to the upstream path', () => {
-    expect(getFunctionName(refs.topics.mutations.start)).toBe('topics/mutations:start')
-  })
-
-  it('topics.queries.listByChannel resolves to the upstream path', () => {
-    expect(getFunctionName(refs.topics.queries.listByChannel)).toBe('topics/queries:listByChannel')
-  })
-
-  it('messages.mutations.sendToTopic resolves to the upstream path', () => {
-    expect(getFunctionName(refs.messages.mutations.sendToTopic)).toBe('messages/mutations:sendToTopic')
-  })
-
-  it('messages.queries.listByChannel resolves to the upstream path', () => {
-    expect(getFunctionName(refs.messages.queries.listByChannel)).toBe('messages/queries:listByChannel')
-  })
-})
-
-describe('makeRefs – default authType behaves like convex-google', () => {
-  it('omitting authType gives the same paths as convex-google', () => {
-    // makeRefs defaults to convex-google when authType is undefined,
-    // matching RemoteTransport constructor's fallback.
-    // We cast to bypass the strict union type to simulate the default path.
-    const refs = makeRefs('convex-google')
-    expect(getFunctionName(refs.sessions.mutations.introduce)).toBe('sessions/mutations:introduce')
-    expect(getFunctionName(refs.channels.queries.listAll)).toBe('channels/queries:listAll')
   })
 })

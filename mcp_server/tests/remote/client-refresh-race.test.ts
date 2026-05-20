@@ -45,9 +45,11 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // Initial state: tokens R0 / A0 persisted to disk. This represents
     // both processes' startup snapshot.
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A0',
       refreshToken: 'R0',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     const startupSnapshot = loadPersistedLocationAuth('flatout')
     expect(startupSnapshot?.refreshToken).toBe('R0')
@@ -56,9 +58,11 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // R1/A1. saveLocationAuth itself is cross-process safe via the
     // lock — this is the scenario the fix relies on.
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A1',
       refreshToken: 'R1',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
 
     // Process B's refresh path runs. The refresh fetcher's first move
@@ -94,9 +98,11 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
 
     await withConfigLock(async (persist) => {
       persist('flatout', {
+        authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'A2',
         refreshToken: 'R2',
+        accessTokenExpiresAt: 1_700_000_000_000,
         updatedAt: 1_700_000_000_000,
       })
     })
@@ -129,9 +135,11 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // Lock must be released — saveLocationAuth grabs it again
     // synchronously.
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A3',
       refreshToken: 'R3',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(loadPersistedLocationAuth('flatout')?.accessToken).toBe('A3')
   })
@@ -139,9 +147,11 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
   it('loadPersistedLocationAuth returns null for unknown locations and missing files', async () => {
     expect(loadPersistedLocationAuth('flatout')).toBeNull()
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A4',
       refreshToken: 'R4',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(loadPersistedLocationAuth('does-not-exist')).toBeNull()
     // Suppress unused-imports lint by referencing writeFileSync /

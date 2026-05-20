@@ -89,8 +89,8 @@ describe('CccollabConfigSchema', () => {
   })
 })
 
-describe('LocationConfigSchema discriminated union', () => {
-  test('accepts clerk location with required clerk fields', () => {
+describe('LocationConfigSchema', () => {
+  test('accepts clerk location with the full app pointer', () => {
     const result = LocationConfigSchema.safeParse({
       authType: 'clerk',
       url: 'https://x.convex.cloud',
@@ -100,39 +100,26 @@ describe('LocationConfigSchema discriminated union', () => {
     expect(result.success).toBe(true)
   })
 
-  test('rejects clerk location missing clerkIssuer', () => {
+  test('accepts a credential-only user-level entry (no app pointer)', () => {
+    // saveLocationAuth writes credentials without the project-level
+    // clerkIssuer / clerkClientId — the schema must round-trip those
+    // entries cleanly. The "Clerk app pointer is configured" check
+    // lives at use-site (defaultTransportFactory / handleAuthenticate),
+    // not in the parse layer.
     const result = LocationConfigSchema.safeParse({
       authType: 'clerk',
       url: 'https://x.convex.cloud',
-      clerkClientId: 'cccollab-cli',
-    })
-    expect(result.success).toBe(false)
-  })
-
-  test('accepts legacy convex-google location with no authType field', () => {
-    const result = LocationConfigSchema.safeParse({
-      url: 'https://x.convex.cloud',
       accessToken: 'tok',
       refreshToken: 'rt',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(result.success).toBe(true)
   })
 
-  test('accepts convex-google location with explicit authType', () => {
+  test('rejects authType values other than "clerk"', () => {
     const result = LocationConfigSchema.safeParse({
       authType: 'convex-google',
       url: 'https://x.convex.cloud',
-      accessToken: 'tok',
-      refreshToken: 'rt',
-    })
-    expect(result.success).toBe(true)
-  })
-
-  it('rejects clerk location missing clerkClientId', () => {
-    const result = LocationConfigSchema.safeParse({
-      authType: 'clerk',
-      url: 'https://x.convex.cloud',
-      clerkIssuer: 'https://x.clerk.accounts.dev',
     })
     expect(result.success).toBe(false)
   })

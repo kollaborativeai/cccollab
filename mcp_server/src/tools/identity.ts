@@ -4,7 +4,6 @@ import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
-import { runAuthenticate } from '../remote/auth.js'
 import { CLERK_CONVEX_AUDIENCE, runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
@@ -275,9 +274,10 @@ async function handleAuthenticate(
   if (!targetName) {
     return (
       'Remote mode is not configured.\n\n' +
-      'Set CCCOLLAB_REMOTE_URL to a Convex deployment URL ' +
-      '(e.g. https://wonderful-narwhal-409.convex.cloud) or add a location with a `url` ' +
-      'under `locations` in ~/.cccollab/config.json, then call this tool again.'
+      'Add a non-local location under `locations` in ~/.cccollab/config.json ' +
+      'with `url`, `authType: "clerk"`, `clerkIssuer`, and `clerkClientId`, then ' +
+      'call this tool again. See docs/architecture/clerk-auth-setup.md for the ' +
+      'Clerk dashboard values.'
     )
   }
 
@@ -295,29 +295,29 @@ async function handleAuthenticate(
     return `Already authenticated to "${targetName}"${asEmail}. Pass force: true to re-authenticate.`
   }
 
+  if (locationInfo?.authType !== 'clerk') {
+    return `Location "${targetName}" must declare \`authType: "clerk"\`. The legacy convex-google flow has been removed; see docs/architecture/clerk-auth-setup.md.`
+  }
+  if (!locationInfo.clerkIssuer || !locationInfo.clerkClientId) {
+    return `Location "${targetName}" is missing \`clerkIssuer\` or \`clerkClientId\`. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json.`
+  }
+
   let authResult: { locationName: string; url: string; userEmail?: string }
   try {
-    if (locationInfo?.authType === 'clerk') {
-      if (!locationInfo.clerkIssuer || !locationInfo.clerkClientId) {
-        return `Location "${targetName}" has authType='clerk' but is missing clerkIssuer or clerkClientId. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json.`
-      }
-      const tokens = await runClerkPkce({
-        issuer: locationInfo.clerkIssuer,
-        clientId: locationInfo.clerkClientId,
-        redirectPort: locationInfo.clerkRedirectPort,
-        resource: CLERK_CONVEX_AUDIENCE,
-      })
-      saveLocationAuth(targetName, {
-        authType: 'clerk',
-        url,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        accessTokenExpiresAt: tokens.accessTokenExpiresAt,
-      })
-      authResult = { locationName: targetName, url }
-    } else {
-      authResult = await runAuthenticate({ locationName: targetName, url })
-    }
+    const tokens = await runClerkPkce({
+      issuer: locationInfo.clerkIssuer,
+      clientId: locationInfo.clerkClientId,
+      redirectPort: locationInfo.clerkRedirectPort,
+      resource: CLERK_CONVEX_AUDIENCE,
+    })
+    saveLocationAuth(targetName, {
+      authType: 'clerk',
+      url,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+    })
+    authResult = { locationName: targetName, url }
   } catch (err) {
     return `Authentication failed: ${err instanceof Error ? err.message : String(err)}`
   }

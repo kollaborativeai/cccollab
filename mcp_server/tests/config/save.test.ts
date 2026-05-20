@@ -27,9 +27,11 @@ describe('saveLocationAuth', () => {
 
   it('writes auth fields under the named location in the user-level file', () => {
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://wonderful-narwhal-409.convex.cloud',
       accessToken: 'jwt-abc',
       refreshToken: 'refresh-xyz',
+      accessTokenExpiresAt: 1_700_000_000_000,
       userEmail: 'stefan@flatout.solutions',
       userId: 'abc123',
       updatedAt: 1_700_000_000_000,
@@ -45,9 +47,11 @@ describe('saveLocationAuth', () => {
 
   it('writes the file with mode 0600', () => {
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
       refreshToken: 'b',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     if (process.platform !== 'win32') {
       const mode = statSync(CCCOLLAB_CONFIG_FILE).mode & 0o777
@@ -83,8 +87,10 @@ describe('saveLocationAuth', () => {
       { mode: 0o600 },
     )
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       accessToken: 'new-token',
       refreshToken: 'new-refresh',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
     expect(content.name).toBe('cccollab maintainer')
@@ -100,9 +106,11 @@ describe('saveLocationAuth', () => {
   it('creates the file when it does not yet exist', () => {
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(false)
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
       refreshToken: 'b',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(true)
   })
@@ -123,9 +131,11 @@ describe('saveLocationAuth', () => {
     utimesSync(lockPath, ancient, ancient)
 
     saveLocationAuth('flatout', {
+      authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'after-stale',
       refreshToken: 'r',
+      accessTokenExpiresAt: 1_700_000_000_000,
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
     expect(content.locations.flatout.accessToken).toBe('after-stale')
@@ -148,9 +158,11 @@ describe('saveLocationAuth', () => {
     const start = Date.now()
     expect(() =>
       saveLocationAuth('flatout', {
+        authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'should-not-write',
         refreshToken: 'r',
+        accessTokenExpiresAt: 1_700_000_000_000,
       }),
     ).toThrow(/timed out/)
     const elapsed = Date.now() - start
@@ -184,9 +196,11 @@ describe('saveLocationAuth', () => {
 
     expect(() =>
       saveLocationAuth('flatout', {
+        authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'new-token',
         refreshToken: 'new-refresh',
+        accessTokenExpiresAt: 1_700_000_000_000,
       }),
     ).toThrow(/not valid JSON|failed to parse/i)
 
@@ -251,33 +265,6 @@ describe('saveLocationAuth with authType=clerk', () => {
     expect(onDisk?.userEmail).toBe('test@example.com')
     expect(onDisk?.userId).toBe('u-999')
     expect(onDisk?.url).toBe('https://x.convex.cloud')
-  })
-
-  it('preserves convex-google semantics when authType is absent', () => {
-    saveLocationAuth('kai', {
-      url: 'https://y.convex.cloud',
-      accessToken: 'convex-tok',
-      refreshToken: 'convex-rt',
-    })
-    const onDisk = loadPersistedLocationAuth('kai')
-    expect(onDisk).not.toBeNull()
-    // authType absent for legacy convex-google saves.
-    expect(onDisk?.authType).toBeUndefined()
-    expect(onDisk?.accessToken).toBe('convex-tok')
-    expect(onDisk?.refreshToken).toBe('convex-rt')
-    // Clerk-only fields absent.
-    expect(onDisk?.accessTokenExpiresAt).toBeUndefined()
-  })
-
-  it('does NOT persist accessTokenExpiresAt for convex-google saves', () => {
-    saveLocationAuth('kai', {
-      accessToken: 'a',
-      refreshToken: 'b',
-    })
-    const raw = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')) as Record<string, unknown>
-    const loc = (raw.locations as Record<string, unknown>)['kai'] as Record<string, unknown>
-    expect(loc['authType']).toBeUndefined()
-    expect(loc['accessTokenExpiresAt']).toBeUndefined()
   })
 
   it('round-trip via schema parse is valid for clerk auth', () => {

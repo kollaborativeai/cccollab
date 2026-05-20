@@ -405,16 +405,28 @@ describe('Dual transport: list_sessions merging', () => {
   })
 })
 
-// `runAuthenticate` is mocked so the "force: true" path exercises the
-// wiring without running the real OAuth flow. The mock is hoisted to
+// `runClerkPkce` is mocked so the "force: true" path exercises the
+// wiring without running the real PKCE flow. The mock is hoisted to
 // the top of the module by vitest; `identity.ts` imports the mocked
 // symbol transparently.
-vi.mock('../src/remote/auth.js', () => ({
-  runAuthenticate: vi.fn(async () => ({
-    locationName: 'remote',
-    url: 'https://example.convex.cloud',
+vi.mock('../src/remote/auth-clerk.js', () => ({
+  runClerkPkce: vi.fn(async () => ({
+    accessToken: 'jwt',
+    refreshToken: 'refresh',
+    accessTokenExpiresAt: Date.now() + 3_600_000,
   })),
+  CLERK_CONVEX_AUDIENCE: 'convex',
 }))
+
+// `saveLocationAuth` writes to ~/.cccollab/config.json on the real disk.
+// Mock it so the authenticate-tool tests don't touch the user's home dir.
+vi.mock('../src/config/save.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/config/save.js')>('../src/config/save.js')
+  return {
+    ...actual,
+    saveLocationAuth: vi.fn(() => {}),
+  }
+})
 
 // The hot-attach path re-resolves the config (via resolveConfig). Mock
 // it so we can surface exactly the shape the test wants without
@@ -463,6 +475,10 @@ function makeDepsWithLocations(
     name: l.name,
     isLocal: l.isLocal,
     url: l.url,
+    // Non-local locations need a Clerk app pointer for handleAuthenticate
+    // to dispatch to the Clerk flow. Inject defaults so per-test fixtures
+    // stay terse.
+    ...(l.isLocal ? {} : { authType: 'clerk' as const, clerkIssuer: 'iss', clerkClientId: 'cid' }),
     channels: l.channels ?? [],
   }))
   return {
@@ -506,18 +522,21 @@ async function mockFreshResolve(
   active: { activeLocation?: string; activeChannel?: { name: string; location: string } } = {},
 ): Promise<void> {
   const resolved = await import('../src/config/resolve.js')
+  const enriched = locations.map((l) =>
+    l.isLocal ? l : { authType: 'clerk' as const, clerkIssuer: 'iss', clerkClientId: 'cid', ...l },
+  )
   ;(resolved.resolveConfig as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
     config: { locations: {} },
     active,
     projectFilePath: null,
-    locations,
+    locations: enriched,
   }))
 }
 
 describe('authenticate tool', () => {
   beforeEach(async () => {
-    const { runAuthenticate } = await import('../src/remote/auth.js')
-    ;(runAuthenticate as unknown as ReturnType<typeof vi.fn>).mockClear()
+    const { runClerkPkce } = await import('../src/remote/auth-clerk.js')
+    ;(runClerkPkce as unknown as ReturnType<typeof vi.fn>).mockClear()
     // Reset resolveConfig mock to its default "nothing configured" value.
     const resolved = await import('../src/config/resolve.js')
     ;(resolved.resolveConfig as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
@@ -549,8 +568,8 @@ describe('authenticate tool', () => {
     const result = await handleIdentityTool('authenticate', {}, deps)
     expect(result).toContain('Already authenticated')
     expect(result).toContain('force')
-    const { runAuthenticate } = await import('../src/remote/auth.js')
-    expect(runAuthenticate).not.toHaveBeenCalled()
+    const { runClerkPkce } = await import('../src/remote/auth-clerk.js')
+    expect(runClerkPkce).not.toHaveBeenCalled()
   })
 
   it('hot-attaches a new remote transport after force: true, replacing the old one', async () => {
@@ -588,10 +607,12 @@ describe('authenticate tool', () => {
     ])
 
     const result = await handleIdentityTool('authenticate', { force: true }, deps)
-    const { runAuthenticate } = await import('../src/remote/auth.js')
-    expect(runAuthenticate).toHaveBeenCalledWith({
-      locationName: 'remote',
-      url: 'https://example.convex.cloud',
+    const { runClerkPkce } = await import('../src/remote/auth-clerk.js')
+    expect(runClerkPkce).toHaveBeenCalledWith({
+      issuer: 'iss',
+      clientId: 'cid',
+      redirectPort: undefined,
+      resource: 'convex',
     })
     expect(result).toContain('Signed in')
     expect(result).toContain('is now active')
