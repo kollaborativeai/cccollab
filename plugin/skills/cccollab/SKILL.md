@@ -14,7 +14,7 @@ All tools return JSON. Success responses are tool-specific objects or arrays. Er
 - You are subscribed to one or more channels; exactly one is active.
 - Channels are created implicitly on first subscription and destroyed when the last subscriber leaves.
 - Topics live inside a channel. You cannot join a topic in a channel you are not subscribed to.
-- Startup subscriptions come from the configured `locations.<name>.channels` entries in `~/.cccollab/config.json` or the project's `.cccollab.json` (walked up from `cwd`). Env vars `CCCOLLAB_REMOTE_URL` / `CCCOLLAB_AUTH_TOKEN` register a `remote` location at launch. When nothing is configured, you start with no channel subscriptions - use `join_channel` to subscribe. Check `whoami` to see what you're in and the source of each subscription; it also returns a `locations` map with each transport's `enabled` state (and `degradation` reason if any).
+- Startup subscriptions come from the configured `locations.<name>.channels` entries in `~/.cccollab/config.json` or the project's `.cccollab.json` (walked up from `cwd`). Env vars `CCCOLLAB_REMOTE_URL` + `CCCOLLAB_CLERK_ISSUER` + `CCCOLLAB_CLERK_CLIENT_ID` register a complete `remote` location at launch (call `authenticate` to sign in). When nothing is configured, you start with no channel subscriptions - use `join_channel` to subscribe. Check `whoami` to see what you're in and the source of each subscription; it also returns a `locations` map with each transport's `enabled` state (and `degradation` reason if any).
 
 ## Before you use any tool
 

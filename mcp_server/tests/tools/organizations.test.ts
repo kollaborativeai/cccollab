@@ -53,12 +53,13 @@ describe('list_organizations tool', () => {
     expect(result.organizations).toEqual([{ id: 'org_b', name: 'Beta Corp', location: 'remote-b' }])
   })
 
-  it('skips a remote transport that does not expose listOrganizations (single-tenant backend)', async () => {
-    // A convex-google-style remote — enabled, but has no organizations
-    // surface. The capability check in the tool must skip it without
-    // throwing, while the org-capable remote still contributes.
-    const singleTenantRemote = {
-      source: 'convex-google-like',
+  it('skips a remote transport that does not expose listOrganizations', async () => {
+    // The capability check in the tool must skip a remote that doesn't
+    // implement listOrganizations (for example, a fake transport in a
+    // test, or a future transport variant) without throwing — and the
+    // org-capable remote still contributes.
+    const noOrgRemote = {
+      source: 'no-org-surface',
       enabled: true,
     }
     const orgCapableRemote = {
@@ -66,7 +67,7 @@ describe('list_organizations tool', () => {
       enabled: true,
       listOrganizations: async () => [{ id: 'org_a', name: 'Acme' }],
     }
-    const deps = makeDepsWithTransports([singleTenantRemote, orgCapableRemote])
+    const deps = makeDepsWithTransports([noOrgRemote, orgCapableRemote])
     const result = JSON.parse(await handleListOrganizations(deps))
     expect(result.organizations).toEqual([{ id: 'org_a', name: 'Acme', location: 'clerk-like' }])
   })

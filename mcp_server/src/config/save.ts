@@ -13,33 +13,21 @@ import { dirname } from 'node:path'
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
 import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
-export interface ConvexGoogleLocationAuth {
-  /** Optional for back-compat: existing call sites omit this field and the
-   *  legacy convex-google path is assumed. */
-  authType?: 'convex-google'
-  url?: string
-  accessToken: string
-  refreshToken: string
-  userEmail?: string
-  userId?: string
-  updatedAt?: number
-}
-
 export interface ClerkLocationAuth {
   authType: 'clerk'
   url?: string
   accessToken: string
   refreshToken: string
-  /** Unix epoch milliseconds at which the access token expires. Required for
-   *  the Clerk flow so the refresh path can determine token liveness without
-   *  an introspection round-trip. */
+  /** Unix epoch milliseconds at which the access token expires. Required so
+   *  the refresh path can determine token liveness without an introspection
+   *  round-trip. */
   accessTokenExpiresAt: number
   userEmail?: string
   userId?: string
   updatedAt?: number
 }
 
-export type LocationAuth = ConvexGoogleLocationAuth | ClerkLocationAuth
+export type LocationAuth = ClerkLocationAuth
 
 /**
  * Cross-process lock around the read-modify-write of the user-level
@@ -213,14 +201,10 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
   next.locations[locationName] = {
     ...prior,
     ...(auth.url !== undefined ? { url: auth.url } : {}),
-    // Only write `authType` for clerk. For convex-google we leave it absent so
-    // legacy configs that pre-date the discriminated union continue to round-trip
-    // cleanly through the schema's optional back-compat branch.
-    ...(auth.authType === 'clerk' ? { authType: 'clerk' as const } : {}),
+    authType: 'clerk' as const,
     accessToken: auth.accessToken,
     refreshToken: auth.refreshToken,
-    // `accessTokenExpiresAt` is a Clerk-only credential field.
-    ...(auth.authType === 'clerk' ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}),
+    accessTokenExpiresAt: auth.accessTokenExpiresAt,
     ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
     ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
     updatedAt: auth.updatedAt ?? Date.now(),
@@ -281,7 +265,7 @@ export async function withConfigLock<T>(
  */
 export function loadPersistedLocationAuth(locationName: string): {
   url?: string
-  authType?: 'clerk' | 'convex-google'
+  authType?: 'clerk'
   accessToken?: string
   refreshToken?: string
   accessTokenExpiresAt?: number
@@ -307,11 +291,9 @@ export function loadPersistedLocationAuth(locationName: string): {
     authType: loc.authType,
     accessToken: loc.accessToken,
     refreshToken: loc.refreshToken,
-    // The `in` guards are required because `loc` is now a discriminated union
-    // and the clerk-only fields are not present on the convex-google branch.
-    accessTokenExpiresAt: 'accessTokenExpiresAt' in loc ? loc.accessTokenExpiresAt : undefined,
-    clerkIssuer: 'clerkIssuer' in loc ? loc.clerkIssuer : undefined,
-    clerkClientId: 'clerkClientId' in loc ? loc.clerkClientId : undefined,
+    accessTokenExpiresAt: loc.accessTokenExpiresAt,
+    clerkIssuer: loc.clerkIssuer,
+    clerkClientId: loc.clerkClientId,
     userEmail: loc.userEmail,
     userId: loc.userId,
   }

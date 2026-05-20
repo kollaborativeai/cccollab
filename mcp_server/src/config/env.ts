@@ -24,13 +24,14 @@ import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from
  *     it's the label used by the env var, not a reserved key (the only
  *     reserved name is `local`).
  *
- *   CCCOLLAB_AUTH_TOKEN
- *     Assign this value as `accessToken` on the active non-local
- *     location. Precedence: the env-registered `remote` from
- *     CCCOLLAB_REMOTE_URL wins; otherwise the first existing non-local
- *     location whose `active: true` flag is set. If no target exists,
- *     this is a no-op (an `active`-cascade error later in the pipeline
- *     will surface any misconfiguration).
+ *   CCCOLLAB_CLERK_ISSUER
+ *   CCCOLLAB_CLERK_CLIENT_ID
+ *     The Clerk app pointer. Set together with CCCOLLAB_REMOTE_URL so a
+ *     one-line `export …` flow yields a complete, working remote
+ *     location without an on-disk config. Applied to the same target
+ *     CCCOLLAB_AUTH_TOKEN historically picked: the env-registered
+ *     `remote` from CCCOLLAB_REMOTE_URL wins, else the first existing
+ *     non-local active location, else a no-op.
  */
 const REMOTE_ENV_LOCATION = 'remote'
 
@@ -46,7 +47,8 @@ export function applyEnvOverrides(config: UserCccollabConfig, env: NodeJS.Proces
   if (envObjective !== undefined) next.objective = envObjective.trim()
 
   const envUrl = stringOrUndefined(env.CCCOLLAB_REMOTE_URL)
-  const envToken = stringOrUndefined(env.CCCOLLAB_AUTH_TOKEN)
+  const envClerkIssuer = stringOrUndefined(env.CCCOLLAB_CLERK_ISSUER)
+  const envClerkClientId = stringOrUndefined(env.CCCOLLAB_CLERK_CLIENT_ID)
 
   if (envUrl !== undefined) {
     next.locations = next.locations ?? {}
@@ -70,10 +72,17 @@ export function applyEnvOverrides(config: UserCccollabConfig, env: NodeJS.Proces
     }
   }
 
-  if (envToken !== undefined) {
+  if (envClerkIssuer !== undefined || envClerkClientId !== undefined) {
     const target = pickAuthTarget(next)
     if (target !== null) {
-      target.accessToken = envToken
+      if (envClerkIssuer !== undefined) target.clerkIssuer = envClerkIssuer
+      if (envClerkClientId !== undefined) target.clerkClientId = envClerkClientId
+      // The Clerk auth flow needs an explicit authType marker only when
+      // saved tokens round-trip through `saveLocationAuth`; the
+      // env-override path doesn't write to disk so leaving `authType`
+      // implicit is fine. Still, set it for clarity in any downstream
+      // log/dump that prints the resolved config.
+      target.authType = 'clerk'
     }
   }
 

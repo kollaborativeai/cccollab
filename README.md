@@ -7,8 +7,9 @@ events via the Claude Code Channel protocol; no polling. Two modes:
 - **Local mode (default, always on)**: a per-machine in-process broker lets
   sessions on the same machine coordinate with zero configuration.
 - **Remote mode (opt-in, additive)**: sessions on different machines
-  coordinate through a shared Convex backend. Enabling remote mode does not
-  disable local mode - the two transports run side by side.
+  coordinate through KAI's Convex deployment (authenticated via Clerk).
+  Enabling remote mode does not disable local mode - the two transports run
+  side by side.
 
 ## Install
 
@@ -54,14 +55,13 @@ alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatou
 ## Repo layout
 
 This repo is a yarn 4 monorepo. Everything lands together under
-`@flatoutsolutions/cccollab` (the published npm package) and one shared Convex
-deployment.
+`@flatoutsolutions/cccollab` (the published npm package). The Convex backend
+lives in KAI's deployment — this repo does not own or host a backend.
 
 | Path          | What it holds                                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@flatoutsolutions/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
 | `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.         |
-| `convex/`     | The shared Convex backend: schema, queries, mutations, and auth. Both the local MCP server's remote transport and the future hosted HTTP MCP server call into it.         |
 
 See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
@@ -88,26 +88,37 @@ channel; `send_message_to_topic` in A arrives as a `<channel>` tag in B.
 
 ## Remote mode
 
-Remote mode adds a second transport that points at a Convex deployment.
+Remote mode adds a second transport that points at KAI's Convex deployment.
 When enabled, outbound operations fan out to both transports and inbound
 events from both feed the same Channel-protocol stream. A channel at the
 reserved `local` location is always distinct from a channel at a named
 remote location - same channel name, different scope.
 
-Two ways to enable it:
+Clerk is the auth provider. Every non-local location must declare its Clerk
+app pointer: `clerkIssuer` and `clerkClientId`. See
+[`docs/architecture/clerk-auth-setup.md`](docs/architecture/clerk-auth-setup.md)
+for how to obtain those values from your Clerk instance.
 
-**1. Environment variables (one-liner):**
+### How a location is resolved (precedence)
 
-```bash
-export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
-```
+Per-invocation, in order from highest to lowest precedence:
 
-This registers a location named `remote` with that URL. Start Claude Code,
-then call the `authenticate` tool. A browser opens for Google OAuth. After
-sign-in the tokens are persisted in `~/.cccollab/config.json` and the remote
-transport hot-attaches to the running session - no restart needed.
+1. **Env vars** — `CCCOLLAB_REMOTE_URL`, `CCCOLLAB_CLERK_ISSUER`,
+   `CCCOLLAB_CLERK_CLIENT_ID`. Applied **after** the file merge so they
+   always win. Useful for one-off shells, CI, or temporarily pointing at
+   a different deployment without editing files.
+2. **User-level file** — `~/.cccollab/config.json`. The only file
+   `authenticate` writes tokens to (mode `0600`).
+3. **Project-level file** — `.cccollab.json`, walked up from `cwd`. Meant
+   to be committed; credential fields are stripped at load time.
 
-**2. Config file (multiple locations):**
+Pick whichever fits — they compose. A common pattern: commit
+`clerkIssuer` and `clerkClientId` in a project-level `.cccollab.json` so
+every clone gets the team's Clerk app, then each developer's
+`~/.cccollab/config.json` holds the per-user tokens that `authenticate`
+writes.
+
+### Option 1 — `~/.cccollab/config.json`
 
 Add a location to `~/.cccollab/config.json`:
 
@@ -115,13 +126,23 @@ Add a location to `~/.cccollab/config.json`:
 {
   "locations": {
     "flatout": {
-      "url": "https://<your-deployment>.convex.cloud"
+      "url": "https://<your-deployment>.convex.cloud",
+      "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
+      "clerkClientId": "cccollab-cli"
     }
   }
 }
 ```
 
-Then call `authenticate({ location: "flatout" })` in Claude Code.
+Then call `authenticate({ location: "flatout" })` in Claude Code. A browser
+opens for Clerk sign-in (PKCE). After sign-in the tokens are persisted
+back to the same file under `locations.flatout` and the remote transport
+hot-attaches to the running session - no restart needed.
+
+`authType: "clerk"` is also accepted (and is what `authenticate` writes
+alongside the tokens) — it's a no-op marker today because Clerk is the
+only auth flow, but it reserves the discriminator slot for future
+providers.
 
 Channels configured under a remote location auto-subscribe on startup:
 
@@ -130,6 +151,8 @@ Channels configured under a remote location auto-subscribe on startup:
   "locations": {
     "flatout": {
       "url": "https://<your-deployment>.convex.cloud",
+      "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
+      "clerkClientId": "cccollab-cli",
       "channels": {
         "cccollab": {
           "topics": {
@@ -141,6 +164,27 @@ Channels configured under a remote location auto-subscribe on startup:
   }
 }
 ```
+
+### Option 2 — env-var one-liner
+
+For an on-disk-free setup, export all three values and skip the config
+file:
+
+```bash
+export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
+export CCCOLLAB_CLERK_ISSUER="https://<your-instance>.clerk.accounts.dev"
+export CCCOLLAB_CLERK_CLIENT_ID="cccollab-cli"
+```
+
+This registers a location named `remote` with the full Clerk app pointer
+attached. Run `authenticate` from Claude Code to complete sign-in — the
+tokens get persisted back to `~/.cccollab/config.json` so subsequent
+sessions can drop the env vars.
+
+If both env vars **and** a `~/.cccollab/config.json` (or
+`.cccollab.json`) location are present, the env vars win. Either Clerk
+env var also works on its own as a partial override of a file-defined
+location's app pointer.
 
 For the full schema (including project-level `.cccollab.json`, active-state
 cascade, env var overrides, and reserved keys), see
@@ -191,12 +235,14 @@ by profile.
 ```text
 introduce                 - set your role name and optional objective
 whoami                    - show your identity and per-location transport status
-authenticate              - sign in to a remote location (Google OAuth, hot-attach)
+authenticate              - sign in to a remote location (Clerk auth, hot-attach)
+list_organizations        - organizations you belong to on each remote location
 list_channels             - channels across every enabled transport
 join_channel              - subscribe to a channel at a location
 leave_channel             - unsubscribe
 set_active_channel        - switch which channel is "active"
 send_message_to_channel   - top-level broadcast to a channel
+read_channel_messages     - paginate a channel's broadcast history
 list_topics               - topics across subscribed channels (optional location filter)
 start_topic               - create a topic in a channel
 join_topic                - join a topic by name (fuzzy) or id
@@ -205,8 +251,10 @@ set_active_topic          - switch which topic is "active"
 archive_topic             - mark a topic done (reversible)
 unarchive_topic           - restore an archived topic
 send_message_to_topic     - send a message to a topic
+read_topic_messages       - paginate a topic's message history
 list_sessions             - show other sessions (unions across every transport)
 send_message_to_session   - private DM to a session by name
+read_dm_thread            - paginate the DM thread with a peer session
 ```
 
 Messages from other sessions arrive as `<channel>` tags via push.
@@ -253,19 +301,14 @@ yarn typecheck     # tsc --noEmit across workspaces
 yarn lint          # eslint across the repo
 yarn build         # compile mcp_server to dist/
 yarn format:check  # prettier check
-npx convex dev     # local Convex dev (against your personal deployment)
 ```
 
 ## Releasing
 
-Releases are fully automatic. Every push to `main` runs the CI workflow,
-which path-filters changes:
-
-- Changes under `convex/` trigger a `convex deploy` against the
-  production Convex deployment.
-- Changes under `mcp_server/` or `plugin/` trigger a version bump and
-  an `npm publish` to GitHub Packages, gated so the Convex deploy must
-  succeed first if both paths changed in the same push.
+Releases are fully automatic. Every push to `main` runs the CI workflow.
+Changes under `mcp_server/` or `plugin/` trigger a version bump and an
+`npm publish` to GitHub Packages. The Convex backend is deployed from KAI's
+repository, not this one.
 
 Use [conventional commit](https://www.conventionalcommits.org/) prefixes
 (`feat:`, `fix:`, `docs:`, etc.) so the version bump is correct. Do not edit

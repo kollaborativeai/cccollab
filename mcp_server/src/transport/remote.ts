@@ -82,119 +82,111 @@ export type Refs = {
 }
 
 /**
- * Build function-reference paths for the remote deployment.
+ * Build function-reference paths for KAI's deployment.
  *
- * cccollab-google deployments expose upstream paths
- * (api.sessions.mutations.introduce, etc.). KAI's Phase 1 port namespaced
- * everything under `cccollab/*` and flattened the queries/mutations
- * directory split, so the same callable lives at
- * api.cccollab.sessions.introduce. We keep the {mutations, queries}
- * segments on the internal type for code-organization clarity; clerk
- * authType just populates both segments from the flat `cccollab.X` path.
+ * KAI namespaces every callable under `cccollab/*` and flattens the
+ * queries/mutations directory split, so each operation lives at
+ * `api.cccollab.<area>.<op>`. We keep the {mutations, queries} segments
+ * on the internal type for code-organization clarity even though both
+ * draw from the same flat path.
  */
-export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
-  if (authType === 'clerk') {
-    const c = (
-      anyApi as unknown as {
-        cccollab: {
-          sessions: {
-            introduce: FunctionReference<'query' | 'mutation' | 'action'>
-            updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
-            remove: FunctionReference<'query' | 'mutation' | 'action'>
-            whoami: FunctionReference<'query' | 'mutation' | 'action'>
-            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
-            getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
-          }
-          channels: {
-            join: FunctionReference<'query' | 'mutation' | 'action'>
-            leave: FunctionReference<'query' | 'mutation' | 'action'>
-            listAll: FunctionReference<'query' | 'mutation' | 'action'>
-            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
-          }
-          topics: {
-            start: FunctionReference<'query' | 'mutation' | 'action'>
-            join: FunctionReference<'query' | 'mutation' | 'action'>
-            leave: FunctionReference<'query' | 'mutation' | 'action'>
-            archive: FunctionReference<'query' | 'mutation' | 'action'>
-            unarchive: FunctionReference<'query' | 'mutation' | 'action'>
-            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
-            getById: FunctionReference<'query' | 'mutation' | 'action'>
-            listJoinedForSession: FunctionReference<'query' | 'mutation' | 'action'>
-          }
-          messages: {
-            sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
-            sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
-            sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
-            ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
-            listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
-            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
-            listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
-            readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
-            readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
-            readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
-          }
-          organizations: {
-            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
-          }
+export function makeRefs(): Refs {
+  const c = (
+    anyApi as unknown as {
+      cccollab: {
+        sessions: {
+          introduce: FunctionReference<'query' | 'mutation' | 'action'>
+          updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
+          remove: FunctionReference<'query' | 'mutation' | 'action'>
+          whoami: FunctionReference<'query' | 'mutation' | 'action'>
+          listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
+        }
+        channels: {
+          join: FunctionReference<'query' | 'mutation' | 'action'>
+          leave: FunctionReference<'query' | 'mutation' | 'action'>
+          listAll: FunctionReference<'query' | 'mutation' | 'action'>
+          listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+        }
+        topics: {
+          start: FunctionReference<'query' | 'mutation' | 'action'>
+          join: FunctionReference<'query' | 'mutation' | 'action'>
+          leave: FunctionReference<'query' | 'mutation' | 'action'>
+          archive: FunctionReference<'query' | 'mutation' | 'action'>
+          unarchive: FunctionReference<'query' | 'mutation' | 'action'>
+          listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          getById: FunctionReference<'query' | 'mutation' | 'action'>
+          listJoinedForSession: FunctionReference<'query' | 'mutation' | 'action'>
+        }
+        messages: {
+          sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
+          sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
+          ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
+          listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+          readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+          readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+          readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
+        }
+        organizations: {
+          listForUser: FunctionReference<'query' | 'mutation' | 'action'>
         }
       }
-    ).cccollab
-    return {
-      sessions: {
-        mutations: {
-          introduce: c.sessions.introduce,
-          updateLastSeen: c.sessions.updateLastSeen,
-          remove: c.sessions.remove,
-        },
-        queries: {
-          whoami: c.sessions.whoami,
-          listByChannel: c.sessions.listByChannel,
-          getSessionContext: c.sessions.getSessionContext,
-        },
-      },
-      channels: {
-        mutations: { join: c.channels.join, leave: c.channels.leave },
-        queries: { listAll: c.channels.listAll, listForUser: c.channels.listForUser },
-      },
-      topics: {
-        mutations: {
-          start: c.topics.start,
-          join: c.topics.join,
-          leave: c.topics.leave,
-          archive: c.topics.archive,
-          unarchive: c.topics.unarchive,
-        },
-        queries: {
-          listByChannel: c.topics.listByChannel,
-          getById: c.topics.getById,
-          listJoinedForUser: c.topics.listJoinedForSession,
-        },
-      },
-      messages: {
-        mutations: {
-          sendToChannel: c.messages.sendToChannel,
-          sendToTopic: c.messages.sendToTopic,
-          sendToSession: c.messages.sendToSession,
-          ackChannel: c.messages.ackChannel,
-        },
-        queries: {
-          listByTopic: c.messages.listByTopic,
-          listByChannel: c.messages.listByChannel,
-          listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
-          readChannelHistory: c.messages.readChannelHistory,
-          readTopicHistory: c.messages.readTopicHistory,
-          readDmThread: c.messages.readDmThread,
-        },
-      },
-      organizations: {
-        queries: { listForUser: c.organizations.listForUser },
-      },
     }
+  ).cccollab
+  return {
+    sessions: {
+      mutations: {
+        introduce: c.sessions.introduce,
+        updateLastSeen: c.sessions.updateLastSeen,
+        remove: c.sessions.remove,
+      },
+      queries: {
+        whoami: c.sessions.whoami,
+        listByChannel: c.sessions.listByChannel,
+        getSessionContext: c.sessions.getSessionContext,
+      },
+    },
+    channels: {
+      mutations: { join: c.channels.join, leave: c.channels.leave },
+      queries: { listAll: c.channels.listAll, listForUser: c.channels.listForUser },
+    },
+    topics: {
+      mutations: {
+        start: c.topics.start,
+        join: c.topics.join,
+        leave: c.topics.leave,
+        archive: c.topics.archive,
+        unarchive: c.topics.unarchive,
+      },
+      queries: {
+        listByChannel: c.topics.listByChannel,
+        getById: c.topics.getById,
+        listJoinedForUser: c.topics.listJoinedForSession,
+      },
+    },
+    messages: {
+      mutations: {
+        sendToChannel: c.messages.sendToChannel,
+        sendToTopic: c.messages.sendToTopic,
+        sendToSession: c.messages.sendToSession,
+        ackChannel: c.messages.ackChannel,
+      },
+      queries: {
+        listByTopic: c.messages.listByTopic,
+        listByChannel: c.messages.listByChannel,
+        listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
+        readChannelHistory: c.messages.readChannelHistory,
+        readTopicHistory: c.messages.readTopicHistory,
+        readDmThread: c.messages.readDmThread,
+      },
+    },
+    organizations: {
+      queries: { listForUser: c.organizations.listForUser },
+    },
   }
-  // convex-google: existing upstream paths (api.X.mutations.Y / api.X.queries.Y)
-  // anyApi is a recursive Proxy; every leaf is a FunctionReference-shaped
-  // proxy that satisfies FunctionReference<'query' | 'mutation' | 'action'> at runtime.
-  return anyApi as unknown as Refs
 }
 
 function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): FunctionReference<K> {
@@ -269,11 +261,6 @@ export class RemoteTransport implements Transport {
 
   private readonly client: ConvexClient
   private readonly refs: Refs
-  /** True when the remote deployment is the org-scoped KAI backend (`clerk`
-   *  auth). Its read queries require a `sessionId` to resolve the
-   *  organization; the single-tenant `convex-google` backend does not and
-   *  rejects the extra argument. */
-  private readonly orgScoped: boolean
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
@@ -316,27 +303,20 @@ export class RemoteTransport implements Transport {
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
 
-  constructor(opts: {
-    client: ConvexClient
-    source?: string
-    log?: (m: string) => void
-    authType?: 'clerk' | 'convex-google'
-  }) {
+  constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
-    this.refs = makeRefs(opts.authType ?? 'convex-google')
-    this.orgScoped = (opts.authType ?? 'convex-google') === 'clerk'
+    this.refs = makeRefs()
     this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.${this.source}] ${m}\n`))
   }
 
   /**
-   * Merges this session's `sessionId` into a read query's argument object
-   * when the remote deployment is org-scoped (KAI/clerk). A no-op for the
-   * single-tenant `convex-google` backend (whose queries reject the extra
-   * argument), and when no session has been introduced yet.
+   * Merges this session's `sessionId` into a read query's argument object.
+   * KAI's queries require the sessionId to resolve the caller's
+   * organization. A no-op when no session has been introduced yet.
    */
   private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
-    if (this.orgScoped && this.sessionId !== null) {
+    if (this.sessionId !== null) {
       return { ...args, sessionId: this.sessionId }
     }
     return args
@@ -486,17 +466,11 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Lists the authenticated user's organizations on this remote deployment.
+   * Lists the authenticated user's organizations on KAI's deployment.
    * Backs the `list_organizations` tool.
-   *
-   * Only org-scoped (clerk) deployments expose `organizations.listForUser`.
-   * The single-tenant `convex-google` backend has no organizations and would
-   * resolve the call through `anyApi` to a non-existent path; the resulting
-   * `FunctionNotFoundError` would trip `registerFailure` and disable the
-   * whole transport. Short-circuit instead.
    */
   async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
-    if (!this.enabled || !this.orgScoped) return []
+    if (!this.enabled) return []
     try {
       return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string

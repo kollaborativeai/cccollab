@@ -1,14 +1,15 @@
-# Two MCP servers, one repository
+# Two MCP servers, two repositories
 
-This repository is on a path to host **two separate MCP servers** with
-non-overlapping audiences. They must never be conflated - not in code, not in
+This project uses **two separate MCP servers** with non-overlapping audiences:
+the local stdio server lives in this repository, and the hosted HTTP MCP server
+lives in KAI's repository. They must never be conflated - not in code, not in
 docs, not in conversation. Each has a different transport, a different runtime
 location, and a different audience.
 
-| Name                       | Transport                            | Runs where                                                        | Audience                                                          | Status                                                            |
-| -------------------------- | ------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **Local MCP server**       | stdio (Claude Code Channel protocol) | Developer's machine, spawned by Claude Code                       | Developers using Claude Code                                      | Implemented. Lives in `mcp_server/`.                              |
-| **Hosted HTTP MCP server** | HTTP (Streamable HTTP MCP)           | Inside the Convex deployment, via `convex/http.ts` + HTTP actions | Non-technical users on external LLMs - Claude.ai, ChatGPT, Gemini | Future work (out of scope for CCC-3). Will live inside `convex/`. |
+| Name                       | Transport                            | Runs where                                       | Audience                                                          | Status                                                           |
+| -------------------------- | ------------------------------------ | ------------------------------------------------ | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **Local MCP server**       | stdio (Claude Code Channel protocol) | Developer's machine, spawned by Claude Code      | Developers using Claude Code                                      | Implemented. Lives in `mcp_server/`.                             |
+| **Hosted HTTP MCP server** | HTTP (Streamable HTTP MCP)           | Inside KAI's Convex deployment, via HTTP actions | Non-technical users on external LLMs - Claude.ai, ChatGPT, Gemini | Future work (out of scope for CCC-3). Lives in KAI's repository. |
 
 ## Why there are two and why they stay separate
 
@@ -21,8 +22,8 @@ not appropriate for a general-purpose HTTP MCP server.
 
 The **backend** can and should be shared: both the local stdio server's remote
 transport (see `mcp_server/src/transport/remote.ts`) and the future HTTP MCP
-server will call the same Convex queries and mutations. Shared backend, two
-clients.
+server will call the same Convex queries and mutations in KAI's deployment.
+Shared backend, two clients.
 
 ## Where each server's code lives
 
@@ -53,12 +54,12 @@ Runtime:
 - Claude Code starts it via stdio: `cccollab` binary.
 - It always starts a local broker (unchanged behaviour).
 - When `~/.cccollab/config.json` declares a non-local location under
-  `locations` (a Convex deployment URL plus persisted OAuth tokens), the
+  `locations` (a Convex deployment URL plus persisted Clerk tokens), the
   server **also** attaches a remote transport to that deployment. Operations
   routed to that location flow over the remote transport; operations routed
   to the reserved `local` location stay on the in-process broker.
   Fan-out and merging happen per-call based on the location the tool names.
-- The `authenticate` tool performs Google OAuth and hot-attaches the remote
+- The `authenticate` tool performs Clerk-based auth and hot-attaches the remote
   transport to the running session (no restart). On a `force: true` re-auth
   the old transport is torn down (DM unsubscribe fired, `shutdown()` called,
   ConvexClient websocket closed) before the new one is swapped in.
@@ -66,26 +67,12 @@ Runtime:
 
 ### Hosted HTTP MCP server (future - NOT in this story)
 
-Will live alongside the Convex backend, in `convex/`:
-
-```
-convex/
-├── http.ts                         # HTTP router, already a Convex primitive
-├── mcp/                            # FUTURE - HTTP MCP server code
-│   ├── listTools.ts
-│   ├── callTool.ts
-│   └── server.ts
-├── channels/                       # Data layer shared by both servers
-├── topics/
-├── messages/
-└── ... (shared schemas, queries, mutations)
-```
-
-Runtime:
+Will live in KAI's repository alongside the shared Convex backend. Runtime:
 
 - External LLM (Claude.ai, ChatGPT, Gemini) hits
   `https://<deployment>.convex.site/mcp` over Streamable HTTP MCP.
-- Auth via Google OAuth (same allow-list used for the local server).
+- Auth via Clerk (same deployment used for the local server's remote
+  transport).
 - No Channel protocol, no stdio, no UI affordances. Standard MCP tools only.
 
 ## Rules that flow from this architecture
@@ -95,7 +82,7 @@ Runtime:
 The words "MCP server" in this repo are ambiguous. Always disambiguate:
 
 - "the local stdio MCP server" or "`mcp_server/`"
-- "the hosted HTTP MCP server" or "`convex/mcp`" (once it exists)
+- "the hosted HTTP MCP server" (lives in KAI's repository)
 
 When writing a file under `mcp_server/`, never refer to "the MCP server" to
 mean the hosted HTTP one, and vice versa. Comments should say "the local
@@ -141,7 +128,7 @@ keeps working.
 
 ### 4. Where a new Convex function goes
 
-A new Convex query or mutation **always** goes in `convex/`, never in
+A new Convex query or mutation **always** goes in KAI's repository, never in
 `mcp_server/`. Both MCP servers share the same backend. If the change is
 client-only (e.g. fan-out logic, merge logic, auth token refresh), it goes in
 `mcp_server/src/transport/remote.ts` or a sibling under `mcp_server/src/`.
@@ -151,10 +138,10 @@ client-only (e.g. fan-out logic, merge logic, auth token refresh), it goes in
 Tools are defined once per server, not once per repo:
 
 - Local-stdio-specific tools live under `mcp_server/src/tools/`.
-- HTTP-MCP-specific tools will live under `convex/mcp/` when that server
+- HTTP-MCP-specific tools will live in KAI's repository when that server
   exists.
-- Shared semantic operations (send a message, start a topic) become Convex
-  functions under `convex/`, and both servers call them.
+- Shared semantic operations (send a message, start a topic) are Convex
+  functions in KAI's deployment, and both servers call them.
 
 If a tool is obviously shared (e.g. `send_message_to_topic`), its
 implementation is a Convex mutation and both MCP servers expose the same tool
