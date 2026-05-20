@@ -9,37 +9,192 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
 } from './index.js'
 
 /**
- * Runtime-typed references to the Convex backend's mutations and
- * queries. The local stdio MCP server lives outside the Convex
- * deployment's own `_generated` tree (it ships in an npm package), so we
- * can't import those types directly; `anyApi` is the idiomatic way to
- * call into a user-supplied deployment from library code. The cast
- * through `unknown` is required because `AnyApi`'s shape is much wider
- * than what we're selecting here.
+ * Shape of function-reference paths for the remote deployment.
+ * The {mutations, queries} segments are retained for code-organization
+ * clarity; clerk authType populates both from the flat api.cccollab.X
+ * path.
  */
-const REF = anyApi as unknown as {
+export type Refs = {
   sessions: {
-    mutations: { introduce: unknown; updateLastSeen: unknown; remove: unknown }
-    queries: { whoami: unknown; listByChannel: unknown }
+    mutations: {
+      introduce: FunctionReference<'query' | 'mutation' | 'action'>
+      updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
+      remove: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      whoami: FunctionReference<'query' | 'mutation' | 'action'>
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   channels: {
-    mutations: { join: unknown; leave: unknown }
-    queries: { listAll: unknown; listForUser: unknown }
+    mutations: {
+      join: FunctionReference<'query' | 'mutation' | 'action'>
+      leave: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listAll: FunctionReference<'query' | 'mutation' | 'action'>
+      listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   topics: {
-    mutations: { start: unknown; join: unknown; leave: unknown; archive: unknown; unarchive: unknown }
-    queries: { listByChannel: unknown; getById: unknown; listJoinedForUser: unknown }
+    mutations: {
+      start: FunctionReference<'query' | 'mutation' | 'action'>
+      join: FunctionReference<'query' | 'mutation' | 'action'>
+      leave: FunctionReference<'query' | 'mutation' | 'action'>
+      archive: FunctionReference<'query' | 'mutation' | 'action'>
+      unarchive: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      getById: FunctionReference<'query' | 'mutation' | 'action'>
+      listJoinedForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   messages: {
-    mutations: { sendToChannel: unknown; sendToTopic: unknown; sendToSession: unknown; ackChannel: unknown }
-    queries: { listByTopic: unknown; listByChannel: unknown; listDirectMessagesForSession: unknown }
+    mutations: {
+      sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
+      sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
+      ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+      readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
+  organizations: {
+    queries: {
+      listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+  }
+}
+
+/**
+ * Build function-reference paths for the remote deployment.
+ *
+ * cccollab-google deployments expose upstream paths
+ * (api.sessions.mutations.introduce, etc.). KAI's Phase 1 port namespaced
+ * everything under `cccollab/*` and flattened the queries/mutations
+ * directory split, so the same callable lives at
+ * api.cccollab.sessions.introduce. We keep the {mutations, queries}
+ * segments on the internal type for code-organization clarity; clerk
+ * authType just populates both segments from the flat `cccollab.X` path.
+ */
+export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
+  if (authType === 'clerk') {
+    const c = (
+      anyApi as unknown as {
+        cccollab: {
+          sessions: {
+            introduce: FunctionReference<'query' | 'mutation' | 'action'>
+            updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
+            remove: FunctionReference<'query' | 'mutation' | 'action'>
+            whoami: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            getSessionContext: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          channels: {
+            join: FunctionReference<'query' | 'mutation' | 'action'>
+            leave: FunctionReference<'query' | 'mutation' | 'action'>
+            listAll: FunctionReference<'query' | 'mutation' | 'action'>
+            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          topics: {
+            start: FunctionReference<'query' | 'mutation' | 'action'>
+            join: FunctionReference<'query' | 'mutation' | 'action'>
+            leave: FunctionReference<'query' | 'mutation' | 'action'>
+            archive: FunctionReference<'query' | 'mutation' | 'action'>
+            unarchive: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            getById: FunctionReference<'query' | 'mutation' | 'action'>
+            listJoinedForSession: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          messages: {
+            sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
+            sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
+            ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+            readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          organizations: {
+            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+        }
+      }
+    ).cccollab
+    return {
+      sessions: {
+        mutations: {
+          introduce: c.sessions.introduce,
+          updateLastSeen: c.sessions.updateLastSeen,
+          remove: c.sessions.remove,
+        },
+        queries: {
+          whoami: c.sessions.whoami,
+          listByChannel: c.sessions.listByChannel,
+          getSessionContext: c.sessions.getSessionContext,
+        },
+      },
+      channels: {
+        mutations: { join: c.channels.join, leave: c.channels.leave },
+        queries: { listAll: c.channels.listAll, listForUser: c.channels.listForUser },
+      },
+      topics: {
+        mutations: {
+          start: c.topics.start,
+          join: c.topics.join,
+          leave: c.topics.leave,
+          archive: c.topics.archive,
+          unarchive: c.topics.unarchive,
+        },
+        queries: {
+          listByChannel: c.topics.listByChannel,
+          getById: c.topics.getById,
+          listJoinedForUser: c.topics.listJoinedForSession,
+        },
+      },
+      messages: {
+        mutations: {
+          sendToChannel: c.messages.sendToChannel,
+          sendToTopic: c.messages.sendToTopic,
+          sendToSession: c.messages.sendToSession,
+          ackChannel: c.messages.ackChannel,
+        },
+        queries: {
+          listByTopic: c.messages.listByTopic,
+          listByChannel: c.messages.listByChannel,
+          listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
+          readChannelHistory: c.messages.readChannelHistory,
+          readTopicHistory: c.messages.readTopicHistory,
+          readDmThread: c.messages.readDmThread,
+        },
+      },
+      organizations: {
+        queries: { listForUser: c.organizations.listForUser },
+      },
+    }
+  }
+  // convex-google: existing upstream paths (api.X.mutations.Y / api.X.queries.Y)
+  // anyApi is a recursive Proxy; every leaf is a FunctionReference-shaped
+  // proxy that satisfies FunctionReference<'query' | 'mutation' | 'action'> at runtime.
+  return anyApi as unknown as Refs
 }
 
 function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): FunctionReference<K> {
@@ -113,6 +268,12 @@ export class RemoteTransport implements Transport {
   enabled = true
 
   private readonly client: ConvexClient
+  private readonly refs: Refs
+  /** True when the remote deployment is the org-scoped KAI backend (`clerk`
+   *  auth). Its read queries require a `sessionId` to resolve the
+   *  organization; the single-tenant `convex-google` backend does not and
+   *  rejects the extra argument. */
+  private readonly orgScoped: boolean
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
@@ -155,10 +316,30 @@ export class RemoteTransport implements Transport {
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
 
-  constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
+  constructor(opts: {
+    client: ConvexClient
+    source?: string
+    log?: (m: string) => void
+    authType?: 'clerk' | 'convex-google'
+  }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
+    this.refs = makeRefs(opts.authType ?? 'convex-google')
+    this.orgScoped = (opts.authType ?? 'convex-google') === 'clerk'
     this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.${this.source}] ${m}\n`))
+  }
+
+  /**
+   * Merges this session's `sessionId` into a read query's argument object
+   * when the remote deployment is org-scoped (KAI/clerk). A no-op for the
+   * single-tenant `convex-google` backend (whose queries reject the extra
+   * argument), and when no session has been introduced yet.
+   */
+  private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
+    if (this.orgScoped && this.sessionId !== null) {
+      return { ...args, sessionId: this.sessionId }
+    }
+    return args
   }
 
   /** Human-readable reason the transport self-disabled, or null. */
@@ -206,25 +387,29 @@ export class RemoteTransport implements Transport {
    * counts this against the failure window — a transient blip at startup
    * is a failure just like one mid-session.
    */
-  async introduce(args: { sessionName: string; objective?: string }): Promise<void> {
+  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
     try {
-      const id = (await this.client.mutation(fn<'mutation'>(REF.sessions.mutations.introduce), {
+      const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
         sessionName: args.sessionName,
         objective: args.objective,
+        organizationId: args.organizationId,
       })) as string
       this.sessionId = id
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
-        const topics = (await this.client.query(fn<'query'>(REF.topics.queries.listJoinedForUser), {})) as Array<{
+        const topics = (await this.client.query(
+          fn<'query'>(this.refs.topics.queries.listJoinedForUser),
+          this.orgScopedArgs({}),
+        )) as Array<{
           _id: string
         }>
         for (const t of topics) this.knownTopicIds.add(t._id)
       } catch {
-        // Best-effort hydration; failure is non-fatal.
+        /* best-effort preload */
       }
     } catch (err) {
       this.registerFailure('introduce', err)
@@ -237,12 +422,20 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.channels.mutations.join), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
         channel: args.channel,
-      })) as { channelId?: string }
+      })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
+        // Seed the per-channel cursor with the channel's ts at join time so
+        // `subscribeChannelMessages` starts the reactive feed past existing
+        // history instead of replaying it as fresh inbound notifications.
+        // Monotonic non-decreasing: a later rejoin can't regress it.
+        if (typeof res.latestTs === 'number') {
+          const prior = this.channelMaxTs.get(res.channelId) ?? 0
+          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
+        }
       }
       return { subscriberCount: 0 }
     } catch (err) {
@@ -255,7 +448,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.channels.mutations.leave), {
+      await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.leave), {
         sessionId: this.sessionId,
         channel: args.channel,
       })
@@ -268,14 +461,72 @@ export class RemoteTransport implements Transport {
     void args
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{
         name: string
         subscriberCount: number
+        presentSessionCount?: number
+        messageCount?: number
       }>
-      return rows.map((r) => ({ name: r.name, subscriberCount: r.subscriberCount }))
+      return rows.map((r) => ({
+        name: r.name,
+        subscriberCount: r.subscriberCount,
+        // The backend's `listAll` reports `presentSessionCount` — the count of
+        // sessions joined to the channel, as distinct from the user-level
+        // `subscriberCount`. Surface it as `sessionCount`.
+        sessionCount: r.presentSessionCount,
+        messageCount: r.messageCount,
+      }))
     } catch (err) {
       this.registerFailure('listChannels', err)
       return []
+    }
+  }
+
+  /**
+   * Lists the authenticated user's organizations on this remote deployment.
+   * Backs the `list_organizations` tool.
+   *
+   * Only org-scoped (clerk) deployments expose `organizations.listForUser`.
+   * The single-tenant `convex-google` backend has no organizations and would
+   * resolve the call through `anyApi` to a non-existent path; the resulting
+   * `FunctionNotFoundError` would trip `registerFailure` and disable the
+   * whole transport. Short-circuit instead.
+   */
+  async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+    if (!this.enabled || !this.orgScoped) return []
+    try {
+      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+        id: string
+        name: string
+      }>
+    } catch (err) {
+      this.registerFailure('listOrganizations', err)
+      return []
+    }
+  }
+
+  /**
+   * Returns the name of the organization this transport's session is bound
+   * to, or null when no session has been introduced or the lookup fails.
+   * Backs the `organization` field of `whoami`.
+   *
+   * Errors are intentionally swallowed without `registerFailure` — this
+   * method backs an informational status surface (`whoami`) that is polled
+   * frequently and should never cause the remote transport's circuit
+   * breaker to trip on a transient query hiccup.
+   */
+  async getBoundOrganizationName(): Promise<string | null> {
+    if (!this.enabled || !this.sessionId) return null
+    try {
+      const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
+        sessionId: this.sessionId,
+      })) as { organizationName: string }
+      return ctx.organizationName
+    } catch {
+      return null
     }
   }
 
@@ -283,7 +534,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToChannel), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToChannel), {
         sessionId: this.sessionId,
         channel: args.channel,
         text: args.text,
@@ -300,7 +551,7 @@ export class RemoteTransport implements Transport {
       throw new Error('Remote transport not ready; cannot create topic.')
     }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.topics.mutations.start), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.start), {
         sessionId: this.sessionId,
         channel: args.channel,
         topic: args.topic,
@@ -337,15 +588,17 @@ export class RemoteTransport implements Transport {
     // this is fine; if no channel is supplied we return empty.
     if (!args.channel) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.topics.queries.listByChannel), {
-        channel: args.channel,
-        includeArchived: args.includeArchived,
-      })) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.topics.queries.listByChannel),
+        this.orgScopedArgs({ channel: args.channel, includeArchived: args.includeArchived }),
+      )) as Array<{
         topicId: string
         name: string
         state: string
         creatorSessionId: string
         createdAt: number
+        messageCount?: number
+        joined?: boolean
       }>
       for (const r of rows) this.knownTopicIds.add(r.topicId)
       return rows.map((r) => ({
@@ -355,7 +608,11 @@ export class RemoteTransport implements Transport {
         creator: r.creatorSessionId,
         state: r.state,
         createdAt: new Date(r.createdAt).toISOString(),
-        messageCount: undefined,
+        messageCount: r.messageCount,
+        // The org-scoped backend reports whether this session has joined the
+        // topic. Pass it through so `list_topics` reflects the real backend
+        // membership rather than only the MCP server's in-memory context.
+        joined: r.joined,
       }))
     } catch (err) {
       this.registerFailure('listTopics', err)
@@ -368,9 +625,10 @@ export class RemoteTransport implements Transport {
     if (!this.enabled) return null
     if (BROKER_UUID_PATTERN.test(args.topicId)) return null
     try {
-      const doc = (await this.client.query(fn<'query'>(REF.topics.queries.getById), {
-        topicId: args.topicId,
-      })) as {
+      const doc = (await this.client.query(
+        fn<'query'>(this.refs.topics.queries.getById),
+        this.orgScopedArgs({ topicId: args.topicId }),
+      )) as {
         _id: string
         topic: string
         channelId: string
@@ -383,7 +641,10 @@ export class RemoteTransport implements Transport {
       // user-facing channel string it expects. listAll is short in
       // practice; a future iteration could add a cheaper name-only
       // query.
-      const channels = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+      const channels = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{
         channelId: string
         name: string
       }>
@@ -418,14 +679,15 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return { history: [] }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.topics.mutations.join), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.join), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })) as { topicId: string; channelId: string; name: string }
       this.knownTopicIds.add(res.topicId)
-      const rows = (await this.client.query(fn<'query'>(REF.messages.queries.listByTopic), {
-        topicId: args.topicId,
-      })) as Array<{ fromSessionId: string; text: string; ts: number }>
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.listByTopic),
+        this.orgScopedArgs({ topicId: args.topicId }),
+      )) as Array<{ fromSessionId: string; text: string; ts: number }>
       return {
         history: rows.map((r) => ({
           sender: r.fromSessionId,
@@ -443,7 +705,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.leave), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.leave), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -456,7 +718,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.archive), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.archive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -469,7 +731,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.unarchive), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.unarchive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -486,7 +748,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToTopic), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToTopic), {
         sessionId: this.sessionId,
         topicId: args.topicId,
         text: args.text,
@@ -500,9 +762,10 @@ export class RemoteTransport implements Transport {
   async listSessions(args: { channel?: string }): Promise<TransportSession[]> {
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.sessions.queries.listByChannel), {
-        channel: args.channel,
-      })) as Array<{
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.sessions.queries.listByChannel),
+        this.orgScopedArgs({ channel: args.channel }),
+      )) as Array<{
         _id: string
         sessionName: string
         objective?: string
@@ -532,7 +795,7 @@ export class RemoteTransport implements Transport {
     void args.fromSessionName
     if (!this.enabled || this.sessionId === null) return {}
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToSession), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToSession), {
         sessionId: this.sessionId,
         toSessionName: args.toSessionName,
         text: args.text,
@@ -548,12 +811,109 @@ export class RemoteTransport implements Transport {
     }
   }
 
+  // ─── Message history ──────────────────────────────────────────────────
+
+  private static toHistoryPage(raw: {
+    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+    hasMore: boolean
+  }): TransportHistoryPage {
+    return {
+      messages: raw.messages.map((m) => ({
+        sender: m.fromSessionId,
+        senderSessionName: m.senderSessionName,
+        text: m.text,
+        ts: m.ts,
+      })),
+      hasMore: raw.hasMore,
+      oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
+    }
+  }
+
+  private async resolveChannelId(channelName: string): Promise<string | null> {
+    const cached = this.channelIdsByName.get(channelName)
+    if (cached !== undefined) return cached
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{ channelId: string; name: string }>
+      const match = rows.find((r) => r.name.toLowerCase() === channelName.toLowerCase())
+      if (match === undefined) return null
+      this.channelIdsByName.set(channelName, match.channelId)
+      return match.channelId
+    } catch (err) {
+      this.registerFailure('resolveChannelId', err)
+      return null
+    }
+  }
+
+  async readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    const channelId = await this.resolveChannelId(args.channel)
+    if (channelId === null) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readChannelHistory),
+        this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readChannelMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readTopicHistory),
+        this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readTopicMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readDmThread(args: {
+    peerSessionName: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readDmThread),
+        this.orgScopedArgs({
+          peerSessionName: args.peerSessionName,
+          limit: args.limit,
+          before: args.before,
+        }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readDmThread', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
   // ─── Lifecycle ────────────────────────────────────────────────────────
   async deregisterSession(args: { sessionName: string }): Promise<void> {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.sessions.mutations.remove), {
+      await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.remove), {
         sessionId: this.sessionId,
       })
     } catch {
@@ -577,7 +937,7 @@ export class RemoteTransport implements Transport {
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(REF.messages.queries.listDirectMessagesForSession),
+      fn<'query'>(this.refs.messages.queries.listDirectMessagesForSession),
       { sessionId: this.sessionId },
       (rows) => {
         const arr = rows as Array<{
@@ -622,16 +982,20 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    // Narrow the reactive window server-side with the inclusive `sinceTs`
-    // cursor (>= rather than >). The dedup happens client-side by `_id`
-    // since `ts` alone can collide at millisecond resolution.
+    // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
+    // cursor: the backend returns messages strictly after it. `topicMaxTs`
+    // is primed (via primeTopicCursor) to the last history ts already shown
+    // to the user on join, so that boundary message is not replayed. The
+    // `_id` dedup below still guards against the same row appearing in
+    // successive onUpdate batches within one subscription.
     const startingTs = this.topicMaxTs.get(args.topicId)
-    const queryArgs: { topicId: string; sinceTs?: number } =
+    const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
+    const queryArgs = this.orgScopedArgs(baseArgs)
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(REF.messages.queries.listByTopic),
+      fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
         const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
@@ -695,8 +1059,15 @@ export class RemoteTransport implements Transport {
       // don't want to hard-fail if the order is ever violated.
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
+      // Narrow the initial reactive batch past the channel's join-time
+      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
+      // this callback). An explicit `sinceTs` overrides the server-side
+      // read cursor, so a first-ever join — which has no cursor yet — does
+      // not replay the channel's whole broadcast history.
+      const startingTs = this.channelMaxTs.get(channelId)
+      if (startingTs !== undefined) queryArgs.sinceTs = startingTs
       innerUnsubscribe = this.client.onUpdate(
-        fn<'query'>(REF.messages.queries.listByChannel),
+        fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,
         (rows) => {
           const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
@@ -735,7 +1106,7 @@ export class RemoteTransport implements Transport {
           // on persistent failure, which is the right signal.
           if (highestTsInBatch > 0 && sessionId !== null) {
             void this.client
-              .mutation(fn<'mutation'>(REF.messages.mutations.ackChannel), {
+              .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
                 sessionId,
                 channelId,
                 ts: highestTsInBatch,
@@ -758,7 +1129,10 @@ export class RemoteTransport implements Transport {
     } else {
       void (async () => {
         try {
-          const rows = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+          const rows = (await this.client.query(
+            fn<'query'>(this.refs.channels.queries.listAll),
+            this.orgScopedArgs({}),
+          )) as Array<{
             channelId: string
             name: string
           }>

@@ -5,7 +5,89 @@ import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 
+// Mock runClerkPkce so tests for the Clerk branch don't open a browser
+// or start a loopback listener.
+vi.mock('../../src/remote/auth-clerk.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/remote/auth-clerk.js')>(
+    '../../src/remote/auth-clerk.js',
+  )
+  return {
+    ...actual,
+    runClerkPkce: vi.fn(async () => ({
+      accessToken: 'clerk-access-token',
+      refreshToken: 'clerk-refresh-token',
+      accessTokenExpiresAt: 9999999999000,
+    })),
+  }
+})
+
+// Mock saveLocationAuth so the Clerk branch can be tested without
+// touching ~/.cccollab/config.json or needing HOME redirection.
+vi.mock('../../src/config/save.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/config/save.js')>('../../src/config/save.js')
+  return {
+    ...actual,
+    saveLocationAuth: vi.fn(() => {}),
+  }
+})
+
 function createMockDeps(): IdentityToolDeps {
+  const transport = new LocalTransport(7850)
+  return {
+    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    context: new ActiveContext(),
+    router: new TransportRouter([transport]),
+  }
+}
+
+/**
+ * Builds deps whose router contains both the local transport and an enabled
+ * fake remote transport. The remote transport's `introduce` records every
+ * call it receives (and forwards them to `onIntroduce` when provided).
+ * Optional `remoteOverrides` can be used to add extra methods to the fake
+ * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ */
+function makeDepsWithRemote(
+  onIntroduce?: (args: Record<string, unknown>) => void,
+  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+): IdentityToolDeps {
+  const localTransport = new LocalTransport(7850)
+  const fakeRemote = {
+    source: 'remote' as const,
+    enabled: true,
+    introduce: vi.fn(async (args: Record<string, unknown>) => {
+      if (onIntroduce) onIntroduce(args)
+    }),
+    joinChannel: vi.fn(async () => {}),
+    deregisterSession: vi.fn(async () => {}),
+    leaveChannel: vi.fn(async () => {}),
+    listChannels: vi.fn(async () => []),
+    listTopics: vi.fn(async () => []),
+    createTopic: vi.fn(async () => ({ id: 'topic_1', topic: 'test', channel: 'default' })),
+    joinTopic: vi.fn(async () => ({ id: 'topic_1', topic: 'test', channel: 'default', history: [] })),
+    leaveTopic: vi.fn(async () => {}),
+    archiveTopic: vi.fn(async () => {}),
+    unarchiveTopic: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
+    sendMessage: vi.fn(async () => {}),
+    sendDirectMessage: vi.fn(async () => {}),
+    hasTopic: vi.fn(() => false),
+    ...remoteOverrides,
+  }
+  return {
+    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    context: new ActiveContext(),
+    router: new TransportRouter([
+      localTransport,
+      fakeRemote as unknown as import('../../src/transport/index.js').Transport,
+    ]),
+  }
+}
+
+/**
+ * Builds deps whose router contains only the local transport (no remote).
+ */
+function makeLocalOnlyDeps(): IdentityToolDeps {
   const transport = new LocalTransport(7850)
   return {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
@@ -112,7 +194,75 @@ describe('Identity Tools', () => {
         vi.stubGlobal('fetch', mockFetch)
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
-        expect(result.locations).toEqual({ local: { enabled: true } })
+        expect(result.locations).toEqual({ local: { enabled: true, organization: 'local' } })
+      })
+    })
+
+    describe('introduce — organization argument', () => {
+      beforeEach(() => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+      })
+
+      afterEach(() => {
+        vi.unstubAllGlobals()
+      })
+
+      it('rejects introduce without an organization when a remote transport is enabled', async () => {
+        const deps = makeDepsWithRemote() // router with an enabled remote transport
+        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
+        expect(result.error).toMatch(/organization/i)
+      })
+
+      it('forwards the organization to the remote transport introduce', async () => {
+        const introduceCalls: Array<Record<string, unknown>> = []
+        const deps = makeDepsWithRemote((args) => introduceCalls.push(args))
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        expect(introduceCalls.some((c) => c.organizationId === 'org_a')).toBe(true)
+      })
+
+      it('allows introduce without an organization when only the local transport is present', async () => {
+        const deps = makeLocalOnlyDeps()
+        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
+        expect(result.name).toBe('reviewer')
+      })
+    })
+
+    describe('whoami — organization', () => {
+      beforeEach(() => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+      })
+
+      afterEach(() => {
+        vi.unstubAllGlobals()
+      })
+
+      it('reports "local" for the local location', async () => {
+        const deps = makeLocalOnlyDeps()
+        await handleIdentityTool('introduce', { name: 'reviewer' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local.organization).toBe('local')
+      })
+
+      it('reports the bound organization name for a remote location', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganizationName: async () => 'Acme',
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme')
+      })
+
+      it('omits organization when the remote location has no bound org yet', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganizationName: async () => null,
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote).toBeDefined()
+        expect(result.locations.remote.organization).toBeUndefined()
+        expect('organization' in result.locations.remote).toBe(false)
       })
     })
 
@@ -191,6 +341,70 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
         expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
+      })
+
+      it('authenticate dispatches to runClerkPkce when location.authType === "clerk"', async () => {
+        const { runClerkPkce } = await import('../../src/remote/auth-clerk.js')
+        const { saveLocationAuth } = await import('../../src/config/save.js')
+        ;(runClerkPkce as ReturnType<typeof vi.fn>).mockClear()
+        ;(saveLocationAuth as ReturnType<typeof vi.fn>).mockClear()
+
+        const clerkDeps: IdentityToolDeps = {
+          ...deps,
+          locations: [
+            {
+              name: 'kai',
+              isLocal: false,
+              url: 'https://kai.convex.cloud',
+              authType: 'clerk',
+              clerkIssuer: 'https://x.clerk.accounts.dev',
+              clerkClientId: 'cccollab-cli',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
+
+        // runClerkPkce must have been called with the correct issuer + clientId + resource
+        expect(runClerkPkce).toHaveBeenCalledWith({
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          redirectPort: undefined,
+          resource: 'convex',
+        })
+
+        // saveLocationAuth must persist the clerk tokens
+        expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
+          authType: 'clerk',
+          url: 'https://kai.convex.cloud',
+          accessToken: 'clerk-access-token',
+          refreshToken: 'clerk-refresh-token',
+          accessTokenExpiresAt: 9999999999000,
+        })
+
+        // The response should reference the location name (hot-attach
+        // falls back gracefully without a messageBus in deps)
+        expect(result).toContain('kai')
+      })
+
+      it('authenticate errors clearly when clerk location is missing clerkIssuer or clerkClientId', async () => {
+        const clerkDeps: IdentityToolDeps = {
+          ...deps,
+          locations: [
+            {
+              name: 'kai',
+              isLocal: false,
+              url: 'https://kai.convex.cloud',
+              authType: 'clerk',
+              // clerkIssuer intentionally omitted
+              clerkClientId: 'cccollab-cli',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
+        expect(result).toContain('clerkIssuer')
+        expect(result).toContain('clerkClientId')
       })
     })
   })

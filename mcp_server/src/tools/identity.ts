@@ -5,6 +5,8 @@ import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runAuthenticate } from '../remote/auth.js'
+import { CLERK_CONVEX_AUDIENCE, runClerkPkce } from '../remote/auth-clerk.js'
+import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -63,7 +65,23 @@ export async function handleIdentityTool(
 ): Promise<string> {
   switch (name) {
     case 'introduce': {
-      const { name: displayName, objective } = args as { name: string; objective?: string }
+      const {
+        name: displayName,
+        objective,
+        organization,
+      } = args as {
+        name: string
+        objective?: string
+        organization?: string
+      }
+
+      const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
+      if (hasRemote && !organization) {
+        return JSON.stringify({
+          error: 'An organization is required. Call list_organizations and pass an id as `organization`.',
+        })
+      }
+
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
 
@@ -73,7 +91,7 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective })
+          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.
@@ -148,7 +166,7 @@ export async function handleIdentityTool(
       // Expose every transport's runtime state so the user sees
       // degradation on any location (not just "the first non-local")
       // without having to chase it through a silent stall.
-      const locationStates = buildLocationStates(deps.router)
+      const locationStates = await buildLocationStates(deps.router)
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -197,18 +215,35 @@ function hasDirectMessageSubscription(
  * `degradation` is only set on transports that expose it (the remote
  * transport carries it for auth / function-not-found / repeated-failure
  * cases). The local transport has no degradation surface.
+ *
+ * `organization` is `"local"` for the local broker, the bound
+ * organization name for a remote transport (via `getBoundOrganizationName`),
+ * or omitted when a remote transport has no session yet.
  */
-function buildLocationStates(router: TransportRouter): Record<string, { enabled: boolean; degradation?: string }> {
-  const out: Record<string, { enabled: boolean; degradation?: string }> = {}
-  for (const transport of router.all()) {
-    const maybeDegraded = transport as Partial<RemoteTransport>
-    const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
-    out[transport.source] = {
-      enabled: transport.enabled,
-      ...(degradation ? { degradation } : {}),
-    }
-  }
-  return out
+async function buildLocationStates(
+  router: TransportRouter,
+): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+  const entries = await Promise.all(
+    router.all().map(async (transport) => {
+      const maybeDegraded = transport as Partial<RemoteTransport>
+      const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+
+      let organization: string | undefined
+      if (transport.source === LOCAL_LOCATION) {
+        organization = 'local'
+      } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
+        organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
+      }
+
+      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+        enabled: transport.enabled,
+        ...(degradation ? { degradation } : {}),
+        ...(organization ? { organization } : {}),
+      }
+      return [transport.source, state] as const
+    }),
+  )
+  return Object.fromEntries(entries)
 }
 
 async function handleAuthenticate(
@@ -262,7 +297,27 @@ async function handleAuthenticate(
 
   let authResult: { locationName: string; url: string; userEmail?: string }
   try {
-    authResult = await runAuthenticate({ locationName: targetName, url })
+    if (locationInfo?.authType === 'clerk') {
+      if (!locationInfo.clerkIssuer || !locationInfo.clerkClientId) {
+        return `Location "${targetName}" has authType='clerk' but is missing clerkIssuer or clerkClientId. Add them under \`locations.${targetName}\` in ~/.cccollab/config.json or .cccollab.json.`
+      }
+      const tokens = await runClerkPkce({
+        issuer: locationInfo.clerkIssuer,
+        clientId: locationInfo.clerkClientId,
+        redirectPort: locationInfo.clerkRedirectPort,
+        resource: CLERK_CONVEX_AUDIENCE,
+      })
+      saveLocationAuth(targetName, {
+        authType: 'clerk',
+        url,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      })
+      authResult = { locationName: targetName, url }
+    } else {
+      authResult = await runAuthenticate({ locationName: targetName, url })
+    }
   } catch (err) {
     return `Authentication failed: ${err instanceof Error ? err.message : String(err)}`
   }

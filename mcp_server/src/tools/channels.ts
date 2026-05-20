@@ -56,6 +56,41 @@ export async function handleChannelTool(
     }
     case 'send_message_to_channel':
       return handleSendMessageToChannel(deps, args as { text?: string; channel?: string; location?: ChannelLocation })
+    case 'read_channel_messages': {
+      const { channel, location, limit, before } = args as {
+        channel?: string
+        location?: ChannelLocation
+        limit?: number
+        before?: number
+      }
+      let targetName: string | undefined = channel ? normalizeChannelName(channel) : undefined
+      let targetLocation: ChannelLocation | undefined = location
+      if (!targetName) {
+        const active = deps.context.getActiveChannelRef()
+        if (active) {
+          targetName = active.name
+          targetLocation = active.location
+        }
+      }
+      if (!targetName) {
+        return JSON.stringify({
+          error: 'No active channel. Pass a `channel`, or join one with join_channel.',
+        })
+      }
+      targetLocation = targetLocation ?? deps.context.getChannelLocation(targetName) ?? 'local'
+      let transport
+      try {
+        transport = deps.router.get(targetLocation)
+      } catch (err) {
+        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+      }
+      const page = await transport.readChannelMessages({
+        channel: targetName,
+        limit,
+        before,
+      })
+      return JSON.stringify(page)
+    }
     default:
       throw new Error(`Unknown channel tool: ${name}`)
   }
@@ -65,7 +100,12 @@ interface ChannelRow {
   name: string
   location: ChannelLocation
   source: ChannelSource | null
+  /** Distinct users subscribed to the channel. */
   subscriberCount: number
+  /** Sessions joined to the channel (>= `subscriberCount`; one user may have
+   *  several sessions). Undefined when the transport cannot report it. */
+  sessionCount?: number
+  messageCount?: number
   subscribed: boolean
   isActive: boolean
 }
@@ -81,7 +121,12 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
   const channels: ChannelRow[] = []
 
   for (const transport of transports) {
-    let rows: Array<{ name: string; subscriberCount: number }> = []
+    let rows: Array<{
+      name: string
+      subscriberCount: number
+      sessionCount?: number
+      messageCount?: number
+    }> = []
     try {
       rows = await transport.listChannels({})
     } catch {
@@ -97,6 +142,8 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
         location: transport.source,
         source: sub ? sub.source : null,
         subscriberCount: c.subscriberCount,
+        sessionCount: c.sessionCount,
+        messageCount: c.messageCount,
         subscribed: sub !== undefined,
         isActive: active?.name === c.name && active?.location === transport.source,
       })
@@ -114,7 +161,11 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
       name: sub.name,
       location: sub.location,
       source: sub.source,
+      // Transport didn't report this channel, but the caller is subscribed —
+      // so at minimum this session, and its owner, are in it.
       subscriberCount: 1,
+      sessionCount: 1,
+      messageCount: undefined,
       subscribed: true,
       isActive: active?.name === sub.name && active?.location === sub.location,
     })

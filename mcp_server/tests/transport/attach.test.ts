@@ -10,6 +10,7 @@ import type { ParsedMessage } from '../../src/types.js'
 import {
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
@@ -107,6 +108,24 @@ class FakeRemoteTransport implements Transport {
   listSessions = vi.fn(async (): Promise<TransportSession[]> => [])
   sendDirectMessage = vi.fn(async () => ({}))
   deregisterSession = vi.fn(async () => {})
+  readChannelMessages = vi.fn(
+    async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
+  readTopicMessages = vi.fn(
+    async (_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
+  readDmThread = vi.fn(
+    async (_args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
+      messages: [],
+      hasMore: false,
+    }),
+  )
 
   constructor(source: string) {
     this.source = source

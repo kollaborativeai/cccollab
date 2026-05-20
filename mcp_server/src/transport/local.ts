@@ -4,6 +4,7 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
@@ -32,7 +33,8 @@ export class LocalTransport implements Transport {
   }
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  async introduce(args: { sessionName: string; objective?: string }): Promise<void> {
+  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+    // The local broker is single-tenant; organizationId is intentionally ignored.
     await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
   }
 
@@ -164,6 +166,29 @@ export class LocalTransport implements Transport {
     }
     const body = (await res.json()) as { viaChannel?: string }
     return { viaChannel: body.viaChannel }
+  }
+
+  // ─── Message history ──────────────────────────────────────────────────
+  // The local broker does not expose a paged read-history API; these
+  // return empty pages so the interface contract is satisfied.
+  async readChannelMessages(_args: {
+    channel: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
+    return { messages: [], hasMore: false }
+  }
+
+  async readTopicMessages(_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    return { messages: [], hasMore: false }
+  }
+
+  async readDmThread(_args: {
+    peerSessionName: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
+    return { messages: [], hasMore: false }
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────

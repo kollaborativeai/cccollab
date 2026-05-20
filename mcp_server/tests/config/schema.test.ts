@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { CccollabConfigSchema } from '../../src/config/schema.js'
+import { describe, it, expect, test } from 'vitest'
+import { CccollabConfigSchema, LocationConfigSchema } from '../../src/config/schema.js'
 
 describe('CccollabConfigSchema', () => {
   it('accepts an empty object', () => {
@@ -86,5 +86,87 @@ describe('CccollabConfigSchema', () => {
       locations: { local: { channels: { dev: { topics: { planning: {} } } } } },
     })
     expect(parsed.locations?.local?.channels?.dev?.topics?.planning).toEqual({})
+  })
+})
+
+describe('LocationConfigSchema discriminated union', () => {
+  test('accepts clerk location with required clerk fields', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('rejects clerk location missing clerkIssuer', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkClientId: 'cccollab-cli',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('accepts legacy convex-google location with no authType field', () => {
+    const result = LocationConfigSchema.safeParse({
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  test('accepts convex-google location with explicit authType', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'convex-google',
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects clerk location missing clerkClientId', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects clerk location with unknown extra field (.strict)', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      randomUnknownField: 'should-be-rejected',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('accepts clerk location with clerkRedirectPort', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      clerkRedirectPort: 54321,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects clerk location with non-integer clerkRedirectPort', () => {
+    const result = LocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cccollab-cli',
+      clerkRedirectPort: 54321.5,
+    })
+    expect(result.success).toBe(false)
   })
 })

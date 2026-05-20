@@ -152,6 +152,72 @@ describe('Topic Tools', () => {
       })
     })
 
+    it('list_topics prefers the backend joined flag over stale local context', async () => {
+      // The backend reports per-session topic membership. When it does, it
+      // wins over the MCP server's in-memory context — which goes stale if
+      // the session is removed from a topic elsewhere (e.g. the web hub).
+      const stubTransport = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [
+          // Backend says joined; context does NOT have it joined.
+          {
+            id: 'uuid-backend-joined',
+            topic: 'backend joined',
+            channel: 'default',
+            creator: 'architect',
+            state: 'active',
+            createdAt: '2026-01-01T00:00:00Z',
+            joined: true,
+          },
+          // Backend says left; context still has it joined (stale).
+          {
+            id: 'uuid-backend-left',
+            topic: 'backend left',
+            channel: 'default',
+            creator: 'architect',
+            state: 'active',
+            createdAt: '2026-01-01T00:00:00Z',
+            joined: false,
+          },
+        ],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'manual', 'remote')
+      context.joinTopic('uuid-backend-left', 'backend left', 'default', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('list_topics', {}, stubDeps))
+      expect(result.find((t: { id: string }) => t.id === 'uuid-backend-joined').isJoined).toBe(true)
+      expect(result.find((t: { id: string }) => t.id === 'uuid-backend-left').isJoined).toBe(false)
+    })
+
     it('start_topic creates in active channel when none specified', async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
@@ -426,6 +492,53 @@ describe('Topic Tools', () => {
       })
     })
 
+    it('list_sessions keeps remote sessions even though the transport reports no channels', async () => {
+      // The remote backend's listSessions is already scoped server-side
+      // to shared-channel peers but cannot denormalize which channels,
+      // so it returns `channels: []`. The no-channel filter must not
+      // drop those sessions.
+      const remoteTransport = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [
+          { name: 'reviewer', objective: 'Review', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
+        ],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const remoteDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([remoteTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, remoteDeps))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ name: 'reviewer', objective: 'Review', channels: [] })
+    })
+
     it('send_message_to_session posts to /direct-message', async () => {
       const mockFetch = vi
         .fn()
@@ -455,6 +568,141 @@ describe('Topic Tools', () => {
 
     it('throws on unknown tool', async () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
+    })
+
+    it('read_topic_messages returns paged topic history from the transport', async () => {
+      const page = {
+        messages: [{ sender: 'peer', senderSessionName: 'peer', text: 'topic msg', ts: 1_767_312_000_000 }],
+        hasMore: false,
+        oldestTs: 1_767_312_000_000,
+      }
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: (id: string) => id === 'uuid-hist',
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: vi.fn().mockResolvedValue(page),
+        readDmThread: async () => ({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'local')
+      context.joinTopic('uuid-hist', 'History topic', 'default', 'local')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, stubDeps))
+      expect(result.messages[0].text).toBe('topic msg')
+      expect(result.hasMore).toBe(false)
+    })
+
+    it('read_dm_thread returns paged DM history from the transport', async () => {
+      const page = {
+        messages: [{ sender: 'bob', senderSessionName: 'bob', text: 'dm msg', ts: 1_767_398_400_000 }],
+        hasMore: false,
+        oldestTs: 1_767_398_400_000,
+      }
+      const stubTransport = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: vi.fn().mockResolvedValue(page),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
+      expect(result.messages[0].text).toBe('dm msg')
+      expect(result.hasMore).toBe(false)
+    })
+
+    it('read_dm_thread falls back to the local transport when no remote is enabled', async () => {
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        sendDirectMessage: async () => ({}),
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+        readDmThread: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
+      }
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'local')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
+      expect(result.error).toBeUndefined()
+      expect(result.hasMore).toBe(false)
+      expect(result.messages).toEqual([])
     })
   })
 })

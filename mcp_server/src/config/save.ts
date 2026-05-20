@@ -11,9 +11,12 @@ import {
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
-import { CccollabConfigSchema, type LocationConfig } from './schema.js'
+import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
-export interface LocationAuth {
+export interface ConvexGoogleLocationAuth {
+  /** Optional for back-compat: existing call sites omit this field and the
+   *  legacy convex-google path is assumed. */
+  authType?: 'convex-google'
   url?: string
   accessToken: string
   refreshToken: string
@@ -21,6 +24,22 @@ export interface LocationAuth {
   userId?: string
   updatedAt?: number
 }
+
+export interface ClerkLocationAuth {
+  authType: 'clerk'
+  url?: string
+  accessToken: string
+  refreshToken: string
+  /** Unix epoch milliseconds at which the access token expires. Required for
+   *  the Clerk flow so the refresh path can determine token liveness without
+   *  an introspection round-trip. */
+  accessTokenExpiresAt: number
+  userEmail?: string
+  userId?: string
+  updatedAt?: number
+}
+
+export type LocationAuth = ConvexGoogleLocationAuth | ClerkLocationAuth
 
 /**
  * Cross-process lock around the read-modify-write of the user-level
@@ -51,6 +70,19 @@ export interface LocationAuth {
 const LOCK_TIMEOUT_MS = 5_000
 const STALE_LOCK_MS = 30_000
 const LOCK_POLL_MS = 50
+
+/** Backing buffer for `Atomics.wait` — the standard Node.js mechanism for
+ *  a sync sleep without burning CPU. Allocated once at module scope so the
+ *  acquireLock retry loop doesn't churn a fresh SharedArrayBuffer per
+ *  iteration. The integer value is never read or written; only the
+ *  blocking semantics of `Atomics.wait(buf, 0, 0, ms)` — which sleeps for
+ *  up to `ms` ms and returns 'timed-out' since no one ever calls
+ *  Atomics.notify — are used. */
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4))
+
+function syncSleep(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms)
+}
 
 function lockFilePath(): string {
   return `${CCCOLLAB_CONFIG_FILE}.lock`
@@ -116,13 +148,12 @@ function acquireLock(): void {
           { cause: err },
         )
       }
-      // Busy-wait briefly. saveLocationAuth itself is sync, so we can't
-      // await a setTimeout — burn the cycles. The poll interval keeps
-      // the spin cheap.
-      const until = Date.now() + LOCK_POLL_MS
-      while (Date.now() < until) {
-        /* spin */
-      }
+      // Sleep briefly before retrying. `saveLocationAuth` is synchronous,
+      // so we can't await `setTimeout`; `Atomics.wait` is the standard
+      // Node sync-sleep primitive that does not burn CPU. Under
+      // contention by multiple MCP processes this keeps the waiter at
+      // ~0% CPU instead of pegging a core.
+      syncSleep(LOCK_POLL_MS)
     }
   }
 }
@@ -178,12 +209,18 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
   const existing = readExisting()
   const next = existing
   next.locations = next.locations ?? {}
-  const prior = (next.locations[locationName] as LocationConfig | undefined) ?? {}
+  const prior = (next.locations[locationName] as UserLocationConfig | undefined) ?? {}
   next.locations[locationName] = {
     ...prior,
     ...(auth.url !== undefined ? { url: auth.url } : {}),
+    // Only write `authType` for clerk. For convex-google we leave it absent so
+    // legacy configs that pre-date the discriminated union continue to round-trip
+    // cleanly through the schema's optional back-compat branch.
+    ...(auth.authType === 'clerk' ? { authType: 'clerk' as const } : {}),
     accessToken: auth.accessToken,
     refreshToken: auth.refreshToken,
+    // `accessTokenExpiresAt` is a Clerk-only credential field.
+    ...(auth.authType === 'clerk' ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}),
     ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
     ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
     updatedAt: auth.updatedAt ?? Date.now(),
@@ -234,17 +271,47 @@ export async function withConfigLock<T>(
  * is absent / unreadable / has no entry for this location. Does NOT
  * acquire the lock; callers that need a coherent read+write should
  * call this from within `withConfigLock`.
+ *
+ * Returns `authType` so the refresh path can decide which flow to use,
+ * and `accessTokenExpiresAt` so it can determine whether the access token is
+ * still live. Also surfaces `clerkIssuer` / `clerkClientId` if present on
+ * disk — in normal operation these fields come from the resolved (merged)
+ * project config, not from this file; they appear here only for
+ * user-hand-edited configs and as a forward-compatibility hook.
  */
-export function loadPersistedLocationAuth(
-  locationName: string,
-): { url?: string; accessToken?: string; refreshToken?: string; userEmail?: string; userId?: string } | null {
-  const existing = readExisting()
-  const loc = existing.locations?.[locationName] as LocationConfig | undefined
+export function loadPersistedLocationAuth(locationName: string): {
+  url?: string
+  authType?: 'clerk' | 'convex-google'
+  accessToken?: string
+  refreshToken?: string
+  accessTokenExpiresAt?: number
+  clerkIssuer?: string
+  clerkClientId?: string
+  userEmail?: string
+  userId?: string
+} | null {
+  // `readExisting` throws on a corrupt / schema-violating file. The
+  // documented contract here is "absent or unreadable → null", so a
+  // throw is caught and folded into null: the refresh path then degrades
+  // to unauthenticated rather than crashing on a bad config.
+  let existing: { locations?: Record<string, UserLocationConfig>; [key: string]: unknown }
+  try {
+    existing = readExisting()
+  } catch {
+    return null
+  }
+  const loc = existing.locations?.[locationName] as UserLocationConfig | undefined
   if (!loc) return null
   return {
     url: loc.url,
+    authType: loc.authType,
     accessToken: loc.accessToken,
     refreshToken: loc.refreshToken,
+    // The `in` guards are required because `loc` is now a discriminated union
+    // and the clerk-only fields are not present on the convex-google branch.
+    accessTokenExpiresAt: 'accessTokenExpiresAt' in loc ? loc.accessTokenExpiresAt : undefined,
+    clerkIssuer: 'clerkIssuer' in loc ? loc.clerkIssuer : undefined,
+    clerkClientId: 'clerkClientId' in loc ? loc.clerkClientId : undefined,
     userEmail: loc.userEmail,
     userId: loc.userId,
   }
@@ -260,36 +327,38 @@ export function clearUserConfig(): void {
   }
 }
 
-function readExisting(): { locations?: Record<string, LocationConfig>; [key: string]: unknown } {
+function readExisting(): { locations?: Record<string, UserLocationConfig>; [key: string]: unknown } {
   if (!existsSync(CCCOLLAB_CONFIG_FILE)) {
     return {}
   }
+  const raw = readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')
+  // A prior config that exists but cannot be parsed is NOT treated as an
+  // empty baseline: doing so let `writeLocationAuthInLock` overwrite the
+  // file with a fresh config that dropped every other location and the
+  // clerk app-pointer fields (clerkIssuer / clerkClientId), which then
+  // crashed the next server start. Throw instead — the caller aborts the
+  // write, the file is left untouched (so a transient read can be retried
+  // and a genuine corruption can be hand-fixed), and the failure is loud.
+  let parsed: unknown
   try {
-    const raw = readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')
-    const parsed: unknown = JSON.parse(raw)
-    const validated = CccollabConfigSchema.parse(parsed)
-    // Cast to the looser shape we merge against.
-    return validated as { locations?: Record<string, LocationConfig>; [key: string]: unknown }
+    parsed = JSON.parse(raw)
   } catch (err) {
-    // Corrupt or schema-violating user-level file. Preserve the bad
-    // content for forensics by renaming it to a timestamped sibling
-    // before the caller's `saveLocationAuth` overwrites the path. The
-    // backup rename is best-effort: if it fails (permissions, missing
-    // directory, etc.) we still fall through to the `{}` baseline so the
-    // save path stays robust. The user gets one console.error line so
-    // the incident isn't completely silent.
-    const backupPath = `${CCCOLLAB_CONFIG_FILE}.bak.${Date.now()}`
-    try {
-      renameSync(CCCOLLAB_CONFIG_FILE, backupPath)
-      process.stderr.write(
-        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backed up to ${backupPath}\n`,
-      )
-    } catch (backupErr) {
-      process.stderr.write(
-        `cccollab: user config at ${CCCOLLAB_CONFIG_FILE} failed to parse (${err instanceof Error ? err.message : String(err)}); backup also failed (${backupErr instanceof Error ? backupErr.message : String(backupErr)})\n`,
-      )
-    }
-    return {}
+    throw new Error(
+      `cccollab: ${CCCOLLAB_CONFIG_FILE} is not valid JSON (${err instanceof Error ? err.message : String(err)}); ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+      { cause: err },
+    )
+  }
+  try {
+    const validated = UserCccollabConfigSchema.parse(parsed)
+    // Cast to the looser shape we merge against.
+    return validated as { locations?: Record<string, UserLocationConfig>; [key: string]: unknown }
+  } catch (err) {
+    throw new Error(
+      `cccollab: ${CCCOLLAB_CONFIG_FILE} failed schema validation (${err instanceof Error ? err.message : String(err)}); ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+      { cause: err },
+    )
   }
 }
 

@@ -1,4 +1,4 @@
-import { LOCAL_LOCATION, type CccollabConfig, type LocationConfig } from './schema.js'
+import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from './schema.js'
 
 /**
  * Environment-variable overrides for the unified cccollab config.
@@ -34,11 +34,11 @@ import { LOCAL_LOCATION, type CccollabConfig, type LocationConfig } from './sche
  */
 const REMOTE_ENV_LOCATION = 'remote'
 
-export function applyEnvOverrides(config: CccollabConfig, env: NodeJS.ProcessEnv): CccollabConfig {
+export function applyEnvOverrides(config: UserCccollabConfig, env: NodeJS.ProcessEnv): UserCccollabConfig {
   // Structured clone so the caller's object is never mutated. Env
   // overrides are last-writer-wins, and the cascade resolver works off
   // the returned shape.
-  const next = structuredClone(config) as CccollabConfig
+  const next = structuredClone(config) as UserCccollabConfig
 
   const envName = stringOrUndefined(env.CCCOLLAB_NAME)
   const envObjective = stringOrUndefined(env.CCCOLLAB_OBJECTIVE)
@@ -62,7 +62,7 @@ export function applyEnvOverrides(config: CccollabConfig, env: NodeJS.ProcessEnv
         clearActiveCascade(location)
       }
     }
-    const existing = (next.locations[REMOTE_ENV_LOCATION] as LocationConfig | undefined) ?? {}
+    const existing = (next.locations[REMOTE_ENV_LOCATION] as UserLocationConfig | undefined) ?? {}
     next.locations[REMOTE_ENV_LOCATION] = {
       ...existing,
       url: envUrl,
@@ -91,7 +91,7 @@ function stringOrUndefined(value: string | undefined): string | undefined {
  * env-registered `remote` location: any leftover active flag at any
  * depth would let the cascade in active.ts re-promote the location.
  */
-function clearActiveCascade(location: LocationConfig): void {
+function clearActiveCascade(location: UserLocationConfig): void {
   delete (location as { active?: boolean }).active
   if (!location.channels) return
   for (const channel of Object.values(location.channels)) {
@@ -118,7 +118,7 @@ function clearActiveCascade(location: LocationConfig): void {
  * Returns a mutable reference into `config.locations` so the caller
  * can assign `accessToken` directly.
  */
-function pickAuthTarget(config: CccollabConfig): LocationConfig | null {
+function pickAuthTarget(config: UserCccollabConfig): UserLocationConfig | null {
   if (!config.locations) return null
   const remote = config.locations[REMOTE_ENV_LOCATION]
   if (remote) return remote

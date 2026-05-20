@@ -39,7 +39,14 @@ export interface TransportSession {
 /** Channel summary as surfaced by `list_channels`. */
 export interface TransportChannel {
   name: string
+  /** Distinct users subscribed to the channel. A user with several sessions
+   *  in the channel counts once. */
   subscriberCount: number
+  /** Sessions currently joined to the channel. A user with several sessions
+   *  counts once per session — so this is >= `subscriberCount`. Optional: a
+   *  transport that cannot report it leaves it undefined. */
+  sessionCount?: number
+  messageCount?: number
 }
 
 /** Topic summary as surfaced by `list_topics`. */
@@ -51,6 +58,10 @@ export interface TransportTopic {
   state: string
   createdAt: string
   messageCount?: number
+  /** Whether the calling session has joined this topic, as reported by the
+   *  backend. Optional: a transport that cannot report it leaves it undefined,
+   *  and the tool layer falls back to local context. */
+  joined?: boolean
 }
 
 /** Historical message as returned by `joinTopic` to hydrate the UI. */
@@ -58,6 +69,21 @@ export interface TransportTopicMessage {
   sender: string
   text: string
   ts: string
+}
+
+/** One message in a paged read-history result. `ts` is epoch-ms. */
+export interface TransportHistoryMessage {
+  sender: string
+  senderSessionName?: string
+  text: string
+  ts: number
+}
+
+/** A page of read history. `oldestTs` (epoch-ms) is the cursor for the next `before`. */
+export interface TransportHistoryPage {
+  messages: TransportHistoryMessage[]
+  hasMore: boolean
+  oldestTs?: number
 }
 
 /**
@@ -87,7 +113,7 @@ export interface Transport {
   hasTopic(topicId: string): boolean
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  introduce(args: { sessionName: string; objective?: string }): Promise<void>
+  introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void>
 
   // ─── Channels ─────────────────────────────────────────────────────────
   joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }>
@@ -115,6 +141,11 @@ export interface Transport {
     toSessionName: string
     text: string
   }): Promise<{ viaChannel?: string }>
+
+  // ─── Message history ──────────────────────────────────────────────────
+  readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  readDmThread(args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
 
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */
