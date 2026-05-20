@@ -28,21 +28,26 @@ class SchemaDriftError extends Error {
 interface StubClientHandle {
   client: ConvexClient
   queryMock: ReturnType<typeof vi.fn>
+  mutationMock: ReturnType<typeof vi.fn>
 }
 
-function makeStubClient(queryImpl: () => Promise<unknown>): StubClientHandle {
+function makeStubClient(
+  queryImpl: (...args: unknown[]) => Promise<unknown>,
+  mutationImpl?: (...args: unknown[]) => Promise<unknown>,
+): StubClientHandle {
   // Only the methods RemoteTransport touches need to exist. The rest of
   // ConvexClient's surface isn't relevant to this test. Cast through
   // `unknown` to satisfy the structural type without importing the
   // whole client.
   const queryMock = vi.fn(queryImpl)
+  const mutationMock = vi.fn(mutationImpl ?? (async () => undefined))
   const stub = {
     query: queryMock,
-    mutation: vi.fn(async () => undefined),
+    mutation: mutationMock,
     onUpdate: vi.fn(() => () => {}),
     setAuth: vi.fn(),
   }
-  return { client: stub as unknown as ConvexClient, queryMock }
+  return { client: stub as unknown as ConvexClient, queryMock, mutationMock }
 }
 
 describe('RemoteTransport graceful degradation', () => {
@@ -350,6 +355,65 @@ describe('RemoteTransport.subscribeDirectMessages dedup', () => {
   })
 })
 
+describe('RemoteTransport — organizations', () => {
+  it('listOrganizations returns the rows from the listForUser query (clerk)', async () => {
+    const { client } = makeStubClient(async () => [
+      { id: 'org_a', name: 'Acme' },
+      { id: 'org_b', name: 'Beta' },
+    ])
+    const transport = new RemoteTransport({ client, log: () => {}, authType: 'clerk' })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([
+      { id: 'org_a', name: 'Acme' },
+      { id: 'org_b', name: 'Beta' },
+    ])
+  })
+
+  it('listOrganizations returns [] on a non-org-scoped (convex-google) deployment without calling the query', async () => {
+    // Regression guard: on convex-google the `organizations.listForUser`
+    // path does not exist; calling it through `anyApi` raises
+    // `FunctionNotFoundError` which would trip `registerFailure` and
+    // disable the whole transport. The orgScoped short-circuit must
+    // prevent the call entirely.
+    const { client, queryMock } = makeStubClient(async () => {
+      throw new Error('query should not be called on a non-org-scoped deployment')
+    })
+    const transport = new RemoteTransport({ client, log: () => {}, authType: 'convex-google' })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([])
+    expect(queryMock).not.toHaveBeenCalled()
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('introduce forwards organizationId to the introduce mutation', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [], // query: listJoinedForUser preload returns empty array
+      async () => 'session_1', // mutation: introduce returns a session id
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
+    expect(mutationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionName: 'reviewer', organizationId: 'org_a' }),
+    )
+  })
+
+  it('getBoundOrganizationName returns the org name from getSessionContext', async () => {
+    let queryCallCount = 0
+    const { client } = makeStubClient(
+      async () => {
+        queryCallCount++
+        if (queryCallCount === 1) return [] // introduce's listJoinedForUser preload
+        return { sessionName: 'reviewer', organizationName: 'Acme' } // getSessionContext
+      },
+      async () => 'session_1', // introduce mutation
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
+    expect(await transport.getBoundOrganizationName()).toBe('Acme')
+  })
+})
+
 describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor', () => {
   it('keeps the transport enabled when ackChannel fails (fire-and-forget, non-degrading)', async () => {
     // Regression guard: earlier we caught ackChannel failures via
@@ -459,5 +523,37 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
       channelId: 'chan_dev',
       ts: 1_700_000_200_000,
     })
+  })
+})
+
+describe('RemoteTransport session-scoped query arguments', () => {
+  it('forwards sessionId to org-scoped reads on the clerk transport', async () => {
+    const { client, queryMock } = makeStubClient(
+      async () => [],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'clerk' })
+    await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
+
+    queryMock.mockClear()
+    await transport.listChannels({})
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock.mock.calls[0]![1]).toMatchObject({ sessionId: 'session_abc' })
+  })
+
+  it('omits sessionId on the convex-google transport', async () => {
+    const { client, queryMock } = makeStubClient(
+      async () => [],
+      async () => 'session_abc',
+    )
+    const transport = new RemoteTransport({ client, authType: 'convex-google' })
+    await transport.introduce({ sessionName: 'tester' })
+
+    queryMock.mockClear()
+    await transport.listChannels({})
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(queryMock.mock.calls[0]![1]).toEqual({})
   })
 })

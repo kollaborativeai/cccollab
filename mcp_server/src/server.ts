@@ -23,6 +23,7 @@ import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './con
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
+import { handleListOrganizations } from './tools/organizations.js'
 
 async function startServer(config: Config, brokerPort: number, resolved: ResolvedConfig) {
   let worktreeName: string | undefined
@@ -438,6 +439,13 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       inputSchema: {
         name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
+        organization: z
+          .string()
+          .optional()
+          .describe(
+            'Organization id (from list_organizations) to create this session in. ' +
+              'Required when connected to a remote location.',
+          ),
       },
     },
     async (args) => {
@@ -453,7 +461,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
       inputSchema: {},
     },
     async () => {
@@ -486,6 +494,24 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     async (args) => {
       try {
         return text(await handleIdentityTool('authenticate', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'list_organizations',
+    {
+      description:
+        'List the organizations you belong to on each remote location, as {id, name, location}. ' +
+        'Pick an id and pass it to introduce as the `organization` argument. ' +
+        'Callable before introduce.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return text(await handleListOrganizations({ router: deps.router }))
       } catch (err) {
         return error(err)
       }
