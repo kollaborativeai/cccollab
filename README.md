@@ -94,20 +94,10 @@ events from both feed the same Channel-protocol stream. A channel at the
 reserved `local` location is always distinct from a channel at a named
 remote location - same channel name, different scope.
 
-Two ways to enable it:
-
-**1. Environment variables (one-liner):**
-
-```bash
-export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
-```
-
-This registers a location named `remote` with that URL. Start Claude Code,
-then call the `authenticate` tool. A browser opens for Clerk sign-in. After
-sign-in the tokens are persisted in `~/.cccollab/config.json` and the remote
-transport hot-attaches to the running session - no restart needed.
-
-**2. Config file (multiple locations):**
+Clerk is the auth provider. Every non-local location must declare its Clerk
+app pointer: `authType: "clerk"`, `clerkIssuer`, and `clerkClientId`. See
+[`docs/architecture/clerk-auth-setup.md`](docs/architecture/clerk-auth-setup.md)
+for how to obtain those values from your Clerk instance.
 
 Add a location to `~/.cccollab/config.json`:
 
@@ -115,13 +105,19 @@ Add a location to `~/.cccollab/config.json`:
 {
   "locations": {
     "flatout": {
-      "url": "https://<your-deployment>.convex.cloud"
+      "url": "https://<your-deployment>.convex.cloud",
+      "authType": "clerk",
+      "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
+      "clerkClientId": "cccollab-cli"
     }
   }
 }
 ```
 
-Then call `authenticate({ location: "flatout" })` in Claude Code.
+Then call `authenticate({ location: "flatout" })` in Claude Code. A browser
+opens for Clerk sign-in (PKCE). After sign-in the tokens are persisted
+back to the same file under `locations.flatout` and the remote transport
+hot-attaches to the running session - no restart needed.
 
 Channels configured under a remote location auto-subscribe on startup:
 
@@ -130,6 +126,9 @@ Channels configured under a remote location auto-subscribe on startup:
   "locations": {
     "flatout": {
       "url": "https://<your-deployment>.convex.cloud",
+      "authType": "clerk",
+      "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
+      "clerkClientId": "cccollab-cli",
       "channels": {
         "cccollab": {
           "topics": {
@@ -141,6 +140,12 @@ Channels configured under a remote location auto-subscribe on startup:
   }
 }
 ```
+
+The Clerk app pointer (`authType`, `clerkIssuer`, `clerkClientId`) may also
+live in a project-level `.cccollab.json` so a team can share it via source
+control while each developer keeps their own tokens in their user-level
+file. `CCCOLLAB_REMOTE_URL` can still register an env-driven `remote`
+location's URL, but the app pointer must come from a config file.
 
 For the full schema (including project-level `.cccollab.json`, active-state
 cascade, env var overrides, and reserved keys), see
