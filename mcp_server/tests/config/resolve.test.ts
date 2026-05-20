@@ -140,13 +140,17 @@ describe('resolveConfig', () => {
     expect(resolved.active.activeLocation).toBe('remote')
   })
 
-  it('CCCOLLAB_AUTH_TOKEN env var assigns accessToken to the env-registered remote', () => {
+  it('Clerk env vars attach a complete app pointer to the env-registered remote', () => {
     const resolved = resolveConfig(projectRoot, {
       CCCOLLAB_REMOTE_URL: 'https://env.convex.cloud',
-      CCCOLLAB_AUTH_TOKEN: 'env-token',
+      CCCOLLAB_CLERK_ISSUER: 'https://env.clerk.accounts.dev',
+      CCCOLLAB_CLERK_CLIENT_ID: 'cccollab-cli',
     })
     const remote = resolved.locations.find((l) => l.name === 'remote')
-    expect(remote?.accessToken).toBe('env-token')
+    expect(remote?.url).toBe('https://env.convex.cloud')
+    expect(remote?.clerkIssuer).toBe('https://env.clerk.accounts.dev')
+    expect(remote?.clerkClientId).toBe('cccollab-cli')
+    expect(remote?.authType).toBe('clerk')
   })
 
   it('CCCOLLAB_REMOTE_URL wins over a project file with active local channels (cascade regression)', () => {

@@ -147,8 +147,22 @@ Channels configured under a remote location auto-subscribe on startup:
 The Clerk app pointer (`clerkIssuer`, `clerkClientId`) may also live in a
 project-level `.cccollab.json` so a team can share it via source control
 while each developer keeps their own tokens in their user-level file.
-`CCCOLLAB_REMOTE_URL` can still register an env-driven `remote` location's
-URL, but the app pointer must come from a config file.
+
+### Env-var one-liner
+
+For an on-disk-free setup (handy for one-off shells, CI, etc.), export
+all three values and skip the config file:
+
+```bash
+export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
+export CCCOLLAB_CLERK_ISSUER="https://<your-instance>.clerk.accounts.dev"
+export CCCOLLAB_CLERK_CLIENT_ID="cccollab-cli"
+```
+
+This registers a location named `remote` with the full Clerk app pointer
+attached. Run `authenticate` from Claude Code to complete sign-in — the
+tokens get persisted back to `~/.cccollab/config.json` so subsequent
+sessions don't need the env vars.
 
 For the full schema (including project-level `.cccollab.json`, active-state
 cascade, env var overrides, and reserved keys), see

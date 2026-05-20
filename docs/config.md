@@ -178,13 +178,14 @@ field will be stripped at load time and a warning logged.
 
 All env vars are applied after file merging and win over anything on disk.
 
-| Variable              | Effect                                                                                                                                                                                    |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CCCOLLAB_NAME`       | Overrides the top-level `name`.                                                                                                                                                           |
-| `CCCOLLAB_OBJECTIVE`  | Overrides the top-level `objective`.                                                                                                                                                      |
-| `CCCOLLAB_REMOTE_URL` | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds.               |
-| `CCCOLLAB_AUTH_TOKEN` | Assigns this value as `accessToken` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise. |
-| `CCCOLLAB_PROFILE`    | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.                          |
+| Variable                   | Effect                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCCOLLAB_NAME`            | Overrides the top-level `name`.                                                                                                                                             |
+| `CCCOLLAB_OBJECTIVE`       | Overrides the top-level `objective`.                                                                                                                                        |
+| `CCCOLLAB_REMOTE_URL`      | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds. |
+| `CCCOLLAB_CLERK_ISSUER`    | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.    |
+| `CCCOLLAB_CLERK_CLIENT_ID` | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.            |
+| `CCCOLLAB_PROFILE`         | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.            |
 
 ## Reserved `local` location
 
