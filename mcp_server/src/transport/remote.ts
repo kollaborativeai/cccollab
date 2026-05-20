@@ -9,6 +9,7 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
@@ -68,6 +69,9 @@ export type Refs = {
       listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
       listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
       listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+      readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+      readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
     }
   }
   organizations: {
@@ -125,6 +129,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
             listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
             listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
             listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+            readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
+            readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
           }
           organizations: {
             listForUser: FunctionReference<'query' | 'mutation' | 'action'>
@@ -174,6 +181,9 @@ export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
           listByTopic: c.messages.listByTopic,
           listByChannel: c.messages.listByChannel,
           listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
+          readChannelHistory: c.messages.readChannelHistory,
+          readTopicHistory: c.messages.readTopicHistory,
+          readDmThread: c.messages.readDmThread,
         },
       },
       organizations: {
@@ -415,9 +425,17 @@ export class RemoteTransport implements Transport {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
         channel: args.channel,
-      })) as { channelId?: string }
+      })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
+        // Seed the per-channel cursor with the channel's ts at join time so
+        // `subscribeChannelMessages` starts the reactive feed past existing
+        // history instead of replaying it as fresh inbound notifications.
+        // Monotonic non-decreasing: a later rejoin can't regress it.
+        if (typeof res.latestTs === 'number') {
+          const prior = this.channelMaxTs.get(res.channelId) ?? 0
+          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
+        }
       }
       return { subscriberCount: 0 }
     } catch (err) {
@@ -449,8 +467,18 @@ export class RemoteTransport implements Transport {
       )) as Array<{
         name: string
         subscriberCount: number
+        presentSessionCount?: number
+        messageCount?: number
       }>
-      return rows.map((r) => ({ name: r.name, subscriberCount: r.subscriberCount }))
+      return rows.map((r) => ({
+        name: r.name,
+        subscriberCount: r.subscriberCount,
+        // The backend's `listAll` reports `presentSessionCount` — the count of
+        // sessions joined to the channel, as distinct from the user-level
+        // `subscriberCount`. Surface it as `sessionCount`.
+        sessionCount: r.presentSessionCount,
+        messageCount: r.messageCount,
+      }))
     } catch (err) {
       this.registerFailure('listChannels', err)
       return []
@@ -569,6 +597,8 @@ export class RemoteTransport implements Transport {
         state: string
         creatorSessionId: string
         createdAt: number
+        messageCount?: number
+        joined?: boolean
       }>
       for (const r of rows) this.knownTopicIds.add(r.topicId)
       return rows.map((r) => ({
@@ -578,7 +608,11 @@ export class RemoteTransport implements Transport {
         creator: r.creatorSessionId,
         state: r.state,
         createdAt: new Date(r.createdAt).toISOString(),
-        messageCount: undefined,
+        messageCount: r.messageCount,
+        // The org-scoped backend reports whether this session has joined the
+        // topic. Pass it through so `list_topics` reflects the real backend
+        // membership rather than only the MCP server's in-memory context.
+        joined: r.joined,
       }))
     } catch (err) {
       this.registerFailure('listTopics', err)
@@ -777,6 +811,103 @@ export class RemoteTransport implements Transport {
     }
   }
 
+  // ─── Message history ──────────────────────────────────────────────────
+
+  private static toHistoryPage(raw: {
+    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+    hasMore: boolean
+  }): TransportHistoryPage {
+    return {
+      messages: raw.messages.map((m) => ({
+        sender: m.fromSessionId,
+        senderSessionName: m.senderSessionName,
+        text: m.text,
+        ts: m.ts,
+      })),
+      hasMore: raw.hasMore,
+      oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
+    }
+  }
+
+  private async resolveChannelId(channelName: string): Promise<string | null> {
+    const cached = this.channelIdsByName.get(channelName)
+    if (cached !== undefined) return cached
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listAll),
+        this.orgScopedArgs({}),
+      )) as Array<{ channelId: string; name: string }>
+      const match = rows.find((r) => r.name.toLowerCase() === channelName.toLowerCase())
+      if (match === undefined) return null
+      this.channelIdsByName.set(channelName, match.channelId)
+      return match.channelId
+    } catch (err) {
+      this.registerFailure('resolveChannelId', err)
+      return null
+    }
+  }
+
+  async readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    const channelId = await this.resolveChannelId(args.channel)
+    if (channelId === null) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readChannelHistory),
+        this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readChannelMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readTopicHistory),
+        this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readTopicMessages', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
+  async readDmThread(args: {
+    peerSessionName: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
+    if (!this.enabled) return { messages: [], hasMore: false }
+    try {
+      const raw = (await this.client.query(
+        fn<'query'>(this.refs.messages.queries.readDmThread),
+        this.orgScopedArgs({
+          peerSessionName: args.peerSessionName,
+          limit: args.limit,
+          before: args.before,
+        }),
+      )) as {
+        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        hasMore: boolean
+      }
+      return RemoteTransport.toHistoryPage(raw)
+    } catch (err) {
+      this.registerFailure('readDmThread', err)
+      return { messages: [], hasMore: false }
+    }
+  }
+
   // ─── Lifecycle ────────────────────────────────────────────────────────
   async deregisterSession(args: { sessionName: string }): Promise<void> {
     void args.sessionName
@@ -851,9 +982,12 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    // Narrow the reactive window server-side with the inclusive `sinceTs`
-    // cursor (>= rather than >). The dedup happens client-side by `_id`
-    // since `ts` alone can collide at millisecond resolution.
+    // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
+    // cursor: the backend returns messages strictly after it. `topicMaxTs`
+    // is primed (via primeTopicCursor) to the last history ts already shown
+    // to the user on join, so that boundary message is not replayed. The
+    // `_id` dedup below still guards against the same row appearing in
+    // successive onUpdate batches within one subscription.
     const startingTs = this.topicMaxTs.get(args.topicId)
     const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
@@ -925,6 +1059,13 @@ export class RemoteTransport implements Transport {
       // don't want to hard-fail if the order is ever violated.
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
+      // Narrow the initial reactive batch past the channel's join-time
+      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
+      // this callback). An explicit `sinceTs` overrides the server-side
+      // read cursor, so a first-ever join — which has no cursor yet — does
+      // not replay the channel's whole broadcast history.
+      const startingTs = this.channelMaxTs.get(channelId)
+      if (startingTs !== undefined) queryArgs.sinceTs = startingTs
       innerUnsubscribe = this.client.onUpdate(
         fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,

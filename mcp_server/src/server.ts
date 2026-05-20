@@ -815,6 +815,70 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       }
     },
   )
+
+  mcp.registerTool(
+    'read_channel_messages',
+    {
+      description:
+        "Read a channel's broadcast history (newest page first; oldest-last within the page). Defaults to the active channel. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. To read further back, call again with `before` set to the previous page's `oldestTs` until `hasMore` is false.",
+      inputSchema: {
+        channel: z.string().optional().describe('Channel name. Defaults to the active channel.'),
+        location: z.string().optional().describe('Location name of the target channel.'),
+        limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
+        before: z
+          .number()
+          .optional()
+          .describe('Epoch-ms cursor; return messages older than this. Omit for the newest page.'),
+      },
+    },
+    async (args) => {
+      try {
+        return text(await handleChannelTool('read_channel_messages', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'read_topic_messages',
+    {
+      description:
+        "Read a topic's message history (oldest-last within the page). Defaults to the active topic. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. Page further back with `before` = previous `oldestTs` until `hasMore` is false.",
+      inputSchema: {
+        topic: z.string().optional().describe('Topic id. Defaults to the active topic.'),
+        limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
+        before: z.number().optional().describe('Epoch-ms cursor; return messages older than this.'),
+      },
+    },
+    async (args) => {
+      try {
+        return text(await handleTopicTool('read_topic_messages', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'read_dm_thread',
+    {
+      description:
+        'Read the direct-message thread with a peer session (oldest-last within the page). Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. Page further back with `before` = previous `oldestTs` until `hasMore` is false.',
+      inputSchema: {
+        sessionName: z.string().describe('The DM peer session name.'),
+        limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
+        before: z.number().optional().describe('Epoch-ms cursor; return messages older than this.'),
+      },
+    },
+    async (args) => {
+      try {
+        return text(await handleTopicTool('read_dm_thread', args as Record<string, unknown>, deps))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
 }
 
 async function ensureBroker(): Promise<number> {

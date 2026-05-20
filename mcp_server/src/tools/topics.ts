@@ -3,6 +3,7 @@ import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import {
   DmDeliveryError,
+  LOCAL_LOCATION,
   TopicNameConflictError,
   type ChannelLocation,
   type Transport,
@@ -184,6 +185,47 @@ export async function handleTopicTool(
       }
       return handleSendMessageToSession(deps, to, text)
     }
+    case 'read_topic_messages': {
+      const { topic, limit, before } = args as {
+        topic?: string
+        limit?: number
+        before?: number
+      }
+      const active = deps.context.hasTopic() ? deps.context.getThreadTs() : undefined
+      const topicId = topic ?? active
+      if (!topicId) {
+        return JSON.stringify({
+          error: 'No active topic. Pass a `topic` id, or join one with join_topic.',
+        })
+      }
+      let transport: Transport
+      try {
+        transport = resolveTopicTransport(deps, topicId)
+      } catch (err) {
+        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+      }
+      const page = await transport.readTopicMessages({ topicId, limit, before })
+      return JSON.stringify(page)
+    }
+
+    case 'read_dm_thread': {
+      const { sessionName, limit, before } = args as {
+        sessionName?: string
+        limit?: number
+        before?: number
+      }
+      if (!sessionName || sessionName.trim() === '') {
+        return JSON.stringify({ error: '`sessionName` (the DM peer) is required.' })
+      }
+      const enabledTransports = deps.router.enabled()
+      const transport = enabledTransports.find((tr) => tr.source !== LOCAL_LOCATION) ?? enabledTransports[0]
+      if (transport === undefined) {
+        return JSON.stringify({ error: 'No transport available.' })
+      }
+      const page = await transport.readDmThread({ peerSessionName: sessionName, limit, before })
+      return JSON.stringify(page)
+    }
+
     default:
       throw new Error(`Unknown topic tool: ${name}`)
   }
@@ -248,7 +290,11 @@ async function handleListTopics(
     location: t.location,
     state: t.state,
     messageCount: t.messageCount ?? 0,
-    isJoined: deps.context.isTopicJoined(t.id),
+    // Prefer the backend's per-session membership when the transport reports
+    // it: the in-memory context goes stale when the session is removed from a
+    // topic elsewhere (e.g. via the web hub). Fall back to context for
+    // transports that don't report `joined` (the local broker).
+    isJoined: t.joined ?? deps.context.isTopicJoined(t.id),
     isMyActive: t.id === activeThread,
     creator: t.creator,
     createdAt: t.createdAt,
@@ -549,6 +595,12 @@ async function handleListSessions(
 
   // Merged by session name. Channels union across transports, each
   // tagged by the location it came from.
+  //
+  // `scopedLocations` records locations whose transport already scopes
+  // `listSessions` server-side to peers sharing a channel with this
+  // session (every non-local transport does). Such a session is a
+  // confirmed peer even when the transport can't denormalize *which*
+  // channels — see the `visible` filter below.
   const merged = new Map<
     string,
     {
@@ -556,6 +608,7 @@ async function handleListSessions(
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      scopedLocations: Set<ChannelLocation>
     }
   >()
 
@@ -569,7 +622,7 @@ async function handleListSessions(
     for (const transport of eligible) {
       try {
         const sessions = await transport.listSessions({ channel })
-        mergeSessions(merged, sessions, transport.source)
+        mergeSessions(merged, sessions, transport.source, transport.source !== LOCAL_LOCATION)
       } catch {
         // transport unreachable, skip
       }
@@ -578,7 +631,7 @@ async function handleListSessions(
     for (const transport of transports) {
       try {
         const sessions = await transport.listSessions({})
-        mergeSessions(merged, sessions, transport.source)
+        mergeSessions(merged, sessions, transport.source, transport.source !== LOCAL_LOCATION)
       } catch {
         // transport unreachable, skip
       }
@@ -592,6 +645,12 @@ async function handleListSessions(
   const visible = channelArg
     ? [...merged.values()]
     : [...merged.values()].filter((s) => {
+        // A session reported by a server-scoped transport is already a
+        // confirmed shared-channel peer: the remote backend's
+        // `listSessions` only returns sessions sharing a channel with
+        // us, even though it doesn't denormalize which ones. Keep it
+        // regardless of the (empty) `channels` list.
+        if (s.scopedLocations.size > 0) return true
         if (s.channels.length === 0) return false
         return s.channels.some((ch) => mySubs.has(`${ch.location}::${ch.name}`))
       })
@@ -613,10 +672,14 @@ function mergeSessions(
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      scopedLocations: Set<ChannelLocation>
     }
   >,
   rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string }>,
   location: ChannelLocation,
+  /** True when this transport's `listSessions` is already scoped
+   *  server-side to peers sharing a channel with the caller. */
+  serverScoped: boolean,
 ): void {
   for (const r of rows) {
     const existing = merged.get(r.name)
@@ -634,12 +697,14 @@ function mergeSessions(
         }
       }
       existing.registeredAt = existing.registeredAt ?? r.registeredAt
+      if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(r.name, {
         name: r.name,
         objective: r.objective,
         channels: tagged,
         registeredAt: r.registeredAt,
+        scopedLocations: serverScoped ? new Set([location]) : new Set(),
       })
     }
   }
