@@ -99,6 +99,27 @@ app pointer: `clerkIssuer` and `clerkClientId`. See
 [`docs/architecture/clerk-auth-setup.md`](docs/architecture/clerk-auth-setup.md)
 for how to obtain those values from your Clerk instance.
 
+### How a location is resolved (precedence)
+
+Per-invocation, in order from highest to lowest precedence:
+
+1. **Env vars** — `CCCOLLAB_REMOTE_URL`, `CCCOLLAB_CLERK_ISSUER`,
+   `CCCOLLAB_CLERK_CLIENT_ID`. Applied **after** the file merge so they
+   always win. Useful for one-off shells, CI, or temporarily pointing at
+   a different deployment without editing files.
+2. **User-level file** — `~/.cccollab/config.json`. The only file
+   `authenticate` writes tokens to (mode `0600`).
+3. **Project-level file** — `.cccollab.json`, walked up from `cwd`. Meant
+   to be committed; credential fields are stripped at load time.
+
+Pick whichever fits — they compose. A common pattern: commit
+`clerkIssuer` and `clerkClientId` in a project-level `.cccollab.json` so
+every clone gets the team's Clerk app, then each developer's
+`~/.cccollab/config.json` holds the per-user tokens that `authenticate`
+writes.
+
+### Option 1 — `~/.cccollab/config.json`
+
 Add a location to `~/.cccollab/config.json`:
 
 ```json
@@ -144,14 +165,10 @@ Channels configured under a remote location auto-subscribe on startup:
 }
 ```
 
-The Clerk app pointer (`clerkIssuer`, `clerkClientId`) may also live in a
-project-level `.cccollab.json` so a team can share it via source control
-while each developer keeps their own tokens in their user-level file.
+### Option 2 — env-var one-liner
 
-### Env-var one-liner
-
-For an on-disk-free setup (handy for one-off shells, CI, etc.), export
-all three values and skip the config file:
+For an on-disk-free setup, export all three values and skip the config
+file:
 
 ```bash
 export CCCOLLAB_REMOTE_URL="https://<your-deployment>.convex.cloud"
@@ -162,7 +179,12 @@ export CCCOLLAB_CLERK_CLIENT_ID="cccollab-cli"
 This registers a location named `remote` with the full Clerk app pointer
 attached. Run `authenticate` from Claude Code to complete sign-in — the
 tokens get persisted back to `~/.cccollab/config.json` so subsequent
-sessions don't need the env vars.
+sessions can drop the env vars.
+
+If both env vars **and** a `~/.cccollab/config.json` (or
+`.cccollab.json`) location are present, the env vars win. Either Clerk
+env var also works on its own as a partial override of a file-defined
+location's app pointer.
 
 For the full schema (including project-level `.cccollab.json`, active-state
 cascade, env var overrides, and reserved keys), see
