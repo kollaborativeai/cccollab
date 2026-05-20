@@ -105,12 +105,10 @@ describe('stripProjectCredentials', () => {
 
     // Configuration fields preserved.
     expect(stripped.locations?.['kai']?.authType).toBe('clerk')
-    expect(
-      (stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkIssuer'],
-    ).toBe('https://clerk.example.com')
-    expect(
-      (stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkClientId'],
-    ).toBe('client-123')
+    expect((stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkIssuer']).toBe(
+      'https://clerk.example.com',
+    )
+    expect((stripped.locations?.['kai'] as Record<string, unknown> | undefined)?.['clerkClientId']).toBe('client-123')
     expect(stripped.locations?.['kai']?.url).toBe('https://x.convex.cloud')
 
     // One warning since the location had credential fields.
