@@ -1285,7 +1285,6 @@ __metadata:
   resolution: "cccollab@workspace:."
   dependencies:
     "@types/node": "npm:^25.6.0"
-    dotenv: "npm:^17.4.2"
     eslint: "npm:^10.2.1"
     husky: "npm:^9.1.7"
     lint-staged: "npm:^16.4.0"
@@ -1478,13 +1477,6 @@ __metadata:
   version: 2.1.2
   resolution: "detect-libc@npm:2.1.2"
   checksum: 10c0/acc675c29a5649fa1fb6e255f993b8ee829e510b6b56b0910666949c80c364738833417d0edb5f90e4e46be17228b0f2b66a010513984e18b15deeeac49369c4
-  languageName: node
-  linkType: hard
-
-"dotenv@npm:^17.4.2":
-  version: 17.4.2
-  resolution: "dotenv@npm:17.4.2"
-  checksum: 10c0/164f8e77a646c8446867d5b588d26ea6005c8ea7c5eb41cf926f6113d23f2191355f6e0cfd95ea9bab98394a5b0a3f1e51a8399711b666fe55cc7b0bd745f942
   languageName: node
   linkType: hard
 
