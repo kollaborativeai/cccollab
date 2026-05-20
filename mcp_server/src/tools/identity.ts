@@ -223,25 +223,27 @@ function hasDirectMessageSubscription(
 async function buildLocationStates(
   router: TransportRouter,
 ): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
-  const out: Record<string, { enabled: boolean; degradation?: string; organization?: string }> = {}
-  for (const transport of router.all()) {
-    const maybeDegraded = transport as Partial<RemoteTransport>
-    const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+  const entries = await Promise.all(
+    router.all().map(async (transport) => {
+      const maybeDegraded = transport as Partial<RemoteTransport>
+      const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
 
-    let organization: string | undefined
-    if (transport.source === LOCAL_LOCATION) {
-      organization = 'local'
-    } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
-      organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
-    }
+      let organization: string | undefined
+      if (transport.source === LOCAL_LOCATION) {
+        organization = 'local'
+      } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
+        organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
+      }
 
-    out[transport.source] = {
-      enabled: transport.enabled,
-      ...(degradation ? { degradation } : {}),
-      ...(organization ? { organization } : {}),
-    }
-  }
-  return out
+      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+        enabled: transport.enabled,
+        ...(degradation ? { degradation } : {}),
+        ...(organization ? { organization } : {}),
+      }
+      return [transport.source, state] as const
+    }),
+  )
+  return Object.fromEntries(entries)
 }
 
 async function handleAuthenticate(

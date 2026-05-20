@@ -356,17 +356,33 @@ describe('RemoteTransport.subscribeDirectMessages dedup', () => {
 })
 
 describe('RemoteTransport — organizations', () => {
-  it('listOrganizations returns the rows from the listForUser query', async () => {
+  it('listOrganizations returns the rows from the listForUser query (clerk)', async () => {
     const { client } = makeStubClient(async () => [
       { id: 'org_a', name: 'Acme' },
       { id: 'org_b', name: 'Beta' },
     ])
-    const transport = new RemoteTransport({ client, log: () => {} })
+    const transport = new RemoteTransport({ client, log: () => {}, authType: 'clerk' })
     const orgs = await transport.listOrganizations()
     expect(orgs).toEqual([
       { id: 'org_a', name: 'Acme' },
       { id: 'org_b', name: 'Beta' },
     ])
+  })
+
+  it('listOrganizations returns [] on a non-org-scoped (convex-google) deployment without calling the query', async () => {
+    // Regression guard: on convex-google the `organizations.listForUser`
+    // path does not exist; calling it through `anyApi` raises
+    // `FunctionNotFoundError` which would trip `registerFailure` and
+    // disable the whole transport. The orgScoped short-circuit must
+    // prevent the call entirely.
+    const { client, queryMock } = makeStubClient(async () => {
+      throw new Error('query should not be called on a non-org-scoped deployment')
+    })
+    const transport = new RemoteTransport({ client, log: () => {}, authType: 'convex-google' })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([])
+    expect(queryMock).not.toHaveBeenCalled()
+    expect(transport.enabled).toBe(true)
   })
 
   it('introduce forwards organizationId to the introduce mutation', async () => {

@@ -253,6 +253,17 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
       })
+
+      it('omits organization when the remote location has no bound org yet', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganizationName: async () => null,
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote).toBeDefined()
+        expect(result.locations.remote.organization).toBeUndefined()
+        expect('organization' in result.locations.remote).toBe(false)
+      })
     })
 
     describe('authenticate', () => {

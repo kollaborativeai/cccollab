@@ -460,9 +460,15 @@ export class RemoteTransport implements Transport {
   /**
    * Lists the authenticated user's organizations on this remote deployment.
    * Backs the `list_organizations` tool.
+   *
+   * Only org-scoped (clerk) deployments expose `organizations.listForUser`.
+   * The single-tenant `convex-google` backend has no organizations and would
+   * resolve the call through `anyApi` to a non-existent path; the resulting
+   * `FunctionNotFoundError` would trip `registerFailure` and disable the
+   * whole transport. Short-circuit instead.
    */
   async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
-    if (!this.enabled) return []
+    if (!this.enabled || !this.orgScoped) return []
     try {
       return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
@@ -478,6 +484,11 @@ export class RemoteTransport implements Transport {
    * Returns the name of the organization this transport's session is bound
    * to, or null when no session has been introduced or the lookup fails.
    * Backs the `organization` field of `whoami`.
+   *
+   * Errors are intentionally swallowed without `registerFailure` — this
+   * method backs an informational status surface (`whoami`) that is polled
+   * frequently and should never cause the remote transport's circuit
+   * breaker to trip on a transient query hiccup.
    */
   async getBoundOrganizationName(): Promise<string | null> {
     if (!this.enabled || !this.sessionId) return null
