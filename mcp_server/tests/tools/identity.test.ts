@@ -5,6 +5,32 @@ import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 
+// Mock runClerkPkce so tests for the Clerk branch don't open a browser
+// or start a loopback listener.
+vi.mock('../../src/remote/auth-clerk.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/remote/auth-clerk.js')>(
+    '../../src/remote/auth-clerk.js',
+  )
+  return {
+    ...actual,
+    runClerkPkce: vi.fn(async () => ({
+      accessToken: 'clerk-access-token',
+      refreshToken: 'clerk-refresh-token',
+      accessTokenExpiresAt: 9999999999000,
+    })),
+  }
+})
+
+// Mock saveLocationAuth so the Clerk branch can be tested without
+// touching ~/.cccollab/config.json or needing HOME redirection.
+vi.mock('../../src/config/save.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/config/save.js')>('../../src/config/save.js')
+  return {
+    ...actual,
+    saveLocationAuth: vi.fn(() => {}),
+  }
+})
+
 function createMockDeps(): IdentityToolDeps {
   const transport = new LocalTransport(7850)
   return {
@@ -191,6 +217,70 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
         expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
+      })
+
+      it('authenticate dispatches to runClerkPkce when location.authType === "clerk"', async () => {
+        const { runClerkPkce } = await import('../../src/remote/auth-clerk.js')
+        const { saveLocationAuth } = await import('../../src/config/save.js')
+        ;(runClerkPkce as ReturnType<typeof vi.fn>).mockClear()
+        ;(saveLocationAuth as ReturnType<typeof vi.fn>).mockClear()
+
+        const clerkDeps: IdentityToolDeps = {
+          ...deps,
+          locations: [
+            {
+              name: 'kai',
+              isLocal: false,
+              url: 'https://kai.convex.cloud',
+              authType: 'clerk',
+              clerkIssuer: 'https://x.clerk.accounts.dev',
+              clerkClientId: 'cccollab-cli',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
+
+        // runClerkPkce must have been called with the correct issuer + clientId + resource
+        expect(runClerkPkce).toHaveBeenCalledWith({
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          redirectPort: undefined,
+          resource: 'convex',
+        })
+
+        // saveLocationAuth must persist the clerk tokens
+        expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
+          authType: 'clerk',
+          url: 'https://kai.convex.cloud',
+          accessToken: 'clerk-access-token',
+          refreshToken: 'clerk-refresh-token',
+          accessTokenExpiresAt: 9999999999000,
+        })
+
+        // The response should reference the location name (hot-attach
+        // falls back gracefully without a messageBus in deps)
+        expect(result).toContain('kai')
+      })
+
+      it('authenticate errors clearly when clerk location is missing clerkIssuer or clerkClientId', async () => {
+        const clerkDeps: IdentityToolDeps = {
+          ...deps,
+          locations: [
+            {
+              name: 'kai',
+              isLocal: false,
+              url: 'https://kai.convex.cloud',
+              authType: 'clerk',
+              // clerkIssuer intentionally omitted
+              clerkClientId: 'cccollab-cli',
+              channels: [],
+            },
+          ],
+        }
+        const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
+        expect(result).toContain('clerkIssuer')
+        expect(result).toContain('clerkClientId')
       })
     })
   })

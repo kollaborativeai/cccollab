@@ -350,12 +350,16 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
+    authType: location.authType,
     accessToken: location.accessToken ?? '',
     refreshToken: location.refreshToken ?? '',
+    accessTokenExpiresAt: location.accessTokenExpiresAt,
+    clerkIssuer: location.clerkIssuer,
+    clerkClientId: location.clerkClientId,
     userEmail: location.userEmail,
     userId: location.userId,
   })
-  return new RemoteTransport({ client, source: location.name })
+  return new RemoteTransport({ client, source: location.name, authType: location.authType })
 }
 
 /** Type guard: does this transport expose a DM reactive subscription?

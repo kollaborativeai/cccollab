@@ -15,31 +15,159 @@ import {
 } from './index.js'
 
 /**
- * Runtime-typed references to the Convex backend's mutations and
- * queries. The local stdio MCP server lives outside the Convex
- * deployment's own `_generated` tree (it ships in an npm package), so we
- * can't import those types directly; `anyApi` is the idiomatic way to
- * call into a user-supplied deployment from library code. The cast
- * through `unknown` is required because `AnyApi`'s shape is much wider
- * than what we're selecting here.
+ * Shape of function-reference paths for the remote deployment.
+ * The {mutations, queries} segments are retained for code-organization
+ * clarity; clerk authType populates both from the flat api.cccollab.X
+ * path.
  */
-const REF = anyApi as unknown as {
+export type Refs = {
   sessions: {
-    mutations: { introduce: unknown; updateLastSeen: unknown; remove: unknown }
-    queries: { whoami: unknown; listByChannel: unknown }
+    mutations: {
+      introduce: FunctionReference<'query' | 'mutation' | 'action'>
+      updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
+      remove: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      whoami: FunctionReference<'query' | 'mutation' | 'action'>
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   channels: {
-    mutations: { join: unknown; leave: unknown }
-    queries: { listAll: unknown; listForUser: unknown }
+    mutations: {
+      join: FunctionReference<'query' | 'mutation' | 'action'>
+      leave: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listAll: FunctionReference<'query' | 'mutation' | 'action'>
+      listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   topics: {
-    mutations: { start: unknown; join: unknown; leave: unknown; archive: unknown; unarchive: unknown }
-    queries: { listByChannel: unknown; getById: unknown; listJoinedForUser: unknown }
+    mutations: {
+      start: FunctionReference<'query' | 'mutation' | 'action'>
+      join: FunctionReference<'query' | 'mutation' | 'action'>
+      leave: FunctionReference<'query' | 'mutation' | 'action'>
+      archive: FunctionReference<'query' | 'mutation' | 'action'>
+      unarchive: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      getById: FunctionReference<'query' | 'mutation' | 'action'>
+      listJoinedForUser: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
   messages: {
-    mutations: { sendToChannel: unknown; sendToTopic: unknown; sendToSession: unknown; ackChannel: unknown }
-    queries: { listByTopic: unknown; listByChannel: unknown; listDirectMessagesForSession: unknown }
+    mutations: {
+      sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
+      sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
+      ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
+    }
+    queries: {
+      listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
+      listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+      listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+    }
   }
+}
+
+/**
+ * Build function-reference paths for the remote deployment.
+ *
+ * cccollab-google deployments expose upstream paths
+ * (api.sessions.mutations.introduce, etc.). KAI's Phase 1 port namespaced
+ * everything under `cccollab/*` and flattened the queries/mutations
+ * directory split, so the same callable lives at
+ * api.cccollab.sessions.introduce. We keep the {mutations, queries}
+ * segments on the internal type for code-organization clarity; clerk
+ * authType just populates both segments from the flat `cccollab.X` path.
+ */
+export function makeRefs(authType: 'clerk' | 'convex-google'): Refs {
+  if (authType === 'clerk') {
+    const c = (
+      anyApi as unknown as {
+        cccollab: {
+          sessions: {
+            introduce: FunctionReference<'query' | 'mutation' | 'action'>
+            updateLastSeen: FunctionReference<'query' | 'mutation' | 'action'>
+            remove: FunctionReference<'query' | 'mutation' | 'action'>
+            whoami: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          channels: {
+            join: FunctionReference<'query' | 'mutation' | 'action'>
+            leave: FunctionReference<'query' | 'mutation' | 'action'>
+            listAll: FunctionReference<'query' | 'mutation' | 'action'>
+            listForUser: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          topics: {
+            start: FunctionReference<'query' | 'mutation' | 'action'>
+            join: FunctionReference<'query' | 'mutation' | 'action'>
+            leave: FunctionReference<'query' | 'mutation' | 'action'>
+            archive: FunctionReference<'query' | 'mutation' | 'action'>
+            unarchive: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            getById: FunctionReference<'query' | 'mutation' | 'action'>
+            listJoinedForUser: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+          messages: {
+            sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
+            sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
+            ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
+            listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
+            listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
+          }
+        }
+      }
+    ).cccollab
+    return {
+      sessions: {
+        mutations: {
+          introduce: c.sessions.introduce,
+          updateLastSeen: c.sessions.updateLastSeen,
+          remove: c.sessions.remove,
+        },
+        queries: { whoami: c.sessions.whoami, listByChannel: c.sessions.listByChannel },
+      },
+      channels: {
+        mutations: { join: c.channels.join, leave: c.channels.leave },
+        queries: { listAll: c.channels.listAll, listForUser: c.channels.listForUser },
+      },
+      topics: {
+        mutations: {
+          start: c.topics.start,
+          join: c.topics.join,
+          leave: c.topics.leave,
+          archive: c.topics.archive,
+          unarchive: c.topics.unarchive,
+        },
+        queries: {
+          listByChannel: c.topics.listByChannel,
+          getById: c.topics.getById,
+          listJoinedForUser: c.topics.listJoinedForUser,
+        },
+      },
+      messages: {
+        mutations: {
+          sendToChannel: c.messages.sendToChannel,
+          sendToTopic: c.messages.sendToTopic,
+          sendToSession: c.messages.sendToSession,
+          ackChannel: c.messages.ackChannel,
+        },
+        queries: {
+          listByTopic: c.messages.listByTopic,
+          listByChannel: c.messages.listByChannel,
+          listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
+        },
+      },
+    }
+  }
+  // convex-google: existing upstream paths (api.X.mutations.Y / api.X.queries.Y)
+  // anyApi is a recursive Proxy; every leaf is a FunctionReference-shaped
+  // proxy that satisfies FunctionReference<'query' | 'mutation' | 'action'> at runtime.
+  return anyApi as unknown as Refs
 }
 
 function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): FunctionReference<K> {
@@ -113,6 +241,7 @@ export class RemoteTransport implements Transport {
   enabled = true
 
   private readonly client: ConvexClient
+  private readonly refs: Refs
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
@@ -155,9 +284,15 @@ export class RemoteTransport implements Transport {
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
 
-  constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
+  constructor(opts: {
+    client: ConvexClient
+    source?: string
+    log?: (m: string) => void
+    authType?: 'clerk' | 'convex-google'
+  }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
+    this.refs = makeRefs(opts.authType ?? 'convex-google')
     this.log = opts.log ?? ((m) => process.stderr.write(`[cccollab.${this.source}] ${m}\n`))
   }
 
@@ -211,7 +346,7 @@ export class RemoteTransport implements Transport {
       throw new Error('remote transport is disabled; cannot introduce')
     }
     try {
-      const id = (await this.client.mutation(fn<'mutation'>(REF.sessions.mutations.introduce), {
+      const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
         sessionName: args.sessionName,
         objective: args.objective,
       })) as string
@@ -219,7 +354,7 @@ export class RemoteTransport implements Transport {
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
-        const topics = (await this.client.query(fn<'query'>(REF.topics.queries.listJoinedForUser), {})) as Array<{
+        const topics = (await this.client.query(fn<'query'>(this.refs.topics.queries.listJoinedForUser), {})) as Array<{
           _id: string
         }>
         for (const t of topics) this.knownTopicIds.add(t._id)
@@ -237,7 +372,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.channels.mutations.join), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
         channel: args.channel,
       })) as { channelId?: string }
@@ -255,7 +390,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.channels.mutations.leave), {
+      await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.leave), {
         sessionId: this.sessionId,
         channel: args.channel,
       })
@@ -268,7 +403,7 @@ export class RemoteTransport implements Transport {
     void args
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+      const rows = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
         name: string
         subscriberCount: number
       }>
@@ -283,7 +418,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToChannel), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToChannel), {
         sessionId: this.sessionId,
         channel: args.channel,
         text: args.text,
@@ -300,7 +435,7 @@ export class RemoteTransport implements Transport {
       throw new Error('Remote transport not ready; cannot create topic.')
     }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.topics.mutations.start), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.start), {
         sessionId: this.sessionId,
         channel: args.channel,
         topic: args.topic,
@@ -337,7 +472,7 @@ export class RemoteTransport implements Transport {
     // this is fine; if no channel is supplied we return empty.
     if (!args.channel) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.topics.queries.listByChannel), {
+      const rows = (await this.client.query(fn<'query'>(this.refs.topics.queries.listByChannel), {
         channel: args.channel,
         includeArchived: args.includeArchived,
       })) as Array<{
@@ -368,7 +503,7 @@ export class RemoteTransport implements Transport {
     if (!this.enabled) return null
     if (BROKER_UUID_PATTERN.test(args.topicId)) return null
     try {
-      const doc = (await this.client.query(fn<'query'>(REF.topics.queries.getById), {
+      const doc = (await this.client.query(fn<'query'>(this.refs.topics.queries.getById), {
         topicId: args.topicId,
       })) as {
         _id: string
@@ -383,7 +518,7 @@ export class RemoteTransport implements Transport {
       // user-facing channel string it expects. listAll is short in
       // practice; a future iteration could add a cheaper name-only
       // query.
-      const channels = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+      const channels = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
         channelId: string
         name: string
       }>
@@ -418,12 +553,12 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return { history: [] }
     try {
-      const res = (await this.client.mutation(fn<'mutation'>(REF.topics.mutations.join), {
+      const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.join), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })) as { topicId: string; channelId: string; name: string }
       this.knownTopicIds.add(res.topicId)
-      const rows = (await this.client.query(fn<'query'>(REF.messages.queries.listByTopic), {
+      const rows = (await this.client.query(fn<'query'>(this.refs.messages.queries.listByTopic), {
         topicId: args.topicId,
       })) as Array<{ fromSessionId: string; text: string; ts: number }>
       return {
@@ -443,7 +578,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.leave), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.leave), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -456,7 +591,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.archive), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.archive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -469,7 +604,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.topics.mutations.unarchive), {
+      await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.unarchive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
@@ -486,7 +621,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToTopic), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToTopic), {
         sessionId: this.sessionId,
         topicId: args.topicId,
         text: args.text,
@@ -500,7 +635,7 @@ export class RemoteTransport implements Transport {
   async listSessions(args: { channel?: string }): Promise<TransportSession[]> {
     if (!this.enabled) return []
     try {
-      const rows = (await this.client.query(fn<'query'>(REF.sessions.queries.listByChannel), {
+      const rows = (await this.client.query(fn<'query'>(this.refs.sessions.queries.listByChannel), {
         channel: args.channel,
       })) as Array<{
         _id: string
@@ -532,7 +667,7 @@ export class RemoteTransport implements Transport {
     void args.fromSessionName
     if (!this.enabled || this.sessionId === null) return {}
     try {
-      await this.client.mutation(fn<'mutation'>(REF.messages.mutations.sendToSession), {
+      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToSession), {
         sessionId: this.sessionId,
         toSessionName: args.toSessionName,
         text: args.text,
@@ -553,7 +688,7 @@ export class RemoteTransport implements Transport {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
     try {
-      await this.client.mutation(fn<'mutation'>(REF.sessions.mutations.remove), {
+      await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.remove), {
         sessionId: this.sessionId,
       })
     } catch {
@@ -577,7 +712,7 @@ export class RemoteTransport implements Transport {
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(REF.messages.queries.listDirectMessagesForSession),
+      fn<'query'>(this.refs.messages.queries.listDirectMessagesForSession),
       { sessionId: this.sessionId },
       (rows) => {
         const arr = rows as Array<{
@@ -631,7 +766,7 @@ export class RemoteTransport implements Transport {
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
     const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(REF.messages.queries.listByTopic),
+      fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
         const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
@@ -696,7 +831,7 @@ export class RemoteTransport implements Transport {
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
       innerUnsubscribe = this.client.onUpdate(
-        fn<'query'>(REF.messages.queries.listByChannel),
+        fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,
         (rows) => {
           const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
@@ -735,7 +870,7 @@ export class RemoteTransport implements Transport {
           // on persistent failure, which is the right signal.
           if (highestTsInBatch > 0 && sessionId !== null) {
             void this.client
-              .mutation(fn<'mutation'>(REF.messages.mutations.ackChannel), {
+              .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
                 sessionId,
                 channelId,
                 ts: highestTsInBatch,
@@ -758,7 +893,7 @@ export class RemoteTransport implements Transport {
     } else {
       void (async () => {
         try {
-          const rows = (await this.client.query(fn<'query'>(REF.channels.queries.listAll), {})) as Array<{
+          const rows = (await this.client.query(fn<'query'>(this.refs.channels.queries.listAll), {})) as Array<{
             channelId: string
             name: string
           }>
