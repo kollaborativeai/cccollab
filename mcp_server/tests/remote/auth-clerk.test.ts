@@ -553,3 +553,160 @@ describe('exchangeOAuthTokenForConvexJwt', () => {
     ).rejects.toSatisfy((err) => err instanceof ConvexJwtExchangeError && err.code === code)
   })
 })
+
+describe('error message redaction', () => {
+  const SECRET_ACCESS = 'super-secret-access-token-value-DO-NOT-LEAK'
+  const SECRET_REFRESH = 'super-secret-refresh-token-value-DO-NOT-LEAK'
+  const SECRET_ID = 'super-secret-id-token-value-DO-NOT-LEAK'
+  const SECRET_JWT = 'super-secret-jwt-value-DO-NOT-LEAK'
+
+  it('exchangeCodeForTokens does not leak token fields on malformed response', async () => {
+    // Malformed: access_token present but expires_in is the wrong type, so
+    // the shape guard throws. The error message must not contain the token.
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({
+          access_token: SECRET_ACCESS,
+          refresh_token: SECRET_REFRESH,
+          id_token: SECRET_ID,
+          expires_in: 'not-a-number',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+
+    try {
+      await exchangeCodeForTokens(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
+          code: 'auth-code',
+          codeVerifier: 'verifier',
+        },
+        fetchMock,
+      )
+      throw new Error('expected exchangeCodeForTokens to throw')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      expect(msg).not.toContain(SECRET_ACCESS)
+      expect(msg).not.toContain(SECRET_REFRESH)
+      expect(msg).not.toContain(SECRET_ID)
+      expect(msg).toContain('<redacted>')
+    }
+  })
+
+  it('refreshAccessToken does not leak token fields on malformed response', async () => {
+    const fetchMock = (async () =>
+      new Response(
+        JSON.stringify({ access_token: SECRET_ACCESS, refresh_token: SECRET_REFRESH, expires_in: 'not-a-number' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+
+    try {
+      await refreshAccessToken(
+        { issuer: 'https://x.clerk.accounts.dev', clientId: 'cccollab-cli', refreshToken: 'rt' },
+        fetchMock,
+      )
+      throw new Error('expected refreshAccessToken to throw')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      expect(msg).not.toContain(SECRET_ACCESS)
+      expect(msg).not.toContain(SECRET_REFRESH)
+      expect(msg).toContain('<redacted>')
+    }
+  })
+
+  it('exchangeOAuthTokenForConvexJwt does not leak jwt on malformed response', async () => {
+    // Malformed: jwt present as the wrong type-shape (expiresAt missing).
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ jwt: SECRET_JWT, somethingElse: 'oops' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    try {
+      await exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock)
+      throw new Error('expected exchangeOAuthTokenForConvexJwt to throw')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      expect(msg).not.toContain(SECRET_JWT)
+      expect(msg).toContain('<redacted>')
+    }
+  })
+})
+
+describe('TLS enforcement on Bearer-token endpoints', () => {
+  it('exchangeCodeForTokens rejects a non-HTTPS Clerk issuer (public host)', async () => {
+    // fetch must NOT be called: the guard fires before the network hop.
+    const fetchMock = (async () => {
+      throw new Error('fetch should not be reached')
+    }) as typeof fetch
+
+    await expect(
+      exchangeCodeForTokens(
+        {
+          issuer: 'http://evil.example.com',
+          clientId: 'cccollab-cli',
+          redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
+          code: 'auth-code',
+          codeVerifier: 'verifier',
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Refusing to send Bearer token to a non-HTTPS endpoint/)
+  })
+
+  it('refreshAccessToken rejects a non-HTTPS Clerk issuer (public host)', async () => {
+    const fetchMock = (async () => {
+      throw new Error('fetch should not be reached')
+    }) as typeof fetch
+
+    await expect(
+      refreshAccessToken(
+        { issuer: 'http://evil.example.com', clientId: 'cccollab-cli', refreshToken: 'rt' },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Refusing to send Bearer token to a non-HTTPS endpoint/)
+  })
+
+  it('exchangeOAuthTokenForConvexJwt rejects a non-HTTPS kaiUrl (public host)', async () => {
+    const fetchMock = (async () => {
+      throw new Error('fetch should not be reached')
+    }) as typeof fetch
+
+    await expect(
+      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'http://evil.example.com', oauthToken: 'token' }, fetchMock),
+    ).rejects.toThrow(/Refusing to send Bearer token to a non-HTTPS endpoint/)
+  })
+
+  it.each(['http://127.0.0.1:8001', 'http://localhost:8001', 'http://[::1]:8001'])(
+    'allows loopback host %s over plaintext (local dev / tests)',
+    async (kaiUrl) => {
+      let called = false
+      const fetchMock = (async () => {
+        called = true
+        return new Response(JSON.stringify({ jwt: 'j', expiresAt: 0 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      await exchangeOAuthTokenForConvexJwt({ kaiUrl, oauthToken: 'token' }, fetchMock)
+      expect(called).toBe(true)
+    },
+  )
+
+  it('allows HTTPS public host (the production case)', async () => {
+    let called = false
+    const fetchMock = (async () => {
+      called = true
+      return new Response(JSON.stringify({ jwt: 'j', expiresAt: 0 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock)
+    expect(called).toBe(true)
+  })
+})

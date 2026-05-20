@@ -71,6 +71,19 @@ const LOCK_TIMEOUT_MS = 5_000
 const STALE_LOCK_MS = 30_000
 const LOCK_POLL_MS = 50
 
+/** Backing buffer for `Atomics.wait` — the standard Node.js mechanism for
+ *  a sync sleep without burning CPU. Allocated once at module scope so the
+ *  acquireLock retry loop doesn't churn a fresh SharedArrayBuffer per
+ *  iteration. The integer value is never read or written; only the
+ *  blocking semantics of `Atomics.wait(buf, 0, 0, ms)` — which sleeps for
+ *  up to `ms` ms and returns 'timed-out' since no one ever calls
+ *  Atomics.notify — are used. */
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4))
+
+function syncSleep(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms)
+}
+
 function lockFilePath(): string {
   return `${CCCOLLAB_CONFIG_FILE}.lock`
 }
@@ -135,13 +148,12 @@ function acquireLock(): void {
           { cause: err },
         )
       }
-      // Busy-wait briefly. saveLocationAuth itself is sync, so we can't
-      // await a setTimeout — burn the cycles. The poll interval keeps
-      // the spin cheap.
-      const until = Date.now() + LOCK_POLL_MS
-      while (Date.now() < until) {
-        /* spin */
-      }
+      // Sleep briefly before retrying. `saveLocationAuth` is synchronous,
+      // so we can't await `setTimeout`; `Atomics.wait` is the standard
+      // Node sync-sleep primitive that does not burn CPU. Under
+      // contention by multiple MCP processes this keeps the waiter at
+      // ~0% CPU instead of pegging a core.
+      syncSleep(LOCK_POLL_MS)
     }
   }
 }

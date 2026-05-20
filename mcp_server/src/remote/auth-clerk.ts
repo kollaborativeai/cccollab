@@ -42,6 +42,41 @@ function base64UrlEncode(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/**
+ * Field names whose values must never appear in thrown error messages
+ * or log output. Used by `redactSensitiveFields` before any malformed
+ * token-endpoint response body is stringified into an error. A leaked
+ * `access_token` here would otherwise propagate to user-visible logs
+ * (the tool layer surfaces error.message back to the model and to
+ * stderr).
+ */
+const SENSITIVE_RESPONSE_FIELDS: ReadonlySet<string> = new Set([
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'code',
+  'code_verifier',
+  // KAI's exchangeToken response shape — `jwt` is short-lived but still a
+  // capability token while it's valid.
+  'jwt',
+])
+
+/**
+ * Shallow-clone a record with sensitive field values replaced by a
+ * placeholder. Only top-level keys are scrubbed because Clerk and KAI
+ * OAuth endpoints return flat JSON; nested scrubbing would be a
+ * speculative generalization. If a malformed response embeds tokens
+ * deeper (unexpected upstream change), the placeholder still makes the
+ * leak obvious to the operator without exposing the secret.
+ */
+function redactSensitiveFields(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = SENSITIVE_RESPONSE_FIELDS.has(k) ? '<redacted>' : v
+  }
+  return out
+}
+
 export interface AuthorizeUrlArgs {
   issuer: string
   clientId: string
@@ -100,7 +135,8 @@ export async function exchangeCodeForTokens(
   args: TokenExchangeArgs,
   fetchImpl: typeof fetch = fetch,
 ): Promise<TokenSet> {
-  const url = new URL('/oauth/token', args.issuer).toString()
+  const url = new URL('/oauth/token', args.issuer)
+  assertSecureBearerUrl(url, 'Clerk /oauth/token')
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code: args.code,
@@ -109,7 +145,7 @@ export async function exchangeCodeForTokens(
     redirect_uri: args.redirectUri,
   })
   if (args.resource !== undefined) body.set('resource', args.resource)
-  const res = await fetchImpl(url, {
+  const res = await fetchImpl(url.toString(), {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -123,7 +159,7 @@ export async function exchangeCodeForTokens(
   const refreshToken = json.refresh_token
   const expiresIn = json.expires_in
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || typeof expiresIn !== 'number') {
-    throw new Error(`Unexpected token response shape: ${JSON.stringify(json)}`)
+    throw new Error(`Unexpected token response shape: ${JSON.stringify(redactSensitiveFields(json))}`)
   }
   return {
     accessToken,
@@ -142,14 +178,15 @@ export async function refreshAccessToken(
   args: { issuer: string; clientId: string; refreshToken: string; resource?: string },
   fetchImpl: typeof fetch = fetch,
 ): Promise<TokenSet> {
-  const url = new URL('/oauth/token', args.issuer).toString()
+  const url = new URL('/oauth/token', args.issuer)
+  assertSecureBearerUrl(url, 'Clerk /oauth/token (refresh)')
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: args.refreshToken,
     client_id: args.clientId,
   })
   if (args.resource !== undefined) body.set('resource', args.resource)
-  const res = await fetchImpl(url, {
+  const res = await fetchImpl(url.toString(), {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -164,7 +201,7 @@ export async function refreshAccessToken(
   const refreshToken = typeof rawRefresh === 'string' && rawRefresh.length > 0 ? rawRefresh : args.refreshToken
   const expiresIn = json.expires_in
   if (typeof accessToken !== 'string' || typeof expiresIn !== 'number') {
-    throw new Error(`Unexpected refresh response shape: ${JSON.stringify(json)}`)
+    throw new Error(`Unexpected refresh response shape: ${JSON.stringify(redactSensitiveFields(json))}`)
   }
   return {
     accessToken,
@@ -268,6 +305,36 @@ export function deploymentUrlToHttpActionUrl(deploymentUrl: string): string {
 }
 
 /**
+ * True when sending a Bearer token to this hostname over plaintext HTTP
+ * is acceptable. Only loopback addresses qualify — they never leave the
+ * machine, so plaintext is fine for `convex dev` / self-hosted-on-laptop
+ * setups and the test suite. Every other host (including LAN / VPN
+ * addresses) MUST use HTTPS or this code will refuse to attach the
+ * token.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  // Node's WHATWG URL preserves IPv6 brackets on `.hostname`, so a
+  // literal `http://[::1]:8001` surfaces as `[::1]` here. Accept both
+  // bracketed and bare forms to stay robust to that representation.
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
+}
+
+/**
+ * Refuse to send a Bearer token over a plaintext scheme. Loopback hosts
+ * are allowed (local dev + tests). Anywhere else, mis-typed `http://`
+ * URLs in a user's config would otherwise leak the OAuth access token
+ * across the network.
+ */
+function assertSecureBearerUrl(url: URL, context: string): void {
+  if (url.protocol === 'https:') return
+  if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return
+  throw new Error(
+    `Refusing to send Bearer token to a non-HTTPS endpoint (${context}: ${url.protocol}//${url.hostname}). ` +
+      `Set the location URL to https:// or use a loopback host for local dev.`,
+  )
+}
+
+/**
  * Exchange a Clerk-issued OAuth access token for a Convex-audience JWT via
  * KAI's /cccollab/exchangeToken HTTP action. KAI uses CLERK_SECRET_KEY +
  * Clerk Backend SDK to mint a JWT with `aud: 'convex'` matching the
@@ -291,8 +358,9 @@ export async function exchangeOAuthTokenForConvexJwt(
   fetchImpl: typeof fetch = fetch,
 ): Promise<ConvexJwtResult> {
   const httpActionBase = deploymentUrlToHttpActionUrl(args.kaiUrl)
-  const url = new URL('/cccollab/exchangeToken', httpActionBase).toString()
-  const res = await fetchImpl(url, {
+  const url = new URL('/cccollab/exchangeToken', httpActionBase)
+  assertSecureBearerUrl(url, '/cccollab/exchangeToken')
+  const res = await fetchImpl(url.toString(), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${args.oauthToken}`,
@@ -310,7 +378,7 @@ export async function exchangeOAuthTokenForConvexJwt(
   const jwt = json.jwt
   const expiresAt = json.expiresAt
   if (typeof jwt !== 'string' || typeof expiresAt !== 'number') {
-    throw new Error(`Unexpected /cccollab/exchangeToken response shape: ${JSON.stringify(json)}`)
+    throw new Error(`Unexpected /cccollab/exchangeToken response shape: ${JSON.stringify(redactSensitiveFields(json))}`)
   }
   return { jwt, expiresAt }
 }
