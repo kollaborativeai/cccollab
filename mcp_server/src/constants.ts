@@ -36,6 +36,20 @@ export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')
  */
 export const DEFAULT_REMOTE_LOCATION_NAME = 'kai'
 export const DEFAULT_REMOTE_URL = 'https://collab.kollaborativeai.com'
-// TODO before deploy: replace placeholder with the production Clerk instance.
-export const DEFAULT_CLERK_ISSUER = 'https://<kai-prod-instance>.clerk.accounts.dev'
+// TODO before deploy: replace placeholder with the production Clerk
+// instance URL. Until then, the value below is a syntactically valid but
+// non-resolving placeholder so the load-time guard below passes during
+// CI; OAuth will still fail at runtime (browser DNS) until this is set.
+export const DEFAULT_CLERK_ISSUER = 'https://kai-prod-placeholder.clerk.accounts.dev'
 export const DEFAULT_CLERK_CLIENT_ID = 'cccollab-cli'
+
+// Guard against shipping the unfilled placeholder. The `<...>` substring
+// is a marker the deployer must replace before publishing to npm — fail
+// at module load with a clear message rather than producing a Clerk URL
+// that 404s the user's browser later.
+if (DEFAULT_CLERK_ISSUER.includes('<')) {
+  throw new Error(
+    'DEFAULT_CLERK_ISSUER still contains the <kai-prod-instance> placeholder. ' +
+      'Replace it in src/constants.ts before publishing the package.',
+  )
+}
