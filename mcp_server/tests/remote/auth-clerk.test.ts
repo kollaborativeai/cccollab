@@ -455,6 +455,24 @@ describe('deploymentUrlToHttpActionUrl', () => {
       'https://foo.convex.cloud.example.com',
     )
   })
+
+  it('passes the cccollab proxy URL through unchanged (no .cloud → .site rewrite)', () => {
+    // The proxy domain is the user-facing facade for the Convex deployment.
+    // The helper must NOT rewrite it, because the worker behind
+    // collab.kollaborativeai.com serves both the WebSocket SDK and HTTP
+    // actions (e.g. /cccollab/exchangeToken) on the same hostname.
+    expect(deploymentUrlToHttpActionUrl('https://collab.kollaborativeai.com')).toBe(
+      'https://collab.kollaborativeai.com',
+    )
+  })
+
+  it('still rewrites raw convex.cloud URLs (self-hosted / override path)', () => {
+    // Regression guard: the proxy pass-through must not break the override
+    // path for users who point cccollab at their own Convex deployment.
+    expect(deploymentUrlToHttpActionUrl('https://my-self-hosted-slug.convex.cloud')).toBe(
+      'https://my-self-hosted-slug.convex.site',
+    )
+  })
 })
 
 describe('exchangeOAuthTokenForConvexJwt', () => {
