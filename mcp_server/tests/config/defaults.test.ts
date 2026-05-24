@@ -83,4 +83,26 @@ describe('applyDefaults', () => {
     expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
     expect(kai?.active).toBeUndefined()
   })
+
+  it('honors cascade-active locations (channel.active) when deciding whether to mark synth active', () => {
+    const result = applyDefaults({
+      locations: {
+        local: { channels: { dev: { active: true } } },
+      },
+    })
+    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(kai).toBeDefined()
+    expect(kai?.active).toBeUndefined()
+  })
+
+  it('honors cascade-active locations (topic.active) when deciding whether to mark synth active', () => {
+    const result = applyDefaults({
+      locations: {
+        local: { channels: { dev: { topics: { planning: { active: true } } } } },
+      },
+    })
+    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(kai).toBeDefined()
+    expect(kai?.active).toBeUndefined()
+  })
 })

@@ -17,11 +17,14 @@ import { LOCAL_LOCATION, type UserCccollabConfig } from './schema.js'
  * Rules:
  *  1. If no non-`local` location exists in the merged config,
  *     synthesize one named DEFAULT_REMOTE_LOCATION_NAME and mark it
- *     active *unless another location is already explicitly active*
- *     (e.g. `locations.local.active = true`). In that case the
- *     synthesized location is still added (so `set_active_location kai`
- *     works later) but without an `active` flag, so the existing
- *     "exactly one active location" cascade stays valid.
+ *     active *unless another location is already active either
+ *     explicitly or via cascade from an active channel or topic*
+ *     (e.g. `locations.local.active = true`, or
+ *     `locations.local.channels.dev.active = true`, or a topic deeper
+ *     inside). In that case the synthesized location is still added
+ *     (so `set_active_location kai` works later) but without an
+ *     `active` flag, so the existing "exactly one active location"
+ *     cascade stays valid.
  *  2. If a non-`local` location exists but is missing any of
  *     `url`, `clerkIssuer`, `clerkClientId`, fill the missing field(s)
  *     from defaults. Explicit user-supplied values always win.
@@ -37,7 +40,16 @@ export function applyDefaults(config: UserCccollabConfig): UserCccollabConfig {
   const nonLocalEntries = Object.entries(next.locations).filter(([name]) => name !== LOCAL_LOCATION)
 
   if (nonLocalEntries.length === 0) {
-    const anyExistingActive = Object.values(next.locations).some((loc) => loc?.active === true)
+    const anyExistingActive = Object.values(next.locations).some((loc) => {
+      if (loc?.active === true) return true
+      for (const channel of Object.values(loc?.channels ?? {})) {
+        if (channel?.active === true) return true
+        for (const topic of Object.values(channel?.topics ?? {})) {
+          if (topic?.active === true) return true
+        }
+      }
+      return false
+    })
     next.locations[DEFAULT_REMOTE_LOCATION_NAME] = {
       url: DEFAULT_REMOTE_URL,
       authType: 'clerk',

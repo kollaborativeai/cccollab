@@ -260,5 +260,26 @@ describe('resolveConfig', () => {
       expect(remote?.url).toBe('https://override.example')
       expect(resolved.active.activeLocation).toBe('remote')
     })
+
+    it('does not throw on resolveConfig when a project file has a cascade-active local topic', () => {
+      // Regression for the cascade-vs-defaults active-state bug: without the
+      // cascade-aware anyExistingActive check, applyDefaults would mark the
+      // synthesized kai active alongside cascade-active local, and resolveActive
+      // would reject with "exactly one active location required".
+      writeFileSync(
+        join(projectRoot, '.cccollab.json'),
+        JSON.stringify({
+          locations: {
+            local: { channels: { platform: { topics: { planning: { active: true } } } } },
+          },
+        }),
+      )
+      expect(() => resolveConfig(projectRoot, {})).not.toThrow()
+      const resolved = resolveConfig(projectRoot, {})
+      expect(resolved.active.activeLocation).toBe('local')
+      // kai is synthesized but not active
+      const kai = resolved.locations.find((l) => l.name === 'kai')
+      expect(kai).toBeDefined()
+    })
   })
 })
