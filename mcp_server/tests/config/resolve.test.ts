@@ -238,4 +238,27 @@ describe('resolveConfig', () => {
     expect(remote?.authType).toBe('clerk')
     expect(remote?.url).toBe('https://x.convex.cloud')
   })
+
+  describe('defaults injection (KAI-316)', () => {
+    it('synthesizes the kai remote location when only local is configured', () => {
+      // Empty user + empty project: applyDefaults runs between merge and env
+      // overrides, producing a kai location wired with the baked-in URL +
+      // Clerk pointer.
+      const resolved = resolveConfig(projectRoot, {})
+      const kai = resolved.locations.find((l) => l.name === 'kai')
+      expect(kai?.url).toBe('https://collab.kollaborativeai.com')
+      expect(kai?.clerkIssuer).toMatch(/clerk\.accounts\.dev$/)
+      expect(kai?.clerkClientId).toBe('cccollab-cli')
+    })
+
+    it('still lets CCCOLLAB_REMOTE_URL override the baked-in proxy URL', () => {
+      // Env overrides run AFTER defaults injection, so CCCOLLAB_REMOTE_URL
+      // continues to win. applyEnvOverrides registers under "remote" (not
+      // "kai") and marks it active.
+      const resolved = resolveConfig(projectRoot, { CCCOLLAB_REMOTE_URL: 'https://override.example' })
+      const remote = resolved.locations.find((l) => l.name === 'remote')
+      expect(remote?.url).toBe('https://override.example')
+      expect(resolved.active.activeLocation).toBe('remote')
+    })
+  })
 })

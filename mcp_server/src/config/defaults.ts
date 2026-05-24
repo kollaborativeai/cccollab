@@ -17,7 +17,11 @@ import { LOCAL_LOCATION, type UserCccollabConfig } from './schema.js'
  * Rules:
  *  1. If no non-`local` location exists in the merged config,
  *     synthesize one named DEFAULT_REMOTE_LOCATION_NAME and mark it
- *     active.
+ *     active *unless another location is already explicitly active*
+ *     (e.g. `locations.local.active = true`). In that case the
+ *     synthesized location is still added (so `set_active_location kai`
+ *     works later) but without an `active` flag, so the existing
+ *     "exactly one active location" cascade stays valid.
  *  2. If a non-`local` location exists but is missing any of
  *     `url`, `clerkIssuer`, `clerkClientId`, fill the missing field(s)
  *     from defaults. Explicit user-supplied values always win.
@@ -33,12 +37,16 @@ export function applyDefaults(config: UserCccollabConfig): UserCccollabConfig {
   const nonLocalEntries = Object.entries(next.locations).filter(([name]) => name !== LOCAL_LOCATION)
 
   if (nonLocalEntries.length === 0) {
+    const anyExistingActive = Object.values(next.locations).some((loc) => loc?.active === true)
     next.locations[DEFAULT_REMOTE_LOCATION_NAME] = {
       url: DEFAULT_REMOTE_URL,
       authType: 'clerk',
       clerkIssuer: DEFAULT_CLERK_ISSUER,
       clerkClientId: DEFAULT_CLERK_CLIENT_ID,
-      active: true,
+      // Only steal activeness from explicit user intent (e.g. local.active=true).
+      // When no other location is active, defaults become the active one so a
+      // fresh install just works.
+      ...(anyExistingActive ? {} : { active: true }),
     }
     return next
   }

@@ -73,4 +73,14 @@ describe('applyDefaults', () => {
     // and defaults still filled in for missing fields
     expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
   })
+
+  it('synthesizes kai without active:true when another location is already explicitly active', () => {
+    const result = applyDefaults({
+      locations: { local: { active: true } },
+    })
+    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(kai).toBeDefined()
+    expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
+    expect(kai?.active).toBeUndefined()
+  })
 })
