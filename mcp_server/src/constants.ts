@@ -23,3 +23,19 @@ export const BROKER_RENDEZVOUS_FILE = join(CCCOLLAB_RUN_DIR, `${PROFILE}.json`)
  *  credentials, auto-join settings, etc. Chmod 600 on write - tokens
  *  must not be world-readable. See `src/config/`. */
 export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')
+
+/**
+ * Defaults for the hosted KAI-backed remote location. These are
+ * non-secret pointers (a public proxy URL and a public Clerk OAuth app
+ * pointer) that let a brand-new install talk to the production cccollab
+ * backend with an empty ~/.cccollab/config.json. Self-hosters override
+ * any field by declaring it under `locations.<name>` in their config.
+ *
+ * Wired in src/config/defaults.ts. Injected after merge, before env
+ * overrides, so CCCOLLAB_REMOTE_URL still wins as expected.
+ */
+export const DEFAULT_REMOTE_LOCATION_NAME = 'kai'
+export const DEFAULT_REMOTE_URL = 'https://collab.kollaborativeai.com'
+// TODO before deploy: replace placeholder with the production Clerk instance.
+export const DEFAULT_CLERK_ISSUER = 'https://<kai-prod-instance>.clerk.accounts.dev'
+export const DEFAULT_CLERK_CLIENT_ID = 'cccollab-cli'
