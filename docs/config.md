@@ -5,6 +5,32 @@ environment variables for one-off overrides. All fields are optional. When
 nothing is configured, cccollab runs in local-only mode with a session
 identity pulled from the environment (or prompted for via `introduce`).
 
+## Defaults (zero-config path)
+
+A brand-new install talks to the production cccollab backend without any
+on-disk config. The MCP server injects these defaults during
+`resolveConfig` (between the file merge and env overrides):
+
+| Field                         | Default                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------- |
+| `locations.kai.url`           | `https://collab.kollaborativeai.com` (Cloudflare proxy in front of KAI's Convex deployment) |
+| `locations.kai.clerkIssuer`   | KAI's production Clerk instance                                                             |
+| `locations.kai.clerkClientId` | `cccollab-cli`                                                                              |
+| `locations.kai.authType`      | `clerk`                                                                                     |
+
+Any field you set explicitly under `locations.<name>` in `.cccollab.json`
+or `~/.cccollab/config.json` wins over the default. The `kai` location is
+synthesized only when no other non-`local` location is configured — so
+power-users who already declare `locations.selfhosted` are completely
+unaffected.
+
+If another location is already explicitly active (e.g. `local.active = true`),
+the synthesized `kai` is added but NOT marked active — so existing configs
+that set `local` as active continue to behave exactly as before.
+
+Env-var overrides (`CCCOLLAB_REMOTE_URL`, etc.) run after defaults
+injection, so they still take precedence as documented below.
+
 ## File layering
 
 ```

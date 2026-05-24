@@ -33,8 +33,12 @@ That command:
   usage skill).
 
 After install, Claude Code has cccollab available immediately in local mode.
-No authentication is required for local mode. To also enable cross-machine
-collaboration, see [Remote mode](#remote-mode).
+No authentication is required for local mode. The hosted backend at
+`collab.kollaborativeai.com` is also wired in by default — just run the
+`authenticate` MCP tool inside Claude Code to sign in with your KAI account.
+No `~/.cccollab/config.json` editing required; see
+[`docs/config.md`](docs/config.md) → Defaults for what's pre-wired. For
+self-hosting / override paths, see [Remote mode](#remote-mode).
 
 ### Start Claude Code with the Channel protocol enabled
 
@@ -88,11 +92,16 @@ channel; `send_message_to_topic` in A arrives as a `<channel>` tag in B.
 
 ## Remote mode
 
-Remote mode adds a second transport that points at KAI's Convex deployment.
+Remote mode adds a second transport that points at a Convex deployment.
 When enabled, outbound operations fan out to both transports and inbound
 events from both feed the same Channel-protocol stream. A channel at the
 reserved `local` location is always distinct from a channel at a named
 remote location - same channel name, different scope.
+
+The default install already has KAI's hosted backend wired in as the `kai`
+location — run the `authenticate` MCP tool from inside Claude Code to sign
+in. The rest of this section covers the **self-hosting / override path**
+for pointing cccollab at your own Convex deployment + Clerk app.
 
 Clerk is the auth provider. Every non-local location must declare its Clerk
 app pointer: `clerkIssuer` and `clerkClientId`. See

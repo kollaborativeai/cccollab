@@ -58,10 +58,15 @@ log "Done."
 cat <<'EOF'
 
 Next step:
-  Start Claude Code. cccollab works out of the box in local-only mode - two
-  sessions on the same machine can coordinate through topics with no further
-  setup. To also enable cross-machine collaboration against a hosted Convex
-  deployment, add a non-local entry under `locations` in ~/.cccollab/config.json
-  (or set CCCOLLAB_REMOTE_URL), then call the `authenticate` tool to sign in.
+  Start Claude Code. cccollab works out of the box:
+
+  - Local mode (two sessions on the same machine) needs no setup.
+  - The hosted backend at collab.kollaborativeai.com is wired in by
+    default — just run the `authenticate` MCP tool inside Claude Code
+    to sign in with your KAI account.
+
+  Self-hosting? See docs/architecture/clerk-auth-setup.md for the
+  override path: declare your own location under `locations.<name>`
+  in ~/.cccollab/config.json.
 
 EOF
