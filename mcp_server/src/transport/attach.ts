@@ -337,6 +337,76 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   return { ok: true, transport, location }
 }
 
+/** Why a configured location was not attached at startup. `local` and
+ *  `dormant` are the quiet, expected reasons (nothing surfaced to the
+ *  user); the rest flag an actionable misconfiguration on a location the
+ *  user has actually engaged (made active, or given channels to
+ *  auto-subscribe). */
+export type StartupSkipReason = 'local' | 'dormant' | 'no-url' | 'no-tokens' | 'not-constructable'
+
+export interface StartupAttachPlan {
+  /** Non-local locations to attach, in input order. */
+  attach: ResolvedLocation[]
+  /** Every location that was not attached, with the reason. */
+  skipped: Array<{ name: string; reason: StartupSkipReason }>
+}
+
+/**
+ * Decide which non-local locations to attach at startup.
+ *
+ * The local broker is always handled separately by `server.ts` and is
+ * never in `attach`. A non-local location is attached only when the user
+ * has *engaged* it: it is the active location, or it carries configured
+ * channels to auto-subscribe (the README "channels auto-subscribe on
+ * startup" contract). A token-bearing remote that is neither active nor
+ * channel-configured is *dormant* - it stays in the config so
+ * `authenticate` can hot-attach it on demand, but it is not touched at
+ * startup. That is what keeps a stale/expired remote (e.g. an old KAI
+ * location) from forcing a sign-in round-trip during purely-local work.
+ *
+ * Engaged locations are additionally validated for constructability
+ * (url + tokens + Clerk app pointer, matching `defaultTransportFactory`);
+ * a misconfigured engaged location is reported with an actionable reason
+ * rather than thrown.
+ *
+ * Pure and side-effect free so the policy can be unit-tested without
+ * standing up transports.
+ */
+export function planStartupAttachments(
+  locations: ResolvedLocation[],
+  activeLocation: string | undefined,
+): StartupAttachPlan {
+  const attach: ResolvedLocation[] = []
+  const skipped: Array<{ name: string; reason: StartupSkipReason }> = []
+
+  for (const location of locations) {
+    if (location.isLocal) {
+      skipped.push({ name: location.name, reason: 'local' })
+      continue
+    }
+    const engaged = location.name === activeLocation || location.channels.length > 0
+    if (!engaged) {
+      skipped.push({ name: location.name, reason: 'dormant' })
+      continue
+    }
+    if (!location.url) {
+      skipped.push({ name: location.name, reason: 'no-url' })
+      continue
+    }
+    if (!location.accessToken || !location.refreshToken) {
+      skipped.push({ name: location.name, reason: 'no-tokens' })
+      continue
+    }
+    if (!location.clerkIssuer || !location.clerkClientId) {
+      skipped.push({ name: location.name, reason: 'not-constructable' })
+      continue
+    }
+    attach.push(location)
+  }
+
+  return { attach, skipped }
+}
+
 /**
  * Default production factory. Tests override via `ctx.transportFactory`.
  * Kept as a named export so `server.ts` can call it from its startup
