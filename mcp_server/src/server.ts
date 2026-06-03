@@ -24,6 +24,7 @@ import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
 import { handleListOrganizations } from './tools/organizations.js'
+import { handleListLocations } from './tools/locations.js'
 
 async function startServer(config: Config, brokerPort: number, resolved: ResolvedConfig) {
   let worktreeName: string | undefined
@@ -524,6 +525,25 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     async () => {
       try {
         return text(await handleListOrganizations({ router: deps.router }))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'list_locations',
+    {
+      description:
+        'List every configured location (the reserved "local" broker plus any remote locations from ~/.cccollab/config.json and .cccollab.json) with attach and login state. ' +
+        'Returns {locations: [{name, isLocal, url?, attached, active, loggedIn, tokenStatus, constructable, channelsConfigured, degradation?}]}. ' +
+        '`attached` = a live transport exists; `loggedIn` = a refresh token is on disk; `tokenStatus` is valid|expiringSoon|expired|none (derived, no network). ' +
+        'Shows locations you are logged into even when you have not joined any channel or topic. Read-only - does not open a connection. Callable before introduce.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return text(handleListLocations({ router: deps.router, locations: deps.locations, context: deps.context }))
       } catch (err) {
         return error(err)
       }
