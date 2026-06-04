@@ -22,6 +22,14 @@ export interface ClerkLocationAuth {
    *  the refresh path can determine token liveness without an introspection
    *  round-trip. */
   accessTokenExpiresAt: number
+  /** The Clerk app-pointer the tokens were minted against. Persisted with
+   *  the tokens so the refresh path always uses the issuer/client that
+   *  issued the refresh token - even when the issuer originally came from a
+   *  `CCCOLLAB_CLERK_*` env override that is absent in a later session.
+   *  Without this, a stale on-disk issuer makes refresh POST the refresh
+   *  token to the wrong Clerk instance, which rejects it. */
+  clerkIssuer?: string
+  clerkClientId?: string
   userEmail?: string
   userId?: string
   updatedAt?: number
@@ -205,6 +213,8 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
     accessToken: auth.accessToken,
     refreshToken: auth.refreshToken,
     accessTokenExpiresAt: auth.accessTokenExpiresAt,
+    ...(auth.clerkIssuer !== undefined ? { clerkIssuer: auth.clerkIssuer } : {}),
+    ...(auth.clerkClientId !== undefined ? { clerkClientId: auth.clerkClientId } : {}),
     ...(auth.userEmail !== undefined ? { userEmail: auth.userEmail } : {}),
     ...(auth.userId !== undefined ? { userId: auth.userId } : {}),
     updatedAt: auth.updatedAt ?? Date.now(),
