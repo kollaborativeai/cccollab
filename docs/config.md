@@ -24,9 +24,11 @@ synthesized only when no other non-`local` location is configured — so
 power-users who already declare `locations.selfhosted` are completely
 unaffected.
 
-If another location is already explicitly active (e.g. `local.active = true`),
-the synthesized `kai` is added but NOT marked active — so existing configs
-that set `local` as active continue to behave exactly as before.
+The synthesized `kai` location is added present-but-inactive: it is never
+marked `active`. A fresh install therefore resolves to no active location
+and does not auto-route messages to the hosted backend. After signing in
+with the `authenticate` tool, select it with `set_active_location kai`.
+(Auto-activation is deferred to later work.)
 
 Env-var overrides (`CCCOLLAB_REMOTE_URL`, etc.) run after defaults
 injection, so they still take precedence as documented below.

@@ -18,9 +18,17 @@ describe('applyDefaults', () => {
     expect(remote?.authType).toBe('clerk')
   })
 
-  it('marks the synthesized location active when no other location is active', () => {
+  it('synthesizes the location present-but-inactive (never marks it active)', () => {
+    // Activation is deferred: a fresh install must not auto-route messages to
+    // the hosted backend. The location is added so `set_active_location kai`
+    // works later, but it carries no `active` flag.
     const result = applyDefaults({ locations: { local: {} } })
-    expect(result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]?.active).toBe(true)
+    expect(result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]?.active).toBeUndefined()
+  })
+
+  it('synthesizes the location inactive even when nothing else is configured', () => {
+    const result = applyDefaults({})
+    expect(result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]?.active).toBeUndefined()
   })
 
   it('does not mutate the caller', () => {
@@ -74,7 +82,7 @@ describe('applyDefaults', () => {
     expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
   })
 
-  it('synthesizes kai without active:true when another location is already explicitly active', () => {
+  it('does not collide with an explicitly active location (kai stays inactive)', () => {
     const result = applyDefaults({
       locations: { local: { active: true } },
     })
@@ -84,7 +92,7 @@ describe('applyDefaults', () => {
     expect(kai?.active).toBeUndefined()
   })
 
-  it('honors cascade-active locations (channel.active) when deciding whether to mark synth active', () => {
+  it('does not collide with a cascade-active location (channel.active)', () => {
     const result = applyDefaults({
       locations: {
         local: { channels: { dev: { active: true } } },
@@ -95,7 +103,7 @@ describe('applyDefaults', () => {
     expect(kai?.active).toBeUndefined()
   })
 
-  it('honors cascade-active locations (topic.active) when deciding whether to mark synth active', () => {
+  it('does not collide with a cascade-active location (topic.active)', () => {
     const result = applyDefaults({
       locations: {
         local: { channels: { dev: { topics: { planning: { active: true } } } } },

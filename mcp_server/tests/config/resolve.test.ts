@@ -262,10 +262,10 @@ describe('resolveConfig', () => {
     })
 
     it('does not throw on resolveConfig when a project file has a cascade-active local topic', () => {
-      // Regression for the cascade-vs-defaults active-state bug: without the
-      // cascade-aware anyExistingActive check, applyDefaults would mark the
-      // synthesized kai active alongside cascade-active local, and resolveActive
-      // would reject with "exactly one active location required".
+      // The synthesized `kai` is always inactive, so it can never collide
+      // with a cascade-active `local`: resolveActive sees exactly one active
+      // location (local) and does not reject with "exactly one active
+      // location required".
       writeFileSync(
         join(projectRoot, '.cccollab.json'),
         JSON.stringify({
