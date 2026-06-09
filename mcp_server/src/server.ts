@@ -90,18 +90,11 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
   })
 
-  // Shared unsubscribe map keyed by location name. Every hot-attached
-  // transport stores its DM subscription cleanup here; the shutdown
-  // handler drains the whole map, and a replace-in-place attach (force
-  // re-authenticate of an already-live location) looks up the entry by
-  // name to tear it down before installing the replacement.
-  const remoteUnsubscribes = new Map<string, () => void>()
-
-  // Same shape, different key. Topic-message subscriptions are keyed by
-  // `${location}::${topicId}` because a single remote location can hold
-  // many concurrent topic subscriptions. Populated by `attachLocation`
-  // during auto-subscribe and by `tools/topics.ts` on runtime join/start;
-  // drained on shutdown and on replace-in-place.
+  // Topic-message subscriptions are keyed by `${location}::${topicId}`
+  // because a single remote location can hold many concurrent topic
+  // subscriptions. Populated by `attachLocation` during auto-subscribe
+  // and by `tools/topics.ts` on runtime join/start; drained on shutdown
+  // and on replace-in-place.
   const remoteTopicUnsubscribes = new Map<string, () => void>()
 
   // Channel-broadcast subscriptions, keyed by `${location}::${channel}`.
@@ -111,8 +104,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   const remoteChannelUnsubscribes = new Map<string, () => void>()
 
   // Introduce on the local transport up front so the session row
-  // exists when list_sessions / DM routing queries it. Non-local
-  // locations run introduce inside their own attachLocation call.
+  // exists when list_sessions queries it. Non-local locations run
+  // introduce inside their own attachLocation call.
   if (session.hasName()) {
     try {
       await localTransport.introduce({ sessionName: session.displayName, objective: session.getObjective() })
@@ -155,7 +148,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       context,
       router,
       messageBus,
-      remoteUnsubscribes,
       remoteTopicUnsubscribes,
       remoteChannelUnsubscribes,
       resolved: {
@@ -250,7 +242,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     router,
     locations: resolved.locations,
     messageBus,
-    remoteUnsubscribes,
     remoteTopicUnsubscribes,
     remoteChannelUnsubscribes,
     cwd: process.cwd(),
@@ -272,14 +263,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       resolveShutdown = resolve
     })
     console.error(`[cccollab] Shutting down (${reason})...`)
-    for (const unsubscribe of remoteUnsubscribes.values()) {
-      try {
-        unsubscribe()
-      } catch {
-        /* ignore */
-      }
-    }
-    remoteUnsubscribes.clear()
     for (const unsubscribe of remoteTopicUnsubscribes.values()) {
       try {
         unsubscribe()
@@ -350,7 +333,6 @@ interface ToolDeps {
   router: TransportRouter
   locations: ResolvedLocation[]
   messageBus: MessageBus
-  remoteUnsubscribes: Map<string, () => void>
   remoteTopicUnsubscribes: Map<string, () => void>
   remoteChannelUnsubscribes: Map<string, () => void>
   cwd: string
@@ -830,25 +812,6 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
   )
 
   mcp.registerTool(
-    'send_message_to_session',
-    {
-      description:
-        'Send a private direct message to another session. Routes by presence: prefers local when both know the recipient. Returns {to, viaChannel?}.',
-      inputSchema: {
-        to: z.string().describe('Recipient session name (must match their introduced name exactly)'),
-        text: z.string().describe('Message text'),
-      },
-    },
-    async (args) => {
-      try {
-        return text(await handleTopicTool('send_message_to_session', args as Record<string, unknown>, deps))
-      } catch (err) {
-        return error(err)
-      }
-    },
-  )
-
-  mcp.registerTool(
     'read_channel_messages',
     {
       description:
@@ -886,26 +849,6 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     async (args) => {
       try {
         return text(await handleTopicTool('read_topic_messages', args as Record<string, unknown>, deps))
-      } catch (err) {
-        return error(err)
-      }
-    },
-  )
-
-  mcp.registerTool(
-    'read_dm_thread',
-    {
-      description:
-        'Read the direct-message thread with a peer session (oldest-last within the page). Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. Page further back with `before` = previous `oldestTs` until `hasMore` is false.',
-      inputSchema: {
-        sessionName: z.string().describe('The DM peer session name.'),
-        limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
-        before: z.number().optional().describe('Epoch-ms cursor; return messages older than this.'),
-      },
-    },
-    async (args) => {
-      try {
-        return text(await handleTopicTool('read_dm_thread', args as Record<string, unknown>, deps))
       } catch (err) {
         return error(err)
       }

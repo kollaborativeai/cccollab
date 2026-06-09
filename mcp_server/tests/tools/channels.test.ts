@@ -319,7 +319,6 @@ describe('Channel Tools', () => {
         unarchiveTopic: async () => {},
         sendTopicMessage: async () => {},
         listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
         deregisterSession: async () => {},
       }
       const context = new ActiveContext()
@@ -399,11 +398,9 @@ describe('Channel Tools', () => {
         unarchiveTopic: async () => {},
         sendTopicMessage: async () => {},
         listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
         deregisterSession: async () => {},
         readChannelMessages: vi.fn().mockResolvedValue(page),
         readTopicMessages: async () => ({ messages: [], hasMore: false }),
-        readDmThread: async () => ({ messages: [], hasMore: false }),
       }
       const context = new ActiveContext()
       context.joinChannel('dev', 'manual', 'local')

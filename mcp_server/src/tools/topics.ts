@@ -2,7 +2,6 @@ import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import {
-  DmDeliveryError,
   LOCAL_LOCATION,
   TopicNameConflictError,
   type ChannelLocation,
@@ -63,7 +62,6 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
-  'send_message_to_session',
 ])
 
 export async function handleTopicTool(
@@ -173,18 +171,6 @@ export async function handleTopicTool(
       const { channel, location } = args as { channel?: string; location?: ChannelLocation }
       return handleListSessions(deps, channel, location)
     }
-    case 'send_message_to_session': {
-      const { to, text } = args as { to: string; text: string }
-      if (typeof text !== 'string' || text.trim() === '') {
-        return JSON.stringify({
-          error: '`text` is required and must be a non-empty string. (Not `message`, `content`, or anything else.)',
-        })
-      }
-      if (typeof to !== 'string' || to.trim() === '') {
-        return JSON.stringify({ error: '`to` is required and must be a non-empty string.' })
-      }
-      return handleSendMessageToSession(deps, to, text)
-    }
     case 'read_topic_messages': {
       const { topic, limit, before } = args as {
         topic?: string
@@ -205,24 +191,6 @@ export async function handleTopicTool(
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
       const page = await transport.readTopicMessages({ topicId, limit, before })
-      return JSON.stringify(page)
-    }
-
-    case 'read_dm_thread': {
-      const { sessionName, limit, before } = args as {
-        sessionName?: string
-        limit?: number
-        before?: number
-      }
-      if (!sessionName || sessionName.trim() === '') {
-        return JSON.stringify({ error: '`sessionName` (the DM peer) is required.' })
-      }
-      const enabledTransports = deps.router.enabled()
-      const transport = enabledTransports.find((tr) => tr.source !== LOCAL_LOCATION) ?? enabledTransports[0]
-      if (transport === undefined) {
-        return JSON.stringify({ error: 'No transport available.' })
-      }
-      const page = await transport.readDmThread({ peerSessionName: sessionName, limit, before })
       return JSON.stringify(page)
     }
 
@@ -707,57 +675,6 @@ function mergeSessions(
         scopedLocations: serverScoped ? new Set([location]) : new Set(),
       })
     }
-  }
-}
-
-async function handleSendMessageToSession(deps: TopicToolDeps, to: string, text: string): Promise<string> {
-  const transports = deps.router.enabled()
-  if (transports.length === 0) {
-    return JSON.stringify({ error: 'No transports are enabled.' })
-  }
-
-  // Single-transport fast path: no presence check required. Matches
-  // pre-CCC-3 behaviour exactly (broker owns DM routing; the
-  // transport's `sendDirectMessage` is the single source of truth for
-  // "recipient known / shared channel"). Avoids a round-trip on the
-  // common path.
-  let chosen: Transport
-  if (transports.length === 1) {
-    chosen = transports[0]!
-  } else {
-    // Multi-transport: presence check via listSessions. Prefer local
-    // when both know the recipient; fall back to local when neither
-    // does (delivery attempt will still surface a useful DM error).
-    const owners: Transport[] = []
-    for (const transport of transports) {
-      try {
-        const sessions = await transport.listSessions({})
-        if (sessions.some((s) => s.name === to)) owners.push(transport)
-      } catch {
-        // transport unreachable; skip
-      }
-    }
-    if (owners.length === 1) {
-      chosen = owners[0]!
-    } else if (owners.length > 1) {
-      chosen = owners.find((t) => t.source === 'local') ?? owners[0]!
-    } else {
-      chosen = transports.find((t) => t.source === 'local') ?? transports[0]!
-    }
-  }
-
-  try {
-    const { viaChannel } = await chosen.sendDirectMessage({
-      fromSessionName: deps.session.displayName,
-      toSessionName: to,
-      text,
-    })
-    return JSON.stringify({ to, ...(viaChannel ? { viaChannel } : {}) })
-  } catch (err) {
-    if (err instanceof DmDeliveryError) {
-      return JSON.stringify({ error: err.message })
-    }
-    throw err
   }
 }
 

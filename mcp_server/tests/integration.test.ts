@@ -163,7 +163,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
     }
   })
 
-  it('AI-maintainer scenario: channels scope broadcasts; DMs need shared channel', async () => {
+  it('AI-maintainer scenario: channels scope broadcasts to their subscribers', async () => {
     const A = await makeSession('a-maintainer', brokerPort)
     const B = await makeSession('b-project-x', brokerPort)
     const C = await makeSession('c-project-y', brokerPort)
@@ -205,29 +205,6 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       await new Promise<void>((r) => setTimeout(r, 300))
       expect(A.received.some((m) => m.text === 'Project X only')).toBe(false)
       expect(C.received.some((m) => m.text === 'Project X only')).toBe(false)
-
-      A.received.length = 0
-      B.received.length = 0
-      C.received.length = 0
-
-      const dmResult = JSON.parse(
-        await handleTopicTool('send_message_to_session', { to: 'b-project-x', text: 'ping' }, A.topicDeps),
-      )
-      expect(dmResult.to).toBe('b-project-x')
-
-      await waitUntil(() => (B.received.length > 0 ? true : null), 3000)
-      expect(B.received.some((m) => m.text.includes('ping'))).toBe(true)
-
-      A.received.length = 0
-      B.received.length = 0
-      C.received.length = 0
-
-      await handleChannelTool('leave_channel', { name: 'ai_instructions' }, A.channelDeps)
-      const dmResult2 = JSON.parse(
-        await handleTopicTool('send_message_to_session', { to: 'b-project-x', text: 'should fail' }, A.topicDeps),
-      )
-      expect(dmResult2.error).toContain('do not share')
-      expect(B.received.some((m) => m.text.includes('should fail'))).toBe(false)
     } finally {
       A.listener.stop()
       B.listener.stop()

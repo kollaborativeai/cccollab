@@ -95,15 +95,6 @@ class FakeTransport implements Transport {
   listSessions = vi.fn(async (_args: { channel?: string }): Promise<TransportSession[]> => {
     return this.sessions
   })
-  sendDirectMessage = vi.fn(
-    async (_args: {
-      fromSessionName: string
-      toSessionName: string
-      text: string
-    }): Promise<{ viaChannel?: string }> => {
-      return {}
-    },
-  )
   deregisterSession = vi.fn(async (_args: { sessionName: string }) => {})
   readChannelMessages = vi.fn(
     async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
@@ -113,12 +104,6 @@ class FakeTransport implements Transport {
   )
   readTopicMessages = vi.fn(
     async (_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
-      messages: [],
-      hasMore: false,
-    }),
-  )
-  readDmThread = vi.fn(
-    async (_args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
       messages: [],
       hasMore: false,
     }),
@@ -138,7 +123,7 @@ class FakeTransport implements Transport {
     this.topicIds.add(t.id)
   }
 
-  /** Pre-register a session for `listSessions` / DM routing tests. */
+  /** Pre-register a session for `listSessions` tests. */
   registerSession(s: TransportSession): void {
     this.sessions.push(s)
   }
@@ -451,9 +436,8 @@ vi.mock('../src/config/resolve.js', async () => {
 
 /**
  * Build a hot-attach-ready deps bundle. Tests that exercise the
- * post-sign-in attach path pass their own `messageBus` and
- * `remoteUnsubscribes`; tests that only care about the setup guidance
- * branch can skip them.
+ * post-sign-in attach path pass their own `messageBus`; tests that only
+ * care about the setup guidance branch can skip it.
  */
 function makeDepsWithLocations(
   transports: Transport[],
@@ -465,7 +449,6 @@ function makeDepsWithLocations(
   }>,
   extras: {
     messageBus?: IdentityToolDeps['messageBus']
-    remoteUnsubscribes?: IdentityToolDeps['remoteUnsubscribes']
     cwd?: string
     env?: NodeJS.ProcessEnv
   } = {},
@@ -485,22 +468,17 @@ function makeDepsWithLocations(
     ...deps,
     locations: resolvedLocations,
     messageBus: extras.messageBus,
-    remoteUnsubscribes: extras.remoteUnsubscribes,
     cwd: extras.cwd ?? '/tmp/test',
     env: extras.env ?? {},
   }
 }
 
 /**
- * A remote transport fake that supports `subscribeDirectMessages` so
- * the hot-attach path can wire it into MessageBus. The base
- * FakeTransport class has no DM subscription hook because most of the
- * legacy dual-transport tests don't need one; we subclass rather than
- * bloat the base.
+ * A remote transport fake used by the hot-attach path tests. The base
+ * FakeTransport is stateless at the wire level, so this subclass adds a
+ * real `shutdown()` to verify teardown on force-reauth.
  */
 class HotAttachRemote extends FakeTransport {
-  subscribedDms: Array<(msg: import('../src/types.js').ParsedMessage) => void> = []
-  dmUnsubscribed = false
   shutdownCalled = false
   shutdown = vi.fn(async (): Promise<void> => {
     this.shutdownCalled = true
@@ -508,12 +486,6 @@ class HotAttachRemote extends FakeTransport {
   })
   constructor(source: string) {
     super(source as 'local' | 'remote')
-  }
-  subscribeDirectMessages(onEvent: (msg: import('../src/types.js').ParsedMessage) => void): () => void {
-    this.subscribedDms.push(onEvent)
-    return () => {
-      this.dmUnsubscribed = true
-    }
   }
 }
 
@@ -575,7 +547,6 @@ describe('authenticate tool', () => {
   it('hot-attaches a new remote transport after force: true, replacing the old one', async () => {
     const local = new FakeTransport('local')
     const oldRemote = new HotAttachRemote('remote')
-    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -589,7 +560,7 @@ describe('authenticate tool', () => {
         { name: 'local', isLocal: true },
         { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
       ],
-      { messageBus: bus, remoteUnsubscribes },
+      { messageBus: bus },
     )
     deps.transportFactory = factory
 
@@ -621,31 +592,16 @@ describe('authenticate tool', () => {
     expect(oldRemote.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
     const live = deps.router.all().find((t) => t.source === 'remote')
     expect(live).toBe(newRemote)
-    // DM subscription wired; unsubscribe is tracked for shutdown.
-    expect(newRemote.subscribedDms.length).toBe(1)
-    expect(remoteUnsubscribes.size).toBe(1)
-    expect(remoteUnsubscribes.has('remote')).toBe(true)
   })
 
-  it('hot-attach on force: true tears down the old transport (DM unsub, shutdown, deregisterSession) before swapping', async () => {
+  it('hot-attach on force: true tears down the old transport (shutdown, deregisterSession) before swapping', async () => {
     // Regression guard for the pre-fix leak: force-reauth used to leave
-    // the old transport's ConvexClient websocket open and its DM
-    // subscription firing into MessageBus. The new path must:
-    //   1. Invoke the old transport's stored DM unsubscribe.
-    //   2. Call `shutdown()` on the old transport.
-    //   3. Call `deregisterSession` on the old transport.
-    //   4. Swap the router to point at the new transport.
-    //   5. Store the new transport's DM unsubscribe under the same key.
+    // the old transport's ConvexClient websocket open. The new path must:
+    //   1. Call `shutdown()` on the old transport.
+    //   2. Call `deregisterSession` on the old transport.
+    //   3. Swap the router to point at the new transport.
     const local = new FakeTransport('local')
     const oldRemote = new HotAttachRemote('remote')
-    // Seed the unsubscribes map with a callback that simulates the old
-    // transport's DM unsubscribe. attachLocation must invoke this and
-    // then replace it with the new transport's unsubscribe.
-    let oldDmUnsubInvoked = false
-    const remoteUnsubscribes = new Map<string, () => void>()
-    remoteUnsubscribes.set('remote', () => {
-      oldDmUnsubInvoked = true
-    })
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -659,7 +615,7 @@ describe('authenticate tool', () => {
         { name: 'local', isLocal: true },
         { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
       ],
-      { messageBus: bus, remoteUnsubscribes },
+      { messageBus: bus },
     )
     deps.transportFactory = factory
 
@@ -678,28 +634,17 @@ describe('authenticate tool', () => {
     const result = await handleIdentityTool('authenticate', { force: true }, deps)
     expect(result).toContain('is now active')
 
-    // 1. Old DM unsubscribe fired.
-    expect(oldDmUnsubInvoked).toBe(true)
-    // 2. Old shutdown called.
+    // 1. Old shutdown called.
     expect(oldRemote.shutdown).toHaveBeenCalledTimes(1)
     expect(oldRemote.shutdownCalled).toBe(true)
-    // 3. Old deregisterSession called.
+    // 2. Old deregisterSession called.
     expect(oldRemote.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
-    // 4. Router now points at the new transport.
+    // 3. Router now points at the new transport.
     expect(deps.router.all().find((t) => t.source === 'remote')).toBe(newRemote)
-    // 5. Map has exactly one entry under 'remote' and it belongs to the new transport.
-    expect(remoteUnsubscribes.size).toBe(1)
-    expect(remoteUnsubscribes.has('remote')).toBe(true)
-    remoteUnsubscribes.get('remote')!()
-    expect(newRemote.dmUnsubscribed).toBe(true)
-    // Invoking the new unsubscribe must NOT re-trigger the old one.
-    // (oldDmUnsubInvoked was already true from step 1; no double count is
-    // possible because the closure only sets it to true.)
   })
 
   it('hot-attach failure after sign-in keeps tokens persisted and returns restart guidance', async () => {
     const local = new FakeTransport('local')
-    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -716,7 +661,7 @@ describe('authenticate tool', () => {
         { name: 'local', isLocal: true },
         { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
       ],
-      { messageBus: bus, remoteUnsubscribes },
+      { messageBus: bus },
     )
     deps.transportFactory = factory
 
@@ -741,8 +686,6 @@ describe('authenticate tool', () => {
     expect(result).toContain('Restart your Claude Code session')
     // The router must NOT contain the broken transport.
     expect(deps.router.has('remote')).toBe(false)
-    // No orphan DM subscription was left behind.
-    expect(remoteUnsubscribes.size).toBe(0)
   })
 
   it('errors when location arg names an unknown location', async () => {
@@ -753,9 +696,9 @@ describe('authenticate tool', () => {
   })
 
   it('falls back to the restart message when hot-attach context is not provided', async () => {
-    // No messageBus / remoteUnsubscribes passed -> identity.ts cannot
-    // call attachLocation; it must surface the legacy "restart" message
-    // instead of failing silently.
+    // No messageBus passed -> identity.ts cannot call attachLocation; it
+    // must surface the legacy "restart" message instead of failing
+    // silently.
     const local = new FakeTransport('local')
     const deps = makeDepsWithLocations(
       [local],
@@ -776,7 +719,6 @@ describe('authenticate tool', () => {
     // write out of sight. The tool must not crash; it must keep the
     // tokens persisted and tell the user to restart.
     const local = new FakeTransport('local')
-    const remoteUnsubscribes = new Map<string, () => void>()
     const bus = {
       push: vi.fn(async () => {}),
     } as unknown as IdentityToolDeps['messageBus']
@@ -786,7 +728,7 @@ describe('authenticate tool', () => {
         { name: 'local', isLocal: true },
         { name: 'remote', isLocal: false, url: 'https://example.convex.cloud' },
       ],
-      { messageBus: bus, remoteUnsubscribes },
+      { messageBus: bus },
     )
     // mockFreshResolve leaves token fields undefined
     await mockFreshResolve([
@@ -934,113 +876,5 @@ describe('Dual transport: arbitrary location name routing', () => {
     expect(result.channel).toBe('dev')
     expect(result.location).toBe('flatout')
     expect(flatout.createTopic).toHaveBeenCalled()
-  })
-})
-
-/**
- * Regression: when a process starts with remote tokens on disk but the
- * session has not yet called `introduce`, `attachLocation` runs and
- * registers the remote transport. That transport's
- * `subscribeDirectMessages` returns a no-op (because `sessionId` is
- * null). When `introduce` later fires, it must re-install the DM
- * subscription so the session actually receives DMs.
- *
- * We exercise the `introduce` handler directly with a
- * `FakeRemoteTransport`-shaped double whose first
- * `subscribeDirectMessages` call mimics the no-op path. After the
- * handler returns we expect a SECOND subscribe call (not just one).
- */
-describe('DM subscription re-install on introduce', () => {
-  class ResubscribeFake extends FakeTransport {
-    readonly subscribeCalls: Array<(msg: import('../src/types.js').ParsedMessage) => void> = []
-    private readonly returnNoopOnFirstCall: boolean
-    noopUnsubscribeCalled = false
-    liveUnsubscribeCalled = false
-
-    constructor(source: string, returnNoopOnFirstCall = true) {
-      super(source)
-      this.returnNoopOnFirstCall = returnNoopOnFirstCall
-    }
-
-    subscribeDirectMessages(onEvent: (msg: import('../src/types.js').ParsedMessage) => void): () => void {
-      this.subscribeCalls.push(onEvent)
-      if (this.returnNoopOnFirstCall && this.subscribeCalls.length === 1) {
-        // Matches the real RemoteTransport's "sessionId is null"
-        // branch: we accept the callback arg but return an unsubscribe
-        // whose invocation is a no-op from the transport's point of
-        // view.
-        return () => {
-          this.noopUnsubscribeCalled = true
-        }
-      }
-      return () => {
-        this.liveUnsubscribeCalled = true
-      }
-    }
-  }
-
-  it('calls subscribeDirectMessages a second time after introduce, and the new subscription can receive DMs', async () => {
-    const fake = new ResubscribeFake('flatout')
-    // `makeDeps` eagerly sets a name on its SessionManager; we need the
-    // original "no introduce has happened" state to mirror the real
-    // startup, so build one explicitly here.
-    const session = new (await import('../src/session.js')).SessionManager({
-      username: 'tester',
-      cwd: '/tmp/proj',
-    })
-    const context = new ActiveContext()
-    const router = new TransportRouter([fake])
-
-    // Simulate the startup-side subscribe call that attachLocation
-    // would have made with a null sessionId. The fake's first call
-    // returns a no-op unsubscribe (reflecting the real bug).
-    const remoteUnsubscribes = new Map<string, () => void>()
-    const noopBus = {
-      push: vi.fn(async () => {}),
-    } as unknown as import('../src/message-bus.js').MessageBus
-    const firstUnsub = fake.subscribeDirectMessages((msg) => {
-      void noopBus.push(msg, 'flatout')
-    })
-    remoteUnsubscribes.set('flatout', firstUnsub)
-    expect(fake.subscribeCalls.length).toBe(1)
-
-    const identityDeps = {
-      session,
-      context,
-      router,
-      messageBus: noopBus,
-      remoteUnsubscribes,
-    }
-
-    // Introduce for the first time. The handler must fan out and then
-    // re-install the DM subscription since the prior subscribe was made
-    // before the session had a name. Pass organization since the router
-    // has a non-local transport (required by the org gate).
-    await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, identityDeps)
-
-    // Must-fix assertion: a second subscribe call happened.
-    expect(fake.subscribeCalls.length).toBe(2)
-    // And the old no-op unsubscribe was invoked as part of the swap.
-    expect(fake.noopUnsubscribeCalled).toBe(true)
-    // The tracked unsubscribe in the map now points at the new
-    // subscription's teardown.
-    remoteUnsubscribes.get('flatout')!()
-    expect(fake.liveUnsubscribeCalled).toBe(true)
-
-    // The freshly-installed subscription is live: simulate a DM arrival
-    // and verify it reaches the bus.
-    const liveCallback = fake.subscribeCalls[1]!
-    liveCallback({
-      sender: 'alice',
-      text: 'hello',
-      ts: '2026-01-01T00:00:00Z',
-      channel: 'direct',
-      channelName: 'direct',
-      threadTs: undefined,
-    })
-    const busPush = (noopBus as unknown as { push: ReturnType<typeof vi.fn> }).push
-    expect(busPush).toHaveBeenCalledTimes(1)
-    const [, sourceArg] = busPush.mock.calls[0] as [unknown, string]
-    expect(sourceArg).toBe('flatout')
   })
 })

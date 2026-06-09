@@ -71,7 +71,6 @@ function makeDepsWithRemote(
     unarchiveTopic: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     sendMessage: vi.fn(async () => {}),
-    sendDirectMessage: vi.fn(async () => {}),
     hasTopic: vi.fn(() => false),
     ...remoteOverrides,
   }

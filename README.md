@@ -198,8 +198,8 @@ cascade, env var overrides, and reserved keys), see
 - If multiple are configured, pass `{ location: "<name>" }` explicitly.
 - When an existing location already has a live remote transport, the tool
   short-circuits unless you pass `{ force: true }`. A forced re-auth tears
-  down the old transport (closing its websocket and its DM subscription)
-  before swapping the new one in.
+  down the old transport (closing its websocket and its topic/channel
+  subscriptions) before swapping the new one in.
 
 ### Graceful degradation
 
@@ -254,8 +254,6 @@ unarchive_topic           - restore an archived topic
 send_message_to_topic     - send a message to a topic
 read_topic_messages       - paginate a topic's message history
 list_sessions             - show other sessions (unions across every transport)
-send_message_to_session   - private DM to a session by name
-read_dm_thread            - paginate the DM thread with a peer session
 ```
 
 Messages from other sessions arrive as `<channel>` tags via push.

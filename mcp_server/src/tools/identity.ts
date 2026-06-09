@@ -19,18 +19,11 @@ export interface IdentityToolDeps {
    *  sign-in case) so the next tool call sees the new name. */
   locations?: ResolvedLocation[]
   /** The MessageBus the hot-attach path hands to `attachLocation` so
-   *  the new transport's DM inbox subscription feeds inbound messages
-   *  back into the session. Optional so existing unit tests that don't
-   *  exercise the hot-attach path can continue to construct deps
-   *  without a bus. */
+   *  the new transport's topic/channel subscriptions feed inbound
+   *  messages back into the session. Optional so existing unit tests
+   *  that don't exercise the hot-attach path can continue to construct
+   *  deps without a bus. */
   messageBus?: MessageBus
-  /** Shared map of DM-unsubscribe callbacks keyed by location name. The
-   *  hot-attach path stores the new transport's DM unsubscribe under
-   *  its location name so `server.ts`'s shutdown hook runs it alongside
-   *  the ones wired at startup; a subsequent re-attach (force
-   *  re-authenticate) can look the entry up by name and invoke it
-   *  before swapping in the replacement transport. */
-  remoteUnsubscribes?: Map<string, () => void>
   /** Shared map of topic-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${topicId}`. Threaded into `attachLocation`
    *  on the hot-attach path so auto-subscribe to configured topics wires
@@ -108,43 +101,6 @@ export async function handleIdentityTool(
         }
       }
 
-      // Re-install DM subscriptions on every non-local transport. If a
-      // remote transport was constructed at startup BEFORE the session
-      // had a name (tokens present, `introduce` not yet called), its
-      // first `subscribeDirectMessages` call returned a no-op because
-      // `sessionId` was still null. Now that `introduce` has fanned out
-      // and sessionIds are live, re-subscribe so the DM inbox actually
-      // flows. Idempotent on the Convex side (same reactive query); the
-      // MessageBus dedup cache covers any ts overlap.
-      if (deps.messageBus && deps.remoteUnsubscribes) {
-        for (const transport of deps.router.all()) {
-          if (transport.source === LOCAL_LOCATION) continue
-          if (!hasDirectMessageSubscription(transport)) continue
-          const prior = deps.remoteUnsubscribes.get(transport.source)
-          if (prior !== undefined) {
-            try {
-              prior()
-            } catch {
-              // Best-effort; the prior callback was almost certainly a
-              // no-op captured when sessionId was null. Proceed.
-            }
-            deps.remoteUnsubscribes.delete(transport.source)
-          }
-          try {
-            const bus = deps.messageBus
-            const unsub = transport.subscribeDirectMessages((msg) => {
-              void bus.push(msg, transport.source)
-            })
-            deps.remoteUnsubscribes.set(transport.source, unsub)
-          } catch (err) {
-            // Non-fatal: log but don't block introduce.
-            process.stderr.write(
-              `[cccollab] DM re-subscription failed for "${transport.source}": ${err instanceof Error ? err.message : String(err)}\n`,
-            )
-          }
-        }
-      }
-
       return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
     }
     case 'whoami': {
@@ -191,18 +147,6 @@ export async function handleIdentityTool(
     default:
       throw new Error(`Unknown identity tool: ${name}`)
   }
-}
-
-/**
- * Type guard: does this transport expose a DM reactive subscription?
- * Mirrors the helper in `transport/attach.ts`; duplicated here because
- * the re-subscription path in `introduce` needs the same narrowing
- * without pulling the attach module into the identity tool's tree.
- */
-function hasDirectMessageSubscription(
-  transport: Transport,
-): transport is Transport & { subscribeDirectMessages: RemoteTransport['subscribeDirectMessages'] } {
-  return typeof (transport as { subscribeDirectMessages?: unknown }).subscribeDirectMessages === 'function'
 }
 
 /**
@@ -326,12 +270,10 @@ async function handleAuthenticate(
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const messageBus = deps.messageBus
-  const remoteUnsubscribes = deps.remoteUnsubscribes
-  if (!messageBus || !remoteUnsubscribes) {
-    // The process-level wiring didn't thread in the MessageBus /
-    // unsubscribe list. Unit tests that skip server.ts construction
-    // land here - report the sign-in and rely on restart to pick up
-    // the persisted tokens.
+  if (!messageBus) {
+    // The process-level wiring didn't thread in the MessageBus. Unit
+    // tests that skip server.ts construction land here - report the
+    // sign-in and rely on restart to pick up the persisted tokens.
     return `Signed in to "${authResult.locationName}". Restart your Claude Code session for the remote transport to take effect.`
   }
 
@@ -364,7 +306,6 @@ async function handleAuthenticate(
     context: deps.context,
     router: deps.router,
     messageBus,
-    remoteUnsubscribes,
     // Fall back to a process-local map when the caller didn't thread
     // one through (older unit-test paths). attachLocation only iterates
     // this map on the replace-in-place prefix sweep, so a local map is

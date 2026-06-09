@@ -21,13 +21,11 @@ interface BrokerEventListenerOptions {
 
 export interface BrokerLocalEvent {
   source: 'local'
-  type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast' | 'direct_message'
+  type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast'
   channel?: string
   topicId?: string
   topic?: { id: string; topic: string; channel?: string; creator: string; state?: string; createdAt?: string }
   sender?: string
-  from?: string
-  to?: string
   text?: string
   archivedBy?: string
   ts?: string
@@ -258,25 +256,6 @@ export class BrokerEventListener {
           threadTs: undefined,
         }
         this.log(`PUSHING broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
-        await this.bus.push(msg)
-        return
-      }
-      case 'direct_message': {
-        if (!event.to || !this.session.isExactSelf(event.to)) {
-          this.log(`DROPPED direct_message: not for us (to=${event.to ?? 'none'})`)
-          return
-        }
-        if (event.from && this.session.isExactSelf(event.from)) return
-        const activeChannel = this.context.getActiveChannel() ?? 'direct'
-        const msg: ParsedMessage = {
-          sender: event.from ?? 'unknown',
-          text: `Direct message from ${event.from ?? 'unknown'}: ${event.text ?? ''}`,
-          ts: new Date().toISOString(),
-          channel: activeChannel,
-          channelName: activeChannel,
-          threadTs: undefined,
-        }
-        this.log(`PUSHING direct_message to Claude: from=${event.from ?? 'unknown'}`)
         await this.bus.push(msg)
         return
       }

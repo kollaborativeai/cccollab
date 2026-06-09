@@ -18,9 +18,9 @@ import {
 
 /**
  * Remote-flavoured fake. Implements the same surface as RemoteTransport
- * plus a `subscribeDirectMessages` / `subscribeTopicMessages` hook so
- * `attachLocation` can wire the DM inbox and per-topic reactive feeds
- * into MessageBus the same way the real RemoteTransport does.
+ * plus a `subscribeTopicMessages` hook so `attachLocation` can wire the
+ * per-topic reactive feeds into MessageBus the same way the real
+ * RemoteTransport does.
  */
 class FakeRemoteTransport implements Transport {
   readonly source: string
@@ -28,8 +28,6 @@ class FakeRemoteTransport implements Transport {
   shouldFailIntroduce = false
   shouldFailOnceIntroduce = false
   introduceError: Error | null = null
-  subscribedDms: Array<(msg: ParsedMessage) => void> = []
-  dmUnsubscribeCalled = false
   /** Per-topic subscription state: keeps the callback, the channel name
    *  it was registered with, the cursor that was in place at subscribe
    *  time, and a flag recording whether the returned unsubscribe fn has
@@ -106,7 +104,6 @@ class FakeRemoteTransport implements Transport {
   unarchiveTopic = vi.fn(async () => {})
   sendTopicMessage = vi.fn(async () => {})
   listSessions = vi.fn(async (): Promise<TransportSession[]> => [])
-  sendDirectMessage = vi.fn(async () => ({}))
   deregisterSession = vi.fn(async () => {})
   readChannelMessages = vi.fn(
     async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
@@ -120,26 +117,12 @@ class FakeRemoteTransport implements Transport {
       hasMore: false,
     }),
   )
-  readDmThread = vi.fn(
-    async (_args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
-      messages: [],
-      hasMore: false,
-    }),
-  )
-
   constructor(source: string) {
     this.source = source
   }
 
   hasTopic(topicId: string): boolean {
     return this.topicIds.has(topicId)
-  }
-
-  subscribeDirectMessages(onEvent: (msg: ParsedMessage) => void): () => void {
-    this.subscribedDms.push(onEvent)
-    return () => {
-      this.dmUnsubscribeCalled = true
-    }
   }
 
   subscribeTopicMessages(
@@ -189,7 +172,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
   session.setName('architect')
   const context = new ActiveContext()
   const router = new TransportRouter([])
-  const remoteUnsubscribes = new Map<string, () => void>()
   const remoteTopicUnsubscribes = new Map<string, () => void>()
   const remoteChannelUnsubscribes = new Map<string, () => void>()
   const busPushes: ParsedMessage[] = []
@@ -206,7 +188,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
     context,
     router,
     messageBus: bus,
-    remoteUnsubscribes,
     remoteTopicUnsubscribes,
     remoteChannelUnsubscribes,
     resolved: { locations: [location], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
@@ -244,35 +225,6 @@ describe('attachLocation', () => {
     expect(fakeFactory).toHaveBeenCalledTimes(1)
   })
 
-  it('wires the DM subscription into MessageBus and stores the unsubscribe fn', async () => {
-    const ctx = makeCtx(location)
-    const result = await attachLocation('flatout', ctx)
-    expect(result.ok).toBe(true)
-
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
-    expect(transport.subscribedDms.length).toBe(1)
-    expect(ctx.remoteUnsubscribes.size).toBe(1)
-    expect(ctx.remoteUnsubscribes.has('flatout')).toBe(true)
-
-    // Fire a fake DM and confirm it reached the bus with the right source tag.
-    transport.subscribedDms[0]!({
-      sender: 'alice',
-      text: 'hi',
-      ts: '2026-01-01T00:00:00Z',
-      channel: 'direct',
-      channelName: 'direct',
-      threadTs: undefined,
-    })
-    const push = (ctx.messageBus as unknown as { push: ReturnType<typeof vi.fn> }).push
-    expect(push).toHaveBeenCalledTimes(1)
-    const [, sourceArg] = push.mock.calls[0] as [ParsedMessage, string]
-    expect(sourceArg).toBe('flatout')
-
-    // And unsubscribe is callable.
-    ctx.remoteUnsubscribes.get('flatout')!()
-    expect(transport.dmUnsubscribeCalled).toBe(true)
-  })
-
   it('auto-subscribes to configured channels and topics', async () => {
     const ctx = makeCtx(location)
     const result = await attachLocation('flatout', ctx)
@@ -302,7 +254,6 @@ describe('attachLocation', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain('backend rejected introduce')
     expect(ctx.router.has('flatout')).toBe(false)
-    expect(ctx.remoteUnsubscribes.size).toBe(0)
   })
 
   it('replaces an existing transport in place when one is already registered for the same name', async () => {
@@ -319,22 +270,19 @@ describe('attachLocation', () => {
     expect(live).not.toBe(old)
   })
 
-  it('tears down the prior transport fully on force-reauth: old DM unsubscribe fires, old shutdown runs, router points at the new one', async () => {
+  it('tears down the prior transport fully on force-reauth: old shutdown runs, router points at the new one', async () => {
     // Simulates the `authenticate({location, force: true})` path. We
     // attach once, then attach again with a fresh factory output. The
-    // old transport's unsubscribe callback MUST be invoked, its
-    // `shutdown()` MUST be called, and the router MUST resolve to the
-    // new transport. This is the regression guard for the pre-fix leak
-    // where the old ConvexClient websocket stayed open and the DM
-    // subscription kept firing into MessageBus.
+    // old transport's `shutdown()` MUST be called, it MUST be
+    // deregistered, and the router MUST resolve to the new transport.
+    // This is the regression guard for the pre-fix leak where the old
+    // ConvexClient websocket stayed open.
     const ctx = makeCtx(location)
 
     // First attach
     const first = await attachLocation('flatout', ctx)
     expect(first.ok).toBe(true)
     const originalTransport = ctx.router.get('flatout') as FakeRemoteTransport
-    expect(ctx.remoteUnsubscribes.has('flatout')).toBe(true)
-    expect(originalTransport.subscribedDms.length).toBe(1)
 
     // Prepare a distinct new transport for the second attach.
     const replacement = new FakeRemoteTransport('flatout')
@@ -344,24 +292,15 @@ describe('attachLocation', () => {
     const second = await attachLocation('flatout', ctx)
     expect(second.ok).toBe(true)
 
-    // 1. Old transport's DM unsubscribe callback fired.
-    expect(originalTransport.dmUnsubscribeCalled).toBe(true)
-    // 2. Old transport's shutdown() was called.
+    // 1. Old transport's shutdown() was called.
     expect(originalTransport.shutdown).toHaveBeenCalledTimes(1)
     expect(originalTransport.shutdownCalled).toBe(true)
-    // 3. Old transport got a deregisterSession too.
+    // 2. Old transport got a deregisterSession too.
     expect(originalTransport.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
-    // 4. Router now points at the replacement.
+    // 3. Router now points at the replacement.
     const live = ctx.router.get('flatout') as FakeRemoteTransport
     expect(live).toBe(replacement)
     expect(live).not.toBe(originalTransport)
-    // 5. There is still exactly one DM unsubscribe tracked - the new one.
-    expect(ctx.remoteUnsubscribes.size).toBe(1)
-    expect(ctx.remoteUnsubscribes.has('flatout')).toBe(true)
-    // And it belongs to the new transport (calling it should tear down
-    // the replacement's subscription, not the old one's).
-    ctx.remoteUnsubscribes.get('flatout')!()
-    expect(replacement.dmUnsubscribeCalled).toBe(true)
   })
 
   it('does not set the new location active when another location is already the runtime-active one', async () => {
