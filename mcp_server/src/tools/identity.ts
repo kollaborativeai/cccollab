@@ -48,6 +48,13 @@ export interface IdentityToolDeps {
    *  that exercise the hot-attach wiring without network pass a fake
    *  here. */
   transportFactory?: AttachCtx['transportFactory']
+  /** Bring a dormant token-bearing location online on first use. In
+   *  `authenticate` this is called before the "already authenticated"
+   *  check so a valid remote short-circuits instead of forcing a fresh
+   *  sign-in; in `whoami` it makes a configured-and-valid remote report
+   *  as enabled. Optional so legacy unit tests keep compiling. See
+   *  `ensureLazyAttach`. */
+  ensureAttached?: (target?: string) => Promise<void>
 }
 
 export async function handleIdentityTool(
@@ -120,7 +127,10 @@ export async function handleIdentityTool(
 
       // Expose every transport's runtime state so the user sees
       // degradation on any location (not just "the first non-local")
-      // without having to chase it through a silent stall.
+      // without having to chase it through a silent stall. Bring dormant
+      // token-bearing locations online first so a valid remote reports as
+      // enabled rather than missing.
+      await deps.ensureAttached?.()
       const locationStates = await buildLocationStates(deps.router)
 
       return JSON.stringify({
@@ -230,6 +240,12 @@ async function handleAuthenticate(
   if (!url) {
     return `Location "${targetName}" has no URL. Add a \`url\` under \`locations.${targetName}\` in ~/.cccollab/config.json.`
   }
+
+  // Bring a dormant-but-token-bearing location online first: if valid
+  // tokens are already on disk, this attaches without a sign-in, and the
+  // short-circuit below then reports "already authenticated" instead of
+  // forcing a fresh OAuth round-trip.
+  if (!force) await deps.ensureAttached?.(targetName)
 
   // If we're not forcing a re-auth and a transport exists and is
   // enabled, short-circuit: tokens are already live.

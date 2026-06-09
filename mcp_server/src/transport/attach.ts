@@ -7,7 +7,7 @@ import { createRemoteClient } from '../remote/client.js'
 import { assertSecureBearerUrl } from '../remote/auth-clerk.js'
 import { RemoteTransport } from './remote.js'
 import type { TransportRouter } from './router.js'
-import type { Transport, TransportTopicMessage } from './index.js'
+import { LOCAL_LOCATION, type Transport, type TransportTopicMessage } from './index.js'
 
 /**
  * Everything `attachLocation` needs to turn a resolved non-local
@@ -298,6 +298,96 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   }
 
   return { ok: true, transport, location }
+}
+
+/**
+ * Everything `ensureLazyAttach` needs to bring a dormant-but-token-bearing
+ * location online the first time a tool touches it. It is the superset of
+ * `AttachCtx`'s static collaborators plus the bookkeeping that makes lazy
+ * attach safe to call on the hot path of every tool invocation.
+ */
+export interface LazyAttachCtx {
+  session: SessionManager
+  context: ActiveContext
+  router: TransportRouter
+  messageBus: MessageBus
+  remoteTopicUnsubscribes: Map<string, () => void>
+  remoteChannelUnsubscribes: Map<string, () => void>
+  /** Location names already attempted this session. `ensureLazyAttach` adds
+   *  to it so a stale/unreachable remote is tried at most once per process
+   *  instead of on every tool call — this is what keeps lazy attach from
+   *  reintroducing the per-launch refresh noise that startup gating removed. */
+  attempted: Set<string>
+  /** Non-local location names eligible for lazy attach (the non-local
+   *  locations present in the startup config). Used as the candidate set
+   *  when `target` is undefined ("every non-local"). */
+  candidates: string[]
+  /** Re-resolve the config so a location authenticated (or refreshed by a
+   *  peer process) since startup is attached with its current tokens. Only
+   *  invoked when there is an un-attempted, unregistered candidate, so the
+   *  common already-attached path costs nothing. */
+  resolve: () => AttachResolved
+  /** Passed through to `attachLocation`; tests inject a fake. */
+  transportFactory?: (location: ResolvedLocation) => Transport
+}
+
+/**
+ * Attach a token-bearing non-local location on demand so a valid remote in
+ * config "just works" through any tool without an explicit `authenticate`
+ * call. Startup gating (`planStartupAttachments`) deliberately leaves a
+ * dormant remote unattached to avoid touching stale endpoints on every
+ * launch; this restores access the moment a tool actually needs the
+ * location.
+ *
+ *   - `target` names a single location; `undefined` means "every non-local
+ *     candidate" (the list/broadcast tools that union across transports).
+ *   - Already-registered or already-attempted names are skipped, so a dead
+ *     remote is tried at most once per session and a live one is never
+ *     torn down and rebuilt.
+ *   - A location missing url / tokens / Clerk pointer is not attemptable and
+ *     is skipped quietly (the tool layer still surfaces its own error).
+ *   - Best-effort: a failed attach is logged and swallowed; the caller
+ *     proceeds and the router surfaces "not configured / degraded".
+ */
+export async function ensureLazyAttach(target: string | undefined, ctx: LazyAttachCtx): Promise<void> {
+  const names = target !== undefined ? [target] : ctx.candidates
+  const pending = names.filter((n) => n !== LOCAL_LOCATION && !ctx.router.has(n) && !ctx.attempted.has(n))
+  if (pending.length === 0) return
+
+  const resolved = ctx.resolve()
+  for (const name of pending) {
+    // Re-check has(): an earlier iteration (target === undefined) or a
+    // concurrent call may have just registered this name.
+    if (ctx.router.has(name)) continue
+    ctx.attempted.add(name)
+
+    const location = resolved.locations.find((l) => l.name === name)
+    if (
+      !location ||
+      location.isLocal ||
+      !location.url ||
+      !location.accessToken ||
+      !location.refreshToken ||
+      !location.clerkIssuer ||
+      !location.clerkClientId
+    ) {
+      continue
+    }
+
+    const result = await attachLocation(name, {
+      session: ctx.session,
+      context: ctx.context,
+      router: ctx.router,
+      messageBus: ctx.messageBus,
+      remoteTopicUnsubscribes: ctx.remoteTopicUnsubscribes,
+      remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
+      resolved,
+      transportFactory: ctx.transportFactory,
+    })
+    if (!result.ok) {
+      logError(`Lazy-attach for "${name}" failed: ${result.reason}`)
+    }
+  }
 }
 
 /** Why a configured location was not attached at startup. `local` and

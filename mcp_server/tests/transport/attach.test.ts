@@ -6,8 +6,11 @@ import { TransportRouter } from '../../src/transport/router.js'
 import {
   attachLocation,
   defaultTransportFactory,
+  ensureLazyAttach,
   planStartupAttachments,
   type AttachCtx,
+  type AttachResolved,
+  type LazyAttachCtx,
 } from '../../src/transport/attach.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
 import type { MessageBus } from '../../src/message-bus.js'
@@ -567,5 +570,108 @@ describe('defaultTransportFactory', () => {
 
   it('allows a loopback http deployment URL (local convex dev)', () => {
     expect(() => defaultTransportFactory(clerkLoc('http://127.0.0.1:8001'))).not.toThrow()
+  })
+})
+
+describe('ensureLazyAttach', () => {
+  /** A fully constructable, token-bearing non-local location — the shape a
+   *  dormant remote has on disk after a prior `authenticate`. */
+  function constructable(name: string): ResolvedLocation {
+    return {
+      name,
+      isLocal: false,
+      url: 'https://example.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      idToken: 'i',
+      clerkIssuer: 'https://example.clerk.accounts.dev',
+      clerkClientId: 'cid',
+      channels: [],
+    }
+  }
+
+  function makeLazyCtx(
+    locations: ResolvedLocation[],
+    overrides: Partial<LazyAttachCtx> = {},
+  ): { ctx: LazyAttachCtx; resolve: ReturnType<typeof vi.fn>; factory: ReturnType<typeof vi.fn> } {
+    const session = new SessionManager({ username: 'tester', cwd: '/tmp/proj' })
+    session.setName('architect')
+    const context = new ActiveContext()
+    const router = new TransportRouter([])
+    const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+    const resolve = vi.fn(
+      (): AttachResolved => ({
+        locations,
+        activeLocation: undefined,
+        activeChannel: undefined,
+        activeTopic: undefined,
+      }),
+    )
+    const factory = vi.fn((loc: ResolvedLocation) => new FakeRemoteTransport(loc.name))
+    const ctx: LazyAttachCtx = {
+      session,
+      context,
+      router,
+      messageBus: bus,
+      remoteTopicUnsubscribes: new Map<string, () => void>(),
+      remoteChannelUnsubscribes: new Map<string, () => void>(),
+      attempted: new Set<string>(),
+      candidates: locations.filter((l) => !l.isLocal).map((l) => l.name),
+      resolve,
+      transportFactory: factory,
+      ...overrides,
+    }
+    return { ctx, resolve, factory }
+  }
+
+  it('attaches a dormant token-bearing location on first call', async () => {
+    const { ctx } = makeLazyCtx([constructable('remote')])
+    await ensureLazyAttach('remote', ctx)
+    expect(ctx.router.has('remote')).toBe(true)
+  })
+
+  it('does not re-attach or re-resolve a location already registered', async () => {
+    const { ctx, resolve } = makeLazyCtx([constructable('remote')])
+    await ensureLazyAttach('remote', ctx)
+    const first = ctx.router.get('remote')
+    resolve.mockClear()
+    await ensureLazyAttach('remote', ctx)
+    expect(resolve).not.toHaveBeenCalled()
+    expect(ctx.router.get('remote')).toBe(first)
+  })
+
+  it('attempts an unreachable location at most once per session', async () => {
+    const { ctx, resolve } = makeLazyCtx([constructable('remote')], {
+      transportFactory: () => {
+        throw new Error('boom')
+      },
+    })
+    await ensureLazyAttach('remote', ctx)
+    expect(ctx.router.has('remote')).toBe(false)
+    resolve.mockClear()
+    await ensureLazyAttach('remote', ctx)
+    // The attempted-set guard means a dead remote isn't retried on every call.
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('attaches every candidate when target is undefined', async () => {
+    const { ctx } = makeLazyCtx([constructable('alpha'), constructable('beta')])
+    await ensureLazyAttach(undefined, ctx)
+    expect(ctx.router.has('alpha')).toBe(true)
+    expect(ctx.router.has('beta')).toBe(true)
+  })
+
+  it('skips the local location without resolving', async () => {
+    const { ctx, resolve } = makeLazyCtx([])
+    await ensureLazyAttach('local', ctx)
+    expect(resolve).not.toHaveBeenCalled()
+    expect(ctx.router.has('local')).toBe(false)
+  })
+
+  it('skips a location missing its Clerk pointer', async () => {
+    const noClerk: ResolvedLocation = { ...constructable('remote'), clerkClientId: undefined }
+    const { ctx } = makeLazyCtx([noClerk])
+    await ensureLazyAttach('remote', ctx)
+    expect(ctx.router.has('remote')).toBe(false)
   })
 })

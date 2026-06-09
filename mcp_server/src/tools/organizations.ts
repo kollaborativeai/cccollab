@@ -2,6 +2,10 @@ import type { TransportRouter } from '../transport/router.js'
 
 export interface OrganizationToolDeps {
   router: TransportRouter
+  /** Bring dormant token-bearing locations online before enumerating, so a
+   *  remote in config is queried without a fresh `authenticate`. Optional so
+   *  legacy unit tests keep compiling. See `ensureLazyAttach`. */
+  ensureAttached?: (target?: string) => Promise<void>
 }
 
 /** A transport that can list organizations (remote transports only). */
@@ -24,6 +28,7 @@ function canListOrganizations(transport: unknown): transport is OrgCapableTransp
  * nothing. Callable before `introduce` — it is a read, not a session action.
  */
 export async function handleListOrganizations(deps: OrganizationToolDeps): Promise<string> {
+  await deps.ensureAttached?.()
   const organizations: Array<{ id: string; name: string; location: string }> = []
   for (const transport of deps.router.enabled()) {
     if (!canListOrganizations(transport)) continue
