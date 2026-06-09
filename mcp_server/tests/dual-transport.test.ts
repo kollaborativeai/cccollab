@@ -413,9 +413,9 @@ vi.mock('../src/remote/auth-clerk.js', () => ({
   runClerkPkce: vi.fn(async () => ({
     accessToken: 'jwt',
     refreshToken: 'refresh',
+    idToken: 'id-jwt',
     accessTokenExpiresAt: Date.now() + 3_600_000,
   })),
-  CLERK_CONVEX_AUDIENCE: 'convex',
 }))
 
 // `saveLocationAuth` writes to ~/.cccollab/config.json on the real disk.
@@ -612,7 +612,6 @@ describe('authenticate tool', () => {
       issuer: 'iss',
       clientId: 'cid',
       redirectPort: undefined,
-      resource: 'convex',
     })
     expect(result).toContain('Signed in')
     expect(result).toContain('is now active')

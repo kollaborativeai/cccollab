@@ -71,6 +71,11 @@ export const LocationConfigSchema = z
     clerkRedirectPort: z.number().int().positive().optional(),
     accessToken: z.string().optional(),
     refreshToken: z.string().optional(),
+    /** OIDC ID token (JWT). This is what authenticates Convex — its `aud`
+     *  claim is the OAuth Client ID, which the deployment's auth.config.ts
+     *  registers as a provider. The access token carries no usable `aud` and
+     *  is never sent to Convex. */
+    idToken: z.string().optional(),
     accessTokenExpiresAt: z.number().optional(),
   })
   .strict()
@@ -121,6 +126,7 @@ export const LOCAL_LOCATION = 'local'
 export const AUTH_FIELDS = [
   'accessToken',
   'refreshToken',
+  'idToken',
   'userEmail',
   'userId',
   'updatedAt',

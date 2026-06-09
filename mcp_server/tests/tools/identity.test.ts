@@ -16,6 +16,7 @@ vi.mock('../../src/remote/auth-clerk.js', async () => {
     runClerkPkce: vi.fn(async () => ({
       accessToken: 'clerk-access-token',
       refreshToken: 'clerk-refresh-token',
+      idToken: 'clerk-id-token',
       accessTokenExpiresAt: 9999999999000,
     })),
   }
@@ -366,20 +367,20 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
 
-        // runClerkPkce must have been called with the correct issuer + clientId + resource
+        // runClerkPkce must have been called with the correct issuer + clientId
         expect(runClerkPkce).toHaveBeenCalledWith({
           issuer: 'https://x.clerk.accounts.dev',
           clientId: 'cccollab-cli',
           redirectPort: undefined,
-          resource: 'convex',
         })
 
-        // saveLocationAuth must persist the clerk tokens
+        // saveLocationAuth must persist the clerk tokens, including the ID token
         expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
           authType: 'clerk',
           url: 'https://kai.convex.cloud',
           accessToken: 'clerk-access-token',
           refreshToken: 'clerk-refresh-token',
+          idToken: 'clerk-id-token',
           accessTokenExpiresAt: 9999999999000,
         })
 

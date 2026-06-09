@@ -426,6 +426,7 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
     locationName: location.name,
     url: location.url,
     accessToken: location.accessToken ?? '',
+    idToken: location.idToken ?? '',
     refreshToken: location.refreshToken ?? '',
     accessTokenExpiresAt: location.accessTokenExpiresAt,
     clerkIssuer: location.clerkIssuer,

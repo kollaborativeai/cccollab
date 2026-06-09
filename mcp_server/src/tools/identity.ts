@@ -4,7 +4,7 @@ import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
-import { CLERK_CONVEX_AUDIENCE, runClerkPkce } from '../remote/auth-clerk.js'
+import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
@@ -305,13 +305,13 @@ async function handleAuthenticate(
       issuer: locationInfo.clerkIssuer,
       clientId: locationInfo.clerkClientId,
       redirectPort: locationInfo.clerkRedirectPort,
-      resource: CLERK_CONVEX_AUDIENCE,
     })
     saveLocationAuth(targetName, {
       authType: 'clerk',
       url,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
+      idToken: tokens.idToken,
       accessTokenExpiresAt: tokens.accessTokenExpiresAt,
     })
     authResult = { locationName: targetName, url }
