@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ActiveContext } from '../../src/context.js'
 import { SessionManager } from '../../src/session.js'
 import { TransportRouter } from '../../src/transport/router.js'
-import { attachLocation, type AttachCtx } from '../../src/transport/attach.js'
+import { attachLocation, planStartupAttachments, type AttachCtx } from '../../src/transport/attach.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { ParsedMessage } from '../../src/types.js'
@@ -511,5 +511,88 @@ describe('attachLocation', () => {
     expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
     expect([...ctx.remoteTopicUnsubscribes.keys()][0]!.startsWith('flatout::')).toBe(true)
     expect(replacement.subscribedTopics.size).toBe(1)
+  })
+})
+
+describe('planStartupAttachments', () => {
+  /** Build a ResolvedLocation with sane non-local defaults; override per case. */
+  function loc(partial: Partial<ResolvedLocation> & { name: string }): ResolvedLocation {
+    return {
+      isLocal: false,
+      url: 'https://example.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      clerkIssuer: 'https://example.clerk.accounts.dev',
+      clerkClientId: 'cid',
+      channels: [],
+      ...partial,
+    }
+  }
+
+  const localLoc = (channels: ResolvedLocation['channels'] = []): ResolvedLocation => ({
+    name: 'local',
+    isLocal: true,
+    channels,
+  })
+
+  it('never includes the local location in the attach list', () => {
+    const plan = planStartupAttachments([localLoc([{ name: 'cccollab', topics: [] }])], 'local')
+    expect(plan.attach.map((l) => l.name)).not.toContain('local')
+    expect(plan.skipped.find((s) => s.name === 'local')?.reason).toBe('local')
+  })
+
+  it('skips a dormant remote (not active, no channels) quietly even when fully constructable', () => {
+    // The KAI case: token-bearing, Clerk-configured, but the user is working
+    // locally and never opted this location in. Must not attach → no remote
+    // round-trip at startup.
+    const plan = planStartupAttachments([localLoc(), loc({ name: 'remote' })], 'local')
+    expect(plan.attach).toHaveLength(0)
+    expect(plan.skipped.find((s) => s.name === 'remote')?.reason).toBe('dormant')
+  })
+
+  it('attaches a remote that is the active location', () => {
+    const plan = planStartupAttachments([localLoc(), loc({ name: 'remote' })], 'remote')
+    expect(plan.attach.map((l) => l.name)).toEqual(['remote'])
+  })
+
+  it('attaches a non-active remote that has configured channels (README auto-subscribe contract)', () => {
+    const plan = planStartupAttachments(
+      [localLoc(), loc({ name: 'remote', channels: [{ name: 'dev', topics: [] }] })],
+      'local',
+    )
+    expect(plan.attach.map((l) => l.name)).toEqual(['remote'])
+  })
+
+  it('skips an engaged-but-legacy remote (missing Clerk pointer) as not-constructable', () => {
+    const legacy = loc({ name: 'flatout', clerkIssuer: undefined, clerkClientId: undefined })
+    const plan = planStartupAttachments([localLoc(), legacy], 'flatout')
+    expect(plan.attach).toHaveLength(0)
+    expect(plan.skipped.find((s) => s.name === 'flatout')?.reason).toBe('not-constructable')
+  })
+
+  it('skips an engaged remote with no tokens, flagging no-tokens', () => {
+    const noTok = loc({ name: 'remote', accessToken: undefined, refreshToken: undefined })
+    const plan = planStartupAttachments([localLoc(), noTok], 'remote')
+    expect(plan.attach).toHaveLength(0)
+    expect(plan.skipped.find((s) => s.name === 'remote')?.reason).toBe('no-tokens')
+  })
+
+  it('skips an engaged remote with no url, flagging no-url', () => {
+    const noUrl = loc({ name: 'remote', url: undefined })
+    const plan = planStartupAttachments([localLoc(), noUrl], 'remote')
+    expect(plan.attach).toHaveLength(0)
+    expect(plan.skipped.find((s) => s.name === 'remote')?.reason).toBe('no-url')
+  })
+
+  it('mirrors the real polluted config: local active + dormant KAI remotes → attach nothing, all quiet', () => {
+    const locations = [
+      loc({ name: 'remote' }), // KAI, constructable, dormant
+      loc({ name: 'tow123', clerkIssuer: undefined, clerkClientId: undefined }), // KAI deploy, no Clerk pointer, dormant
+      localLoc([{ name: 'cccollab', topics: [] }]),
+    ]
+    const plan = planStartupAttachments(locations, 'local')
+    expect(plan.attach).toHaveLength(0)
+    // Dormant skips are the quiet kind - never surfaced as errors.
+    expect(plan.skipped.every((s) => s.reason === 'dormant' || s.reason === 'local')).toBe(true)
   })
 })

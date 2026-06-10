@@ -18,12 +18,13 @@ import { resolveTsx } from './resolve-tsx.js'
 import { LocalTransport } from './transport/local.js'
 import { LOCAL_LOCATION, type Transport } from './transport/index.js'
 import { TransportRouter } from './transport/router.js'
-import { attachLocation } from './transport/attach.js'
+import { attachLocation, planStartupAttachments } from './transport/attach.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
 import { handleListOrganizations } from './tools/organizations.js'
+import { handleListLocations } from './tools/locations.js'
 
 async function startServer(config: Config, brokerPort: number, resolved: ResolvedConfig) {
   let worktreeName: string | undefined
@@ -120,23 +121,35 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     }
   }
 
-  // Attach every non-local location that has tokens. Configured-but-
-  // token-less locations log a hint and get skipped; the user runs
-  // `authenticate({location: ...})` to finish the setup, which hot-
-  // attaches via the same function path.
-  for (const location of resolved.locations) {
-    if (location.isLocal) continue
-    if (!location.url) {
-      console.error(`[cccollab] Location "${location.name}" has no URL; skipping.`)
-      continue
-    }
-    if (!location.accessToken || !location.refreshToken) {
+  // Attach the non-local locations the user has actually engaged: the
+  // active location, plus any location carrying configured channels to
+  // auto-subscribe. Dormant locations (token-bearing but neither active
+  // nor channel-configured) stay in the config so `authenticate` can
+  // hot-attach them on demand, but are left untouched here - that is what
+  // keeps a stale/expired remote (e.g. an old KAI location) from forcing
+  // a sign-in round-trip during purely-local work. Engaged-but-
+  // misconfigured locations are surfaced with an actionable hint; the
+  // user runs `authenticate({location: ...})` to finish setup, which
+  // hot-attaches via the same function path.
+  const plan = planStartupAttachments(resolved.locations, resolved.active.activeLocation)
+  for (const { name, reason } of plan.skipped) {
+    if (reason === 'local' || reason === 'dormant') continue // expected; stay quiet
+    if (reason === 'no-url') {
+      console.error(`[cccollab] Location "${name}" has no URL; skipping.`)
+    } else if (reason === 'no-tokens') {
       console.error(
-        `[cccollab] Location "${location.name}" is configured but has no tokens. ` +
-          `Call authenticate({location: "${location.name}"}) to sign in.`,
+        `[cccollab] Location "${name}" is configured but has no tokens. ` +
+          `Call authenticate({location: "${name}"}) to sign in.`,
       )
-      continue
+    } else if (reason === 'not-constructable') {
+      console.error(
+        `[cccollab] Location "${name}" is missing its Clerk app pointer ` +
+          `(clerkIssuer/clerkClientId) or uses a legacy auth type; skipping. ` +
+          `Re-run authenticate({location: "${name}"}) after configuring Clerk.`,
+      )
     }
+  }
+  for (const location of plan.attach) {
     const result = await attachLocation(location.name, {
       session,
       context,
@@ -512,6 +525,25 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     async () => {
       try {
         return text(await handleListOrganizations({ router: deps.router }))
+      } catch (err) {
+        return error(err)
+      }
+    },
+  )
+
+  mcp.registerTool(
+    'list_locations',
+    {
+      description:
+        'List every configured location (the reserved "local" broker plus any remote locations from ~/.cccollab/config.json and .cccollab.json) with attach and login state. ' +
+        'Returns {locations: [{name, isLocal, url?, attached, active, loggedIn, tokenStatus, constructable, channelsConfigured, degradation?}]}. ' +
+        '`attached` = a live transport exists; `loggedIn` = a refresh token is on disk; `tokenStatus` is valid|expiringSoon|expired|none (derived, no network). ' +
+        'Shows locations you are logged into even when you have not joined any channel or topic. Read-only - does not open a connection. Callable before introduce.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return text(handleListLocations({ router: deps.router, locations: deps.locations, context: deps.context }))
       } catch (err) {
         return error(err)
       }

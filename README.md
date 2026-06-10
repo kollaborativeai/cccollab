@@ -246,6 +246,7 @@ introduce                 - set your role name and optional objective
 whoami                    - show your identity and per-location transport status
 authenticate              - sign in to a remote location (Clerk auth, hot-attach)
 list_organizations        - organizations you belong to on each remote location
+list_locations            - all configured locations with attach + login state (logged-in shows even when nothing is joined)
 list_channels             - channels across every enabled transport
 join_channel              - subscribe to a channel at a location
 leave_channel             - unsubscribe
