@@ -9,8 +9,14 @@ process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
 const { resolveConfig } = await import('../../src/config/resolve.js')
-const { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME, DEFAULT_REMOTE_URL, DEFAULT_CLERK_ISSUER, DEFAULT_CLERK_CLIENT_ID } =
-  await import('../../src/constants.js')
+const {
+  CCCOLLAB_CONFIG_FILE,
+  CCCOLLAB_HOME,
+  DEFAULT_REMOTE_LOCATION_NAME,
+  DEFAULT_REMOTE_URL,
+  DEFAULT_CLERK_ISSUER,
+  DEFAULT_CLERK_CLIENT_ID,
+} = await import('../../src/constants.js')
 
 function writeUserConfig(content: unknown): void {
   mkdirSync(CCCOLLAB_HOME, { recursive: true })
@@ -241,21 +247,22 @@ describe('resolveConfig', () => {
   })
 
   describe('defaults injection (KAI-316)', () => {
-    it('synthesizes the kai remote location when only local is configured', () => {
+    it('synthesizes the default remote location when only local is configured', () => {
       // Empty user + empty project: applyDefaults runs between merge and env
-      // overrides, producing a kai location wired with the baked-in URL +
-      // Clerk pointer.
+      // overrides, producing the default remote location wired with the
+      // baked-in URL + Clerk pointer.
       const resolved = resolveConfig(projectRoot, {})
-      const kai = resolved.locations.find((l) => l.name === 'kai')
-      expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
-      expect(kai?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
-      expect(kai?.clerkClientId).toBe(DEFAULT_CLERK_CLIENT_ID)
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+      expect(remote?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
+      expect(remote?.clerkClientId).toBe(DEFAULT_CLERK_CLIENT_ID)
     })
 
     it('still lets CCCOLLAB_REMOTE_URL override the baked-in proxy URL', () => {
-      // Env overrides run AFTER defaults injection, so CCCOLLAB_REMOTE_URL
-      // continues to win. applyEnvOverrides registers under "remote" (not
-      // "kai") and marks it active.
+      // Env overrides run AFTER defaults injection. The default location and
+      // the env-registered location share the name "remote", so
+      // applyEnvOverrides updates the same entry (overriding the baked URL)
+      // and marks it active rather than adding a parallel location.
       const resolved = resolveConfig(projectRoot, { CCCOLLAB_REMOTE_URL: 'https://override.example' })
       const remote = resolved.locations.find((l) => l.name === 'remote')
       expect(remote?.url).toBe('https://override.example')
@@ -263,10 +270,10 @@ describe('resolveConfig', () => {
     })
 
     it('does not throw on resolveConfig when a project file has a cascade-active local topic', () => {
-      // The synthesized `kai` is always inactive, so it can never collide
-      // with a cascade-active `local`: resolveActive sees exactly one active
-      // location (local) and does not reject with "exactly one active
-      // location required".
+      // The synthesized default remote location is always inactive, so it can
+      // never collide with a cascade-active `local`: resolveActive sees exactly
+      // one active location (local) and does not reject with "exactly one
+      // active location required".
       writeFileSync(
         join(projectRoot, '.cccollab.json'),
         JSON.stringify({
@@ -278,9 +285,9 @@ describe('resolveConfig', () => {
       expect(() => resolveConfig(projectRoot, {})).not.toThrow()
       const resolved = resolveConfig(projectRoot, {})
       expect(resolved.active.activeLocation).toBe('local')
-      // kai is synthesized but not active
-      const kai = resolved.locations.find((l) => l.name === 'kai')
-      expect(kai).toBeDefined()
+      // the default remote location is synthesized but not active
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote).toBeDefined()
     })
   })
 })

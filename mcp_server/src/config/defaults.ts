@@ -18,7 +18,7 @@ import { LOCAL_LOCATION, type UserCccollabConfig } from './schema.js'
  *  1. If no non-`local` location exists in the merged config,
  *     synthesize one named DEFAULT_REMOTE_LOCATION_NAME. It is added
  *     present-but-inactive: never marked `active`. This makes the
- *     hosted backend available (so `set_active_location kai` works once
+ *     hosted backend available (so `set_active_location remote` works once
  *     the user authenticates) without auto-activating it or routing
  *     messages there on startup. Auto-activation is deliberately
  *     deferred to later work; leaving the synthesized location inactive

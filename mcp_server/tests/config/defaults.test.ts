@@ -20,7 +20,7 @@ describe('applyDefaults', () => {
 
   it('synthesizes the location present-but-inactive (never marks it active)', () => {
     // Activation is deferred: a fresh install must not auto-route messages to
-    // the hosted backend. The location is added so `set_active_location kai`
+    // the hosted backend. The location is added so `set_active_location remote`
     // works later, but it carries no `active` flag.
     const result = applyDefaults({ locations: { local: {} } })
     expect(result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]?.active).toBeUndefined()
@@ -37,25 +37,25 @@ describe('applyDefaults', () => {
     expect(input.locations).toEqual({ local: {} })
   })
 
-  it('fills missing url/clerkIssuer/clerkClientId on a partial non-local entry', () => {
+  it('fills missing url/clerkIssuer/clerkClientId on a partial default-location entry', () => {
     const result = applyDefaults({
       locations: {
-        kai: { clerkClientId: 'user-supplied-client' },
+        [DEFAULT_REMOTE_LOCATION_NAME]: { clerkClientId: 'user-supplied-client' },
       },
     })
-    const kai = result.locations?.kai
-    expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
-    expect(kai?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
-    expect(kai?.clerkClientId).toBe('user-supplied-client') // user wins
+    const remote = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+    expect(remote?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
+    expect(remote?.clerkClientId).toBe('user-supplied-client') // user wins
   })
 
-  it('does not synthesize a kai entry if the user already has a different non-local location', () => {
+  it('does not synthesize the default entry if the user already has a different non-local location', () => {
     const result = applyDefaults({
       locations: {
         selfhosted: { url: 'https://my.convex.cloud', clerkIssuer: 'https://my.clerk', clerkClientId: 'my-id' },
       },
     })
-    expect(result.locations?.kai).toBeUndefined()
+    expect(result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]).toBeUndefined()
     expect(result.locations?.selfhosted?.url).toBe('https://my.convex.cloud')
   })
 
@@ -73,23 +73,23 @@ describe('applyDefaults', () => {
 
   it('leaves credential fields untouched', () => {
     const result = applyDefaults({
-      locations: { kai: { accessToken: 'tok', refreshToken: 'rt' } },
+      locations: { [DEFAULT_REMOTE_LOCATION_NAME]: { accessToken: 'tok', refreshToken: 'rt' } },
     })
-    const kai = result.locations?.kai
-    expect(kai?.accessToken).toBe('tok')
-    expect(kai?.refreshToken).toBe('rt')
+    const remote = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(remote?.accessToken).toBe('tok')
+    expect(remote?.refreshToken).toBe('rt')
     // and defaults still filled in for missing fields
-    expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
+    expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
   })
 
-  it('does not collide with an explicitly active location (kai stays inactive)', () => {
+  it('does not collide with an explicitly active location (default stays inactive)', () => {
     const result = applyDefaults({
       locations: { local: { active: true } },
     })
-    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
-    expect(kai).toBeDefined()
-    expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
-    expect(kai?.active).toBeUndefined()
+    const remote = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(remote).toBeDefined()
+    expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+    expect(remote?.active).toBeUndefined()
   })
 
   it('does not collide with a cascade-active location (channel.active)', () => {
@@ -98,9 +98,9 @@ describe('applyDefaults', () => {
         local: { channels: { dev: { active: true } } },
       },
     })
-    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
-    expect(kai).toBeDefined()
-    expect(kai?.active).toBeUndefined()
+    const remote = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(remote).toBeDefined()
+    expect(remote?.active).toBeUndefined()
   })
 
   it('does not collide with a cascade-active location (topic.active)', () => {
@@ -109,8 +109,8 @@ describe('applyDefaults', () => {
         local: { channels: { dev: { topics: { planning: { active: true } } } } },
       },
     })
-    const kai = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
-    expect(kai).toBeDefined()
-    expect(kai?.active).toBeUndefined()
+    const remote = result.locations?.[DEFAULT_REMOTE_LOCATION_NAME]
+    expect(remote).toBeDefined()
+    expect(remote?.active).toBeUndefined()
   })
 })

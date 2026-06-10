@@ -39,7 +39,7 @@ export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')
  * deliberately NOT baked here (KAI-316): it lives only in the worker's
  * upstream config, so the client never carries it.
  */
-export const DEFAULT_REMOTE_LOCATION_NAME = 'kai'
+export const DEFAULT_REMOTE_LOCATION_NAME = 'remote'
 export const DEFAULT_REMOTE_URL = 'https://collab.kollaborativeai.com'
 export const DEFAULT_CLERK_ISSUER = 'https://clerk.kollaborativeai.com'
 export const DEFAULT_CLERK_CLIENT_ID = 'fPDyXbk1afJeEE2S'

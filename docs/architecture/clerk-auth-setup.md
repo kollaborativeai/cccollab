@@ -31,7 +31,7 @@ End users put this in `~/.cccollab/config.json`:
 ```jsonc
 {
   "locations": {
-    "kai": {
+    "remote": {
       "url": "https://<kai-deployment>.convex.cloud",
       "clerkIssuer": "https://<clerk-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
@@ -47,11 +47,11 @@ End users put this in `~/.cccollab/config.json`:
 writes alongside the tokens — see below), but is optional today since
 Clerk is the only auth flow.
 
-After running `authenticate --location kai`, tokens are appended by the CLI:
+After running `authenticate --location remote`, tokens are appended by the CLI:
 
 ```json
 {
-  "kai": {
+  "remote": {
     "url": "...",
     "authType": "clerk",
     "clerkIssuer": "...",

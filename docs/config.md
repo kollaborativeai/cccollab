@@ -11,23 +11,24 @@ A brand-new install talks to the production cccollab backend without any
 on-disk config. The MCP server injects these defaults during
 `resolveConfig` (between the file merge and env overrides):
 
-| Field                         | Default                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------- |
-| `locations.kai.url`           | `https://collab.kollaborativeai.com` (Cloudflare proxy in front of KAI's Convex deployment) |
-| `locations.kai.clerkIssuer`   | `https://clerk.kollaborativeai.com` (KAI's production Clerk instance)                       |
-| `locations.kai.clerkClientId` | `fPDyXbk1afJeEE2S`                                                                          |
-| `locations.kai.authType`      | `clerk`                                                                                     |
+| Field                            | Default                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------- |
+| `locations.remote.url`           | `https://collab.kollaborativeai.com` (Cloudflare proxy in front of KAI's Convex deployment) |
+| `locations.remote.clerkIssuer`   | `https://clerk.kollaborativeai.com` (KAI's production Clerk instance)                       |
+| `locations.remote.clerkClientId` | `fPDyXbk1afJeEE2S`                                                                          |
+| `locations.remote.authType`      | `clerk`                                                                                     |
 
 Any field you set explicitly under `locations.<name>` in `.cccollab.json`
-or `~/.cccollab/config.json` wins over the default. The `kai` location is
+or `~/.cccollab/config.json` wins over the default. The `remote` location is
 synthesized only when no other non-`local` location is configured — so
 power-users who already declare `locations.selfhosted` are completely
-unaffected.
+unaffected. The name matches the `CCCOLLAB_REMOTE_URL` env override, so that
+env var updates this same location rather than adding a parallel one.
 
-The synthesized `kai` location is added present-but-inactive: it is never
+The synthesized `remote` location is added present-but-inactive: it is never
 marked `active`. A fresh install therefore resolves to no active location
 and does not auto-route messages to the hosted backend. After signing in
-with the `authenticate` tool, select it with `set_active_location kai`.
+with the `authenticate` tool, select it with `set_active_location remote`.
 (Auto-activation is deferred to later work.)
 
 Env-var overrides (`CCCOLLAB_REMOTE_URL`, etc.) run after defaults
