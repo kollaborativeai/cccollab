@@ -261,8 +261,8 @@ export class RemoteTransport implements Transport {
   /** Every unsubscribe callback returned by this transport's own
    *  `subscribe*` methods. On shutdown we invoke all of them before
    *  closing the underlying ConvexClient so no callback is still in
-   *  flight when the websocket disappears. DM unsubscribes handed out
-   *  to `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
+   *  flight when the websocket disappears. Unsubscribes handed out to
+   *  `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
    *  call is sufficient even if the caller forgets the external list. */
   private readonly trackedUnsubscribes = new Set<() => void>()
 

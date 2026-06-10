@@ -17,11 +17,21 @@ One-time setup per Clerk environment (dev / prod).
 3. Note the **Issuer URL** (e.g. `https://your-instance.clerk.accounts.dev` or `https://clerk.your-domain.com`).
 4. Note the **Client ID** (will be the literal `cccollab-cli` or a generated id — copy whatever Clerk produces).
 
-## In Clerk JWT Templates
+## On the Convex deployment
 
-Verify the `convex` template exists. KAI already uses it for the web app — the same template works for the CLI.
+The CLI authenticates Convex with the Clerk **OIDC ID token** issued by the
+OAuth flow. That token's `aud` claim is the OAuth **Client ID**, so the Convex
+deployment must register a matching auth provider in `auth.config.ts`:
 
-If you need to add it: template name `convex`, audience `convex`, lifetime ≤ 60s.
+```ts
+{ domain: process.env.CLERK_FRONTEND_API_URL, applicationID: process.env.CLERK_OAUTH_CLIENT_ID }
+```
+
+and `CLERK_OAUTH_CLIENT_ID` must be set on the deployment to the OAuth app's
+Client ID (the same value as `clerkClientId` below). Convex verifies the ID
+token offline against the Clerk JWKS — there is no token-exchange endpoint.
+Dev and prod Clerk instances have different Client IDs, so set the value
+per-deployment.
 
 ## Per-user config
 
@@ -56,10 +66,13 @@ After running `authenticate --location kai`, tokens are appended by the CLI:
     "clerkIssuer": "...",
     "clerkClientId": "cccollab-cli",
     "refreshToken": "<rt>",
-    "accessToken": "<short-lived jwt>",
+    "accessToken": "<oauth access token>",
+    "idToken": "<oidc id token — the credential sent to Convex>",
     "accessTokenExpiresAt": 1715000000000
   }
 }
 ```
 
-File mode is `0600` (existing cccollab convention).
+The `idToken` is the token attached to Convex requests; the `accessToken` is
+kept only to round-trip the OAuth session and is never sent to Convex. File
+mode is `0600` (existing cccollab convention).

@@ -1,5 +1,5 @@
 import { describe, it, expect, test } from 'vitest'
-import { CccollabConfigSchema, LocationConfigSchema } from '../../src/config/schema.js'
+import { CccollabConfigSchema, LocationConfigSchema, UserLocationConfigSchema } from '../../src/config/schema.js'
 
 describe('CccollabConfigSchema', () => {
   it('accepts an empty object', () => {
@@ -155,5 +155,21 @@ describe('LocationConfigSchema', () => {
       clerkRedirectPort: 54321.5,
     })
     expect(result.success).toBe(false)
+  })
+})
+
+describe('UserLocationConfigSchema (cross-version skew tolerance)', () => {
+  it('accepts AND preserves an unknown field (.passthrough) so a newer version can add a credential field without bricking this one', () => {
+    const result = UserLocationConfigSchema.safeParse({
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      idToken: 'jwt',
+      // A field a future cccollab version might persist that this version
+      // doesn't model yet. The user-level (shared ~/.cccollab/config.json)
+      // schema must not reject it — and must round-trip it on save.
+      futureCredentialField: 'keep-me',
+    })
+    expect(result.success).toBe(true)
+    expect(result.success && (result.data as Record<string, unknown>).futureCredentialField).toBe('keep-me')
   })
 })

@@ -3,7 +3,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ActiveContext } from '../../src/context.js'
 import { SessionManager } from '../../src/session.js'
 import { TransportRouter } from '../../src/transport/router.js'
-import { attachLocation, planStartupAttachments, type AttachCtx } from '../../src/transport/attach.js'
+import {
+  attachLocation,
+  defaultTransportFactory,
+  planStartupAttachments,
+  type AttachCtx,
+} from '../../src/transport/attach.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { ParsedMessage } from '../../src/types.js'
@@ -533,5 +538,34 @@ describe('planStartupAttachments', () => {
     expect(plan.attach).toHaveLength(0)
     // Dormant skips are the quiet kind - never surfaced as errors.
     expect(plan.skipped.every((s) => s.reason === 'dormant' || s.reason === 'local')).toBe(true)
+  })
+})
+
+describe('defaultTransportFactory', () => {
+  const clerkLoc = (url: string): ResolvedLocation => ({
+    name: 'kai',
+    isLocal: false,
+    url,
+    clerkIssuer: 'https://x.clerk.accounts.dev',
+    clerkClientId: 'cccollab-cli',
+    idToken: 'id',
+    refreshToken: 'rt',
+    accessToken: 'at',
+    accessTokenExpiresAt: Date.now() + 60_000,
+    channels: [],
+  })
+
+  it('refuses a non-HTTPS, non-loopback deployment URL (would leak the ID token over plaintext)', () => {
+    expect(() => defaultTransportFactory(clerkLoc('http://kai.example.com'))).toThrow(
+      /Refusing to send Bearer token to a non-HTTPS endpoint/,
+    )
+  })
+
+  it('allows an HTTPS deployment URL', () => {
+    expect(() => defaultTransportFactory(clerkLoc('https://kai.convex.cloud'))).not.toThrow()
+  })
+
+  it('allows a loopback http deployment URL (local convex dev)', () => {
+    expect(() => defaultTransportFactory(clerkLoc('http://127.0.0.1:8001'))).not.toThrow()
   })
 })

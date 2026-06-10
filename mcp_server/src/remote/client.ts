@@ -66,10 +66,7 @@ export const CLERK_FRESHNESS_MARGIN_MS = 10_000
  */
 export function makeClerkAuthFetcher(
   init: Required<Pick<RemoteClientInit, 'locationName' | 'url' | 'clerkIssuer' | 'clerkClientId'>> &
-    Pick<
-      RemoteClientInit,
-      'accessToken' | 'idToken' | 'refreshToken' | 'accessTokenExpiresAt' | 'userEmail' | 'userId'
-    >,
+    Pick<RemoteClientInit, 'idToken' | 'refreshToken' | 'accessTokenExpiresAt' | 'userEmail' | 'userId'>,
 ): (args: { forceRefreshToken: boolean }) => Promise<string | null> {
   const { clerkIssuer, clerkClientId } = init
   let currentIdToken = init.idToken
@@ -163,7 +160,6 @@ export function createRemoteClient(init: RemoteClientInit): ConvexClient {
     url: init.url,
     clerkIssuer: init.clerkIssuer,
     clerkClientId: init.clerkClientId,
-    accessToken: init.accessToken,
     idToken: init.idToken,
     refreshToken: init.refreshToken,
     accessTokenExpiresAt: init.accessTokenExpiresAt,

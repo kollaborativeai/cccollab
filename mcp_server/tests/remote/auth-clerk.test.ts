@@ -7,9 +7,19 @@ import {
   exchangeCodeForTokens,
   refreshAccessToken,
   runClerkPkce,
+  decodeJwtExp,
   DEFAULT_CLERK_REDIRECT_PORT,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/loopback.js'
+
+/** Build a syntactically-valid JWT carrying only an `exp` claim (no real
+ *  signature) for exercising the local freshness checks. */
+function jwtWithExp(expSecondsFromNow: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expSecondsFromNow })).toString(
+    'base64url',
+  )
+  return `eyJhbGciOiJSUzI1NiJ9.${payload}.sig`
+}
 
 describe('PKCE primitives', () => {
   it('generateCodeVerifier produces an 86-char base64url string', () => {
@@ -166,7 +176,25 @@ describe('refreshAccessToken', () => {
     expect(result.idToken).toBe('new_id')
   })
 
-  it('falls back to the prior ID token when the refresh response omits one', async () => {
+  it('re-sends the openid scope on refresh so Clerk re-issues the id_token (RFC 6749 §6)', async () => {
+    const captured: { body: string } = { body: '' }
+    const fetchMock = (async (_url: string, init: RequestInit) => {
+      captured.body = init.body as string
+      return new Response(JSON.stringify({ access_token: 'new_at', id_token: 'new_id', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await refreshAccessToken(
+      { issuer: 'https://x.clerk.accounts.dev', clientId: 'cccollab-cli', refreshToken: 'old_rt' },
+      fetchMock,
+    )
+    expect(new URLSearchParams(captured.body).get('scope')).toBe('openid profile email')
+  })
+
+  it('falls back to a non-expired prior ID token when the refresh response omits one', async () => {
+    const validFallback = jwtWithExp(3600)
     const fetchMock = (async () =>
       new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
         status: 200,
@@ -178,11 +206,51 @@ describe('refreshAccessToken', () => {
         issuer: 'https://x.clerk.accounts.dev',
         clientId: 'cccollab-cli',
         refreshToken: 'old_rt',
-        fallbackIdToken: 'prior_id',
+        fallbackIdToken: validFallback,
       },
       fetchMock,
     )
-    expect(result.idToken).toBe('prior_id')
+    expect(result.idToken).toBe(validFallback)
+  })
+
+  it('throws (does not cache) when id_token is omitted and the fallback is an empty string', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      refreshAccessToken(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          refreshToken: 'old_rt',
+          fallbackIdToken: '',
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Unexpected refresh response shape/)
+  })
+
+  it('throws when id_token is omitted and the fallback is already expired', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      refreshAccessToken(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          refreshToken: 'old_rt',
+          fallbackIdToken: jwtWithExp(-3600),
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Unexpected refresh response shape/)
   })
 
   it('preserves prior refresh token if server omits one', async () => {
@@ -211,6 +279,20 @@ describe('refreshAccessToken', () => {
       fetchMock,
     )
     expect(result.refreshToken).toBe('old_rt')
+  })
+})
+
+describe('decodeJwtExp', () => {
+  it('returns the numeric exp claim from a JWT payload', () => {
+    const exp = Math.floor(Date.now() / 1000) + 1234
+    const payload = Buffer.from(JSON.stringify({ exp, sub: 'u' })).toString('base64url')
+    expect(decodeJwtExp(`h.${payload}.s`)).toBe(exp)
+  })
+
+  it('returns null for a malformed token or a payload without exp', () => {
+    expect(decodeJwtExp('not-a-jwt')).toBeNull()
+    const noExp = Buffer.from(JSON.stringify({ sub: 'u' })).toString('base64url')
+    expect(decodeJwtExp(`h.${noExp}.s`)).toBeNull()
   })
 })
 

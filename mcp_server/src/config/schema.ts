@@ -62,27 +62,35 @@ const BaseLocationFields = {
  *  than a generic schema rejection. This keeps `~/.cccollab/config.json`
  *  parseable after `saveLocationAuth` writes credential-only entries that
  *  don't carry the project-level `clerkIssuer` / `clerkClientId` pointer. */
-export const LocationConfigSchema = z
-  .object({
-    ...BaseLocationFields,
-    authType: z.literal('clerk').optional(),
-    clerkIssuer: z.string().optional(),
-    clerkClientId: z.string().optional(),
-    clerkRedirectPort: z.number().int().positive().optional(),
-    accessToken: z.string().optional(),
-    refreshToken: z.string().optional(),
-    /** OIDC ID token (JWT). This is what authenticates Convex — its `aud`
-     *  claim is the OAuth Client ID, which the deployment's auth.config.ts
-     *  registers as a provider. The access token carries no usable `aud` and
-     *  is never sent to Convex. */
-    idToken: z.string().optional(),
-    accessTokenExpiresAt: z.number().optional(),
-  })
-  .strict()
+const LocationConfigFields = {
+  ...BaseLocationFields,
+  authType: z.literal('clerk').optional(),
+  clerkIssuer: z.string().optional(),
+  clerkClientId: z.string().optional(),
+  clerkRedirectPort: z.number().int().positive().optional(),
+  accessToken: z.string().optional(),
+  refreshToken: z.string().optional(),
+  /** OIDC ID token (JWT). This is what authenticates Convex — its `aud`
+   *  claim is the OAuth Client ID, which the deployment's auth.config.ts
+   *  registers as a provider. The access token carries no usable `aud` and
+   *  is never sent to Convex. */
+  idToken: z.string().optional(),
+  accessTokenExpiresAt: z.number().optional(),
+}
 
-/** Identical shape — keeping the alias so existing call sites that
- *  distinguish "user-level" vs "project-level" reads stay readable. */
-export const UserLocationConfigSchema = LocationConfigSchema
+/** Project-level (`.cccollab.json`) location shape — `.strict()` so typos in a
+ *  committed config surface as errors rather than being silently ignored. */
+export const LocationConfigSchema = z.object(LocationConfigFields).strict()
+
+/** User-level (`~/.cccollab/config.json`) location shape — `.passthrough()`
+ *  instead of strict, and the difference is load-bearing: when a NEWER cccollab
+ *  version writes a credential field this version doesn't know yet (exactly how
+ *  `idToken` was introduced), an OLDER version sharing the same file must still
+ *  load it. Strict parsing would throw "failed schema validation" on read,
+ *  which blocks every read AND write for the old binary until the field is
+ *  removed. Passthrough preserves unknown keys through read-modify-write so
+ *  future credential additions can't brick a side-by-side installed version. */
+export const UserLocationConfigSchema = z.object(LocationConfigFields).passthrough()
 
 export const CccollabConfigSchema = z
   .object({
@@ -101,7 +109,10 @@ export const UserCccollabConfigSchema = z
     objective: z.string().optional(),
     locations: z.record(z.string(), UserLocationConfigSchema).optional(),
   })
-  .strict()
+  // `.passthrough()` for the same cross-version-skew reason as
+  // `UserLocationConfigSchema`: a newer version adding a top-level field must
+  // not brick an older one reading the shared user config.
+  .passthrough()
 
 export type TopicConfig = z.infer<typeof TopicConfigSchema>
 export type ChannelConfig = z.infer<typeof ChannelConfigSchema>

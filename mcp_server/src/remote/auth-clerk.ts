@@ -78,6 +78,13 @@ export interface AuthorizeUrlArgs {
  * Convex (its `aud` is the OAuth Client ID, matching KAI's auth.config.ts
  * provider), and the profile/email claims back KAI's users lookup via clerkId.
  */
+/**
+ * Default OAuth scopes. `openid` makes Clerk issue the OIDC ID token used to
+ * authenticate Convex; `profile email` back KAI's users lookup. The same set
+ * is re-sent on refresh (RFC 6749 §6) so Clerk re-issues the `id_token`.
+ */
+export const DEFAULT_CLERK_SCOPES = ['openid', 'profile', 'email'] as const
+
 export function buildAuthorizeUrl(args: AuthorizeUrlArgs): string {
   const url = new URL('/oauth/authorize', args.issuer)
   url.searchParams.set('client_id', args.clientId)
@@ -86,8 +93,36 @@ export function buildAuthorizeUrl(args: AuthorizeUrlArgs): string {
   url.searchParams.set('code_challenge', args.codeChallenge)
   url.searchParams.set('code_challenge_method', 'S256')
   url.searchParams.set('state', args.state)
-  url.searchParams.set('scope', (args.scopes ?? ['openid', 'profile', 'email']).join(' '))
+  url.searchParams.set('scope', (args.scopes ?? DEFAULT_CLERK_SCOPES).join(' '))
   return url.toString()
+}
+
+/**
+ * Decode a JWT's `exp` claim (seconds since epoch) without verifying the
+ * signature — the server re-verifies on every request; this is only used
+ * locally to decide whether a cached/fallback token is still worth keeping.
+ * Returns null when the token is malformed or carries no numeric `exp`.
+ */
+export function decodeJwtExp(jwt: string): number | null {
+  try {
+    const payload = jwt.split('.')[1] ?? ''
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown }
+    return typeof parsed.exp === 'number' ? parsed.exp : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * True when a JWT is unusable as a still-valid credential: either it can't be
+ * decoded (no readable `exp`) or its `exp` is in the past. Conservative by
+ * design — an undecodable token is treated as expired so it never gets cached
+ * or persisted as if live.
+ */
+function isJwtExpiredOrUndecodable(jwt: string): boolean {
+  const exp = decodeJwtExp(jwt)
+  if (exp === null) return true
+  return exp * 1000 <= Date.now()
 }
 
 export interface TokenExchangeArgs {
@@ -166,9 +201,12 @@ export async function exchangeCodeForTokens(
  * RFC 6749 §6 (Refreshing an Access Token). Preserves the prior refresh token
  * if Clerk omits one in the response — Clerk's docs are ambiguous about whether
  * rotation is always returned, so we fall back to the input. Likewise the
- * refresh grant normally re-issues an `id_token` (the `openid` scope persists
- * across refreshes), but `fallbackIdToken` covers the case where it doesn't so
- * a still-valid ID token isn't dropped.
+ * refresh grant normally re-issues an `id_token` (we re-send the `openid`
+ * scope per RFC 6749 §6 so Clerk has no reason to omit it). `fallbackIdToken`
+ * is a last resort for the case where Clerk omits it anyway — but it is only
+ * honored when non-empty AND not yet expired, so a missing or stale ID token
+ * surfaces as an error here (caller flips to unauthenticated) rather than
+ * caching a dead/empty token that would fail every request until `exp`.
  */
 export async function refreshAccessToken(
   args: { issuer: string; clientId: string; refreshToken: string; fallbackIdToken?: string },
@@ -180,6 +218,7 @@ export async function refreshAccessToken(
     grant_type: 'refresh_token',
     refresh_token: args.refreshToken,
     client_id: args.clientId,
+    scope: DEFAULT_CLERK_SCOPES.join(' '),
   })
   const res = await fetchImpl(url.toString(), {
     method: 'POST',
@@ -195,7 +234,19 @@ export async function refreshAccessToken(
   const rawRefresh = json.refresh_token
   const refreshToken = typeof rawRefresh === 'string' && rawRefresh.length > 0 ? rawRefresh : args.refreshToken
   const rawIdToken = json.id_token
-  const idToken = typeof rawIdToken === 'string' && rawIdToken.length > 0 ? rawIdToken : args.fallbackIdToken
+  // Prefer a freshly-issued id_token; only fall back to the prior one when it
+  // is a non-empty, not-yet-expired JWT. An empty or stale fallback is dropped
+  // so the shape guard below throws instead of persisting a dead credential.
+  let idToken: string | undefined
+  if (typeof rawIdToken === 'string' && rawIdToken.length > 0) {
+    idToken = rawIdToken
+  } else if (
+    typeof args.fallbackIdToken === 'string' &&
+    args.fallbackIdToken.length > 0 &&
+    !isJwtExpiredOrUndecodable(args.fallbackIdToken)
+  ) {
+    idToken = args.fallbackIdToken
+  }
   const expiresIn = json.expires_in
   if (typeof accessToken !== 'string' || typeof idToken !== 'string' || typeof expiresIn !== 'number') {
     throw new Error(`Unexpected refresh response shape: ${JSON.stringify(redactSensitiveFields(json))}`)
@@ -229,7 +280,7 @@ function isLoopbackHost(hostname: string): boolean {
  * URLs in a user's config would otherwise leak the OAuth access token
  * across the network.
  */
-function assertSecureBearerUrl(url: URL, context: string): void {
+export function assertSecureBearerUrl(url: URL, context: string): void {
   if (url.protocol === 'https:') return
   if (url.protocol === 'http:' && isLoopbackHost(url.hostname)) return
   throw new Error(

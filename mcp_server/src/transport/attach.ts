@@ -4,6 +4,7 @@ import type { SessionManager } from '../session.js'
 import type { ResolvedLocation } from '../config/resolve.js'
 import type { ParsedMessage } from '../types.js'
 import { createRemoteClient } from '../remote/client.js'
+import { assertSecureBearerUrl } from '../remote/auth-clerk.js'
 import { RemoteTransport } from './remote.js'
 import type { TransportRouter } from './router.js'
 import type { Transport, TransportTopicMessage } from './index.js'
@@ -384,6 +385,11 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
       `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must supply the Clerk app pointer.`,
     )
   }
+  // Fail closed on a non-HTTPS (and non-loopback) deployment URL: the OIDC ID
+  // token is attached to this Convex client, so a mistyped `http://` host would
+  // otherwise leak a ~24h credential over plaintext ws://. The Clerk token
+  // endpoints have their own guard; this covers the Convex URL itself.
+  assertSecureBearerUrl(new URL(location.url), `Convex location URL ("${location.name}")`)
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
