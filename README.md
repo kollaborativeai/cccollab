@@ -98,7 +98,7 @@ events from both feed the same Channel-protocol stream. A channel at the
 reserved `local` location is always distinct from a channel at a named
 remote location - same channel name, different scope.
 
-The default install already has KAI's hosted backend wired in as the `kai`
+The default install already has KAI's hosted backend wired in as the `remote`
 location — run the `authenticate` MCP tool from inside Claude Code to sign
 in. The rest of this section covers the **self-hosting / override path**
 for pointing cccollab at your own Convex deployment + Clerk app.

@@ -18,18 +18,25 @@ on-disk config. The MCP server injects these defaults during
 | `locations.remote.clerkClientId` | `fPDyXbk1afJeEE2S`                                                                          |
 | `locations.remote.authType`      | `clerk`                                                                                     |
 
-Any field you set explicitly under `locations.<name>` in `.cccollab.json`
-or `~/.cccollab/config.json` wins over the default. The `remote` location is
-synthesized only when no other non-`local` location is configured — so
-power-users who already declare `locations.selfhosted` are completely
-unaffected. The name matches the `CCCOLLAB_REMOTE_URL` env override, so that
-env var updates this same location rather than adding a parallel one.
+Defaults only ever touch the location named `remote`. Any field you set
+explicitly under `locations.remote` wins over the baked value (user config
+> env > defaults). A non-`local` location under any **other** name (e.g.
+`locations.selfhosted`) is left completely untouched — its missing
+`clerkIssuer` / `clerkClientId` are **not** back-filled, so the normal
+"missing Clerk pointer" / "non-local location must have a url" errors still
+fire for an incomplete self-hosted entry. The `remote` name also matches the
+`CCCOLLAB_REMOTE_URL` env override, so that env var updates this same
+location rather than adding a parallel one.
 
 The synthesized `remote` location is added present-but-inactive: it is never
 marked `active`. A fresh install therefore resolves to no active location
 and does not auto-route messages to the hosted backend. After signing in
-with the `authenticate` tool, select it with `set_active_location remote`.
-(Auto-activation is deferred to later work.)
+with the `authenticate` tool, engage it by joining a channel there —
+`join_channel` (or `set_active_channel`) with `location: "remote"`.
+(Automatic activation on sign-in is deferred to later work.)
+
+To suppress the baked-in default entirely (no synthesized location, no
+back-fill), set `CCCOLLAB_NO_DEFAULT_REMOTE=1`.
 
 Env-var overrides (`CCCOLLAB_REMOTE_URL`, etc.) run after defaults
 injection, so they still take precedence as documented below.
@@ -214,6 +221,7 @@ All env vars are applied after file merging and win over anything on disk.
 | `CCCOLLAB_REMOTE_URL`      | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds. |
 | `CCCOLLAB_CLERK_ISSUER`    | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.    |
 | `CCCOLLAB_CLERK_CLIENT_ID` | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.            |
+| `CCCOLLAB_NO_DEFAULT_REMOTE` | Any non-empty value suppresses the baked-in hosted-backend default: no `remote` location is synthesized and no baked pointer is filled in. For self-hosting / privacy-sensitive setups. |
 | `CCCOLLAB_PROFILE`         | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.            |
 
 ## Reserved `local` location

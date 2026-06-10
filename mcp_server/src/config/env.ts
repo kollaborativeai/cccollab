@@ -1,3 +1,4 @@
+import { DEFAULT_REMOTE_LOCATION_NAME } from '../constants.js'
 import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from './schema.js'
 
 /**
@@ -17,12 +18,12 @@ import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from
  *     CCCOLLAB_NAME.
  *
  *   CCCOLLAB_REMOTE_URL
- *     Register (or update) a location named `remote` with this URL and
+ *     Register (or update) the location named `remote` with this URL and
  *     mark it as the active location. Any other location's `active`
  *     flag is cleared so "exactly one active location" holds in the
- *     final resolved config. The `remote` name is conventional only -
- *     it's the label used by the env var, not a reserved key (the only
- *     reserved name is `local`).
+ *     final resolved config. This is the same name the baked-in default
+ *     uses (DEFAULT_REMOTE_LOCATION_NAME), so this env var updates that
+ *     same location rather than adding a parallel one.
  *
  *   CCCOLLAB_CLERK_ISSUER
  *   CCCOLLAB_CLERK_CLIENT_ID
@@ -33,7 +34,10 @@ import { LOCAL_LOCATION, type UserCccollabConfig, type UserLocationConfig } from
  *     `remote` from CCCOLLAB_REMOTE_URL wins, else the first existing
  *     non-local active location, else a no-op.
  */
-const REMOTE_ENV_LOCATION = 'remote'
+// Same location the baked-in default synthesizes, so CCCOLLAB_REMOTE_URL
+// updates that entry instead of creating a parallel one. Kept as an alias
+// for readability at the call sites below.
+const REMOTE_ENV_LOCATION = DEFAULT_REMOTE_LOCATION_NAME
 
 export function applyEnvOverrides(config: UserCccollabConfig, env: NodeJS.ProcessEnv): UserCccollabConfig {
   // Structured clone so the caller's object is never mutated. Env

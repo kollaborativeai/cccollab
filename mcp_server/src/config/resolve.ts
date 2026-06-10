@@ -71,7 +71,7 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
     project.filePath === null ? project.config : stripProjectCredentials(project.config, project.filePath).stripped
 
   const merged = mergeConfigs(user, strippedProject)
-  const withDefaults = applyDefaults(merged)
+  const withDefaults = applyDefaults(merged, env)
   const withEnv = applyEnvOverrides(withDefaults, env)
 
   // Always ensure `local` is present in the resolved view.

@@ -269,6 +269,37 @@ describe('resolveConfig', () => {
       expect(resolved.active.activeLocation).toBe('remote')
     })
 
+    it('lets CCCOLLAB_CLERK_ISSUER/CLIENT_ID override the synthesized default without CCCOLLAB_REMOTE_URL', () => {
+      // applyDefaults synthesizes `remote`; applyEnvOverrides then targets that
+      // same entry, so the Clerk env vars override the baked pointer even when
+      // CCCOLLAB_REMOTE_URL is absent (the URL stays the baked proxy).
+      const resolved = resolveConfig(projectRoot, {
+        CCCOLLAB_CLERK_ISSUER: 'https://env.clerk.accounts.dev',
+        CCCOLLAB_CLERK_CLIENT_ID: 'env-client',
+      })
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+      expect(remote?.clerkIssuer).toBe('https://env.clerk.accounts.dev')
+      expect(remote?.clerkClientId).toBe('env-client')
+    })
+
+    it('does not synthesize the default when a different non-local location is configured', () => {
+      writeUserConfig({
+        locations: {
+          selfhosted: { url: 'https://my.convex.cloud', clerkIssuer: 'https://my.clerk', clerkClientId: 'my-id' },
+        },
+      })
+      const resolved = resolveConfig(projectRoot, {})
+      expect(resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)).toBeUndefined()
+      const selfhosted = resolved.locations.find((l) => l.name === 'selfhosted')
+      expect(selfhosted?.clerkIssuer).toBe('https://my.clerk') // untouched, not back-filled
+    })
+
+    it('CCCOLLAB_NO_DEFAULT_REMOTE suppresses the synthesized default', () => {
+      const resolved = resolveConfig(projectRoot, { CCCOLLAB_NO_DEFAULT_REMOTE: '1' })
+      expect(resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)).toBeUndefined()
+    })
+
     it('does not throw on resolveConfig when a project file has a cascade-active local topic', () => {
       // The synthesized default remote location is always inactive, so it can
       // never collide with a cascade-active `local`: resolveActive sees exactly
