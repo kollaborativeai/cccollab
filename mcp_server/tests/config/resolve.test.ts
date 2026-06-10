@@ -9,7 +9,8 @@ process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
 const { resolveConfig } = await import('../../src/config/resolve.js')
-const { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } = await import('../../src/constants.js')
+const { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME, DEFAULT_REMOTE_URL, DEFAULT_CLERK_ISSUER, DEFAULT_CLERK_CLIENT_ID } =
+  await import('../../src/constants.js')
 
 function writeUserConfig(content: unknown): void {
   mkdirSync(CCCOLLAB_HOME, { recursive: true })
@@ -246,9 +247,9 @@ describe('resolveConfig', () => {
       // Clerk pointer.
       const resolved = resolveConfig(projectRoot, {})
       const kai = resolved.locations.find((l) => l.name === 'kai')
-      expect(kai?.url).toBe('https://collab.kollaborativeai.com')
-      expect(kai?.clerkIssuer).toMatch(/clerk\.accounts\.dev$/)
-      expect(kai?.clerkClientId).toBe('cccollab-cli')
+      expect(kai?.url).toBe(DEFAULT_REMOTE_URL)
+      expect(kai?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
+      expect(kai?.clerkClientId).toBe(DEFAULT_CLERK_CLIENT_ID)
     })
 
     it('still lets CCCOLLAB_REMOTE_URL override the baked-in proxy URL', () => {

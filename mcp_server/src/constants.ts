@@ -33,23 +33,13 @@ export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')
  *
  * Wired in src/config/defaults.ts. Injected after merge, before env
  * overrides, so CCCOLLAB_REMOTE_URL still wins as expected.
+ *
+ * `DEFAULT_REMOTE_URL` is the branded Cloudflare Worker that reverse-
+ * proxies KAI's Convex deployment. The raw `*.convex.cloud` URL is
+ * deliberately NOT baked here (KAI-316): it lives only in the worker's
+ * upstream config, so the client never carries it.
  */
 export const DEFAULT_REMOTE_LOCATION_NAME = 'kai'
 export const DEFAULT_REMOTE_URL = 'https://collab.kollaborativeai.com'
-// TODO before deploy: replace placeholder with the production Clerk
-// instance URL. Until then, the value below is a syntactically valid but
-// non-resolving placeholder so the load-time guard below passes during
-// CI; OAuth will still fail at runtime (browser DNS) until this is set.
-export const DEFAULT_CLERK_ISSUER = 'https://kai-prod-placeholder.clerk.accounts.dev'
-export const DEFAULT_CLERK_CLIENT_ID = 'cccollab-cli'
-
-// Guard against shipping the unfilled placeholder. The `<...>` substring
-// is a marker the deployer must replace before publishing to npm — fail
-// at module load with a clear message rather than producing a Clerk URL
-// that 404s the user's browser later.
-if (DEFAULT_CLERK_ISSUER.includes('<')) {
-  throw new Error(
-    'DEFAULT_CLERK_ISSUER still contains the <kai-prod-instance> placeholder. ' +
-      'Replace it in src/constants.ts before publishing the package.',
-  )
-}
+export const DEFAULT_CLERK_ISSUER = 'https://clerk.kollaborativeai.com'
+export const DEFAULT_CLERK_CLIENT_ID = 'fPDyXbk1afJeEE2S'

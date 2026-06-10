@@ -14,8 +14,8 @@ on-disk config. The MCP server injects these defaults during
 | Field                         | Default                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------------------- |
 | `locations.kai.url`           | `https://collab.kollaborativeai.com` (Cloudflare proxy in front of KAI's Convex deployment) |
-| `locations.kai.clerkIssuer`   | KAI's production Clerk instance                                                             |
-| `locations.kai.clerkClientId` | `cccollab-cli`                                                                              |
+| `locations.kai.clerkIssuer`   | `https://clerk.kollaborativeai.com` (KAI's production Clerk instance)                       |
+| `locations.kai.clerkClientId` | `fPDyXbk1afJeEE2S`                                                                          |
 | `locations.kai.authType`      | `clerk`                                                                                     |
 
 Any field you set explicitly under `locations.<name>` in `.cccollab.json`
