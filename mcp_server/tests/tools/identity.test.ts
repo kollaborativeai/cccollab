@@ -388,7 +388,7 @@ describe('Identity Tools', () => {
             messageBus: bus,
             remoteTopicUnsubscribes: new Map(),
             remoteChannelUnsubscribes: new Map(),
-            attempted: new Set<string>(),
+            inflight: new Map<string, Promise<void>>(),
             candidates: ['flatout'],
             resolve: () => ({
               locations: [dormant],

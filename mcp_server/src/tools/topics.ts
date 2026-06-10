@@ -32,7 +32,7 @@ export interface TopicToolDeps {
    *  names a location; omit for "every non-local". No-op for 'local' and
    *  already-attached locations. Optional so legacy unit tests that build
    *  deps by hand keep compiling. See `ensureLazyAttach`. */
-  ensureAttached?: (target?: string) => Promise<void>
+  ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

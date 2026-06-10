@@ -5,7 +5,7 @@ export interface OrganizationToolDeps {
   /** Bring dormant token-bearing locations online before enumerating, so a
    *  remote in config is queried without a fresh `authenticate`. Optional so
    *  legacy unit tests keep compiling. See `ensureLazyAttach`. */
-  ensureAttached?: (target?: string) => Promise<void>
+  ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
 }
 
 /** A transport that can list organizations (remote transports only). */

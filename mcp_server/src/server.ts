@@ -239,35 +239,40 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // Lazy attach: a dormant remote (valid tokens, but neither active nor
   // channel-configured, so skipped by planStartupAttachments) is brought
   // online the first time any tool touches its location. This is what lets
-  // a token-bearing remote work through list_channels / send / etc. without
-  // a fresh `authenticate` sign-in. `attempted` bounds a dead remote to one
-  // try per process; `candidates` is the non-local universe from startup
-  // config; `resolve` re-reads config so tokens persisted since startup
-  // (peer refresh, prior authenticate) are picked up.
-  const lazyAttemptedLocations = new Set<string>()
+  // a token-bearing remote work through list_channels / etc. without a fresh
+  // `authenticate` sign-in. `lazyInflight` dedupes concurrent attempts and
+  // bounds a dead remote to one try per process; `candidates` is the
+  // non-local universe from startup config; `resolve` re-reads config so
+  // tokens persisted since startup (peer refresh, prior authenticate) are
+  // picked up.
+  const lazyInflight = new Map<string, Promise<void>>()
   const lazyCandidates = resolved.locations.filter((l) => !l.isLocal).map((l) => l.name)
   const cwd = process.cwd()
   const env = process.env
-  const ensureAttached = async (target?: string): Promise<void> => {
-    await ensureLazyAttach(target, {
-      session,
-      context,
-      router,
-      messageBus,
-      remoteTopicUnsubscribes,
-      remoteChannelUnsubscribes,
-      attempted: lazyAttemptedLocations,
-      candidates: lazyCandidates,
-      resolve: () => {
-        const fresh = resolveConfig(cwd, env)
-        return {
-          locations: fresh.locations,
-          activeLocation: fresh.active.activeLocation,
-          activeChannel: fresh.active.activeChannel,
-          activeTopic: fresh.active.activeTopic,
-        }
+  const ensureAttached = async (target?: string, opts: { force?: boolean } = {}): Promise<void> => {
+    await ensureLazyAttach(
+      target,
+      {
+        session,
+        context,
+        router,
+        messageBus,
+        remoteTopicUnsubscribes,
+        remoteChannelUnsubscribes,
+        inflight: lazyInflight,
+        candidates: lazyCandidates,
+        resolve: () => {
+          const fresh = resolveConfig(cwd, env)
+          return {
+            locations: fresh.locations,
+            activeLocation: fresh.active.activeLocation,
+            activeChannel: fresh.active.activeChannel,
+            activeTopic: fresh.active.activeTopic,
+          }
+        },
       },
-    })
+      opts,
+    )
   }
 
   registerTools(mcp, {
@@ -374,9 +379,10 @@ interface ToolDeps {
   env: NodeJS.ProcessEnv
   /** Bring a token-bearing non-local location online on first tool use.
    *  `target` names a location; omit it to cover every non-local candidate
-   *  (the list/broadcast tools). Cheap and idempotent after the first
-   *  attach — see `ensureLazyAttach`. */
-  ensureAttached: (target?: string) => Promise<void>
+   *  (the list/broadcast tools). `opts.force` (used by `authenticate`)
+   *  bypasses the introduce gate and the once-per-session guard. Cheap and
+   *  idempotent after the first attach — see `ensureLazyAttach`. */
+  ensureAttached: (target?: string, opts?: { force?: boolean }) => Promise<void>
 }
 
 function buildInstructions(session: SessionManager, resolved: ResolvedConfig, router: TransportRouter): string {

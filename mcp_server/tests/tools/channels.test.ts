@@ -377,7 +377,7 @@ describe('Channel Tools', () => {
             messageBus: bus,
             remoteTopicUnsubscribes: new Map(),
             remoteChannelUnsubscribes: new Map(),
-            attempted: new Set<string>(),
+            inflight: new Map<string, Promise<void>>(),
             candidates: ['remote'],
             resolve: () => ({
               locations: [dormant],

@@ -313,22 +313,83 @@ export interface LazyAttachCtx {
   messageBus: MessageBus
   remoteTopicUnsubscribes: Map<string, () => void>
   remoteChannelUnsubscribes: Map<string, () => void>
-  /** Location names already attempted this session. `ensureLazyAttach` adds
-   *  to it so a stale/unreachable remote is tried at most once per process
-   *  instead of on every tool call — this is what keeps lazy attach from
-   *  reintroducing the per-launch refresh noise that startup gating removed. */
-  attempted: Set<string>
+  /** In-flight (and completed) lazy-attach attempts, keyed by location name.
+   *  The first caller for a name stores its attach promise here; concurrent
+   *  and later callers await that same promise instead of starting a second
+   *  attach — this both dedupes overlapping tool calls (no double introduce /
+   *  websocket) and keeps a stale/unreachable remote from being retried on
+   *  every tool call. A failed attempt's resolved promise is retained so the
+   *  dead remote is tried at most once per process; a non-constructable
+   *  location's entry is dropped so a later token write can still be picked
+   *  up (see `lazyAttachOne`). */
+  inflight: Map<string, Promise<void>>
   /** Non-local location names eligible for lazy attach (the non-local
    *  locations present in the startup config). Used as the candidate set
    *  when `target` is undefined ("every non-local"). */
   candidates: string[]
   /** Re-resolve the config so a location authenticated (or refreshed by a
    *  peer process) since startup is attached with its current tokens. Only
-   *  invoked when there is an un-attempted, unregistered candidate, so the
-   *  common already-attached path costs nothing. */
+   *  invoked when there is an unregistered, not-yet-in-flight candidate, so
+   *  the common already-attached path costs nothing. */
   resolve: () => AttachResolved
   /** Passed through to `attachLocation`; tests inject a fake. */
   transportFactory?: (location: ResolvedLocation) => Transport
+}
+
+/** Can this location be turned into a live transport? Mirrors the
+ *  constructability half of `planStartupAttachments` (url + tokens + Clerk
+ *  pointer, matching `defaultTransportFactory`). A location that fails this
+ *  is not attemptable yet — it is not recorded as a spent attempt, so a
+ *  later config re-resolve (peer token write) can still pick it up. */
+function isConstructable(location: ResolvedLocation | undefined): location is ResolvedLocation {
+  return (
+    !!location &&
+    !location.isLocal &&
+    !!location.url &&
+    !!location.accessToken &&
+    !!location.refreshToken &&
+    !!location.clerkIssuer &&
+    !!location.clerkClientId
+  )
+}
+
+const NOOP_ATTACH: Promise<void> = Promise.resolve()
+
+/** Attach one location, deduping against any in-flight/completed attempt.
+ *  Synchronously records its promise in `ctx.inflight` *before* the first
+ *  await so a concurrent caller observes it and awaits rather than starting
+ *  a second attach. */
+function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolved, force: boolean): Promise<void> {
+  if (name === LOCAL_LOCATION || ctx.router.has(name)) return NOOP_ATTACH
+  if (!force) {
+    const existing = ctx.inflight.get(name)
+    if (existing) return existing
+  }
+  // Constructability is checked synchronously, before registering the
+  // in-flight promise: a not-yet-attemptable location (missing url/tokens/
+  // Clerk) must NOT be memoized, so a later resolve picking up peer-written
+  // tokens can still attach it.
+  const location = resolved.locations.find((l) => l.name === name)
+  if (!isConstructable(location)) return NOOP_ATTACH
+  const attempt = (async () => {
+    const result = await attachLocation(name, {
+      session: ctx.session,
+      context: ctx.context,
+      router: ctx.router,
+      messageBus: ctx.messageBus,
+      remoteTopicUnsubscribes: ctx.remoteTopicUnsubscribes,
+      remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
+      resolved,
+      transportFactory: ctx.transportFactory,
+    })
+    if (!result.ok) {
+      // Retain the resolved in-flight entry so the dead remote is not retried
+      // on every subsequent tool call this session.
+      logError(`Lazy-attach for "${name}" failed: ${result.reason}`)
+    }
+  })()
+  ctx.inflight.set(name, attempt)
+  return attempt
 }
 
 /**
@@ -341,53 +402,39 @@ export interface LazyAttachCtx {
  *
  *   - `target` names a single location; `undefined` means "every non-local
  *     candidate" (the list/broadcast tools that union across transports).
- *   - Already-registered or already-attempted names are skipped, so a dead
- *     remote is tried at most once per session and a live one is never
- *     torn down and rebuilt.
- *   - A location missing url / tokens / Clerk pointer is not attemptable and
- *     is skipped quietly (the tool layer still surfaces its own error).
+ *   - Implicit (tool-triggered) attach only fires once the session has a
+ *     name. Before `introduce`, attachLocation would register a remote
+ *     *without* a validating introduce, which then trips the org-required
+ *     gate on the eventual introduce. `authenticate` opts in explicitly via
+ *     `opts.force`, which also bypasses the once-per-session guard so an
+ *     earlier transient failure can't block a deliberate sign-in.
+ *   - Concurrent calls for the same location dedupe through `ctx.inflight`,
+ *     so a name is attached at most once even under overlapping tool calls.
+ *   - A location missing url / tokens / Clerk pointer is skipped quietly and
+ *     not recorded as spent (a later token write is still picked up).
  *   - Best-effort: a failed attach is logged and swallowed; the caller
  *     proceeds and the router surfaces "not configured / degraded".
  */
-export async function ensureLazyAttach(target: string | undefined, ctx: LazyAttachCtx): Promise<void> {
-  const names = target !== undefined ? [target] : ctx.candidates
-  const pending = names.filter((n) => n !== LOCAL_LOCATION && !ctx.router.has(n) && !ctx.attempted.has(n))
-  if (pending.length === 0) return
+export async function ensureLazyAttach(
+  target: string | undefined,
+  ctx: LazyAttachCtx,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  const force = opts.force === true
+  if (!force && !ctx.session.hasName()) return
 
-  const resolved = ctx.resolve()
-  for (const name of pending) {
-    // Re-check has(): an earlier iteration (target === undefined) or a
-    // concurrent call may have just registered this name.
-    if (ctx.router.has(name)) continue
-    ctx.attempted.add(name)
-
-    const location = resolved.locations.find((l) => l.name === name)
-    if (
-      !location ||
-      location.isLocal ||
-      !location.url ||
-      !location.accessToken ||
-      !location.refreshToken ||
-      !location.clerkIssuer ||
-      !location.clerkClientId
-    ) {
-      continue
-    }
-
-    const result = await attachLocation(name, {
-      session: ctx.session,
-      context: ctx.context,
-      router: ctx.router,
-      messageBus: ctx.messageBus,
-      remoteTopicUnsubscribes: ctx.remoteTopicUnsubscribes,
-      remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
-      resolved,
-      transportFactory: ctx.transportFactory,
-    })
-    if (!result.ok) {
-      logError(`Lazy-attach for "${name}" failed: ${result.reason}`)
-    }
+  const names = (target !== undefined ? [target] : ctx.candidates).filter((n) => n !== LOCAL_LOCATION)
+  // Resolve config only when at least one requested name needs a fresh
+  // attempt; otherwise every name is already attached or in flight.
+  const needsWork = names.some((n) => !ctx.router.has(n) && (force || !ctx.inflight.has(n)))
+  if (!needsWork) {
+    // Still await any in-flight attempts for the requested names so a caller
+    // doesn't proceed to router.get() before a concurrent attach completes.
+    await Promise.all(names.map((n) => ctx.inflight.get(n)).filter((p): p is Promise<void> => p !== undefined))
+    return
   }
+  const resolved = ctx.resolve()
+  await Promise.all(names.map((n) => lazyAttachOne(n, ctx, resolved, force)))
 }
 
 /** Why a configured location was not attached at startup. `local` and
