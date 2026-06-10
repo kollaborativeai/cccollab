@@ -19,14 +19,14 @@ on-disk config. The MCP server injects these defaults during
 | `locations.remote.authType`      | `clerk`                                                                                     |
 
 Defaults only ever touch the location named `remote`. Any field you set
-explicitly under `locations.remote` wins over the baked value (user config
-> env > defaults). A non-`local` location under any **other** name (e.g.
-`locations.selfhosted`) is left completely untouched — its missing
-`clerkIssuer` / `clerkClientId` are **not** back-filled, so the normal
-"missing Clerk pointer" / "non-local location must have a url" errors still
-fire for an incomplete self-hosted entry. The `remote` name also matches the
-`CCCOLLAB_REMOTE_URL` env override, so that env var updates this same
-location rather than adding a parallel one.
+explicitly under `locations.remote` wins over the baked value (precedence:
+user config, then env vars, then defaults). A non-`local` location under any
+**other** name (e.g. `locations.selfhosted`) is left completely untouched —
+its missing `clerkIssuer` / `clerkClientId` are **not** back-filled, so the
+normal "missing Clerk pointer" / "non-local location must have a url" errors
+still fire for an incomplete self-hosted entry. The `remote` name also
+matches the `CCCOLLAB_REMOTE_URL` env override, so that env var updates this
+same location rather than adding a parallel one.
 
 The synthesized `remote` location is added present-but-inactive: it is never
 marked `active`. A fresh install therefore resolves to no active location
@@ -214,15 +214,15 @@ field will be stripped at load time and a warning logged.
 
 All env vars are applied after file merging and win over anything on disk.
 
-| Variable                   | Effect                                                                                                                                                                      |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CCCOLLAB_NAME`            | Overrides the top-level `name`.                                                                                                                                             |
-| `CCCOLLAB_OBJECTIVE`       | Overrides the top-level `objective`.                                                                                                                                        |
-| `CCCOLLAB_REMOTE_URL`      | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds. |
-| `CCCOLLAB_CLERK_ISSUER`    | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.    |
-| `CCCOLLAB_CLERK_CLIENT_ID` | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.            |
+| Variable                     | Effect                                                                                                                                                                                  |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCCOLLAB_NAME`              | Overrides the top-level `name`.                                                                                                                                                         |
+| `CCCOLLAB_OBJECTIVE`         | Overrides the top-level `objective`.                                                                                                                                                    |
+| `CCCOLLAB_REMOTE_URL`        | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds.             |
+| `CCCOLLAB_CLERK_ISSUER`      | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.                |
+| `CCCOLLAB_CLERK_CLIENT_ID`   | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.                        |
 | `CCCOLLAB_NO_DEFAULT_REMOTE` | Any non-empty value suppresses the baked-in hosted-backend default: no `remote` location is synthesized and no baked pointer is filled in. For self-hosting / privacy-sensitive setups. |
-| `CCCOLLAB_PROFILE`         | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.            |
+| `CCCOLLAB_PROFILE`           | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.                        |
 
 ## Reserved `local` location
 
