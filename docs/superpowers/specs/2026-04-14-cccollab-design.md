@@ -1,7 +1,7 @@
 # CCCollab - Design Spec
 
 **Epic:** IRD-46
-**Repo:** https://github.com/flatoutsolutions/cccollab
+**Repo:** https://github.com/kollaborativeai/cccollab
 **Date:** 2026-04-14
 
 ## Problem

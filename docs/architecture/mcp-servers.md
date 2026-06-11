@@ -92,7 +92,7 @@ server" or "the HTTP server" explicitly.
 ### 2. Additive-only backend discipline
 
 Because the local stdio server is published as an npm package
-(`@flatoutsolutions/cccollab`) and older clients continue running in the wild,
+(`@kollaborativeai/cccollab`) and older clients continue running in the wild,
 the Convex backend must evolve additively:
 
 - **Never rename** a Convex query, mutation, or function argument.
@@ -101,7 +101,7 @@ the Convex backend must evolve additively:
 - **Add new fields** rather than changing existing ones.
 - **Deprecate, wait, then remove.** Document the deprecation in the function's
   JSDoc and in the release notes. Remove only after at least two published
-  `@flatoutsolutions/cccollab` releases have shipped without using the
+  `@kollaborativeai/cccollab` releases have shipped without using the
   deprecated path.
 
 This constraint applies equally to both MCP servers: the HTTP MCP server will
