@@ -4,6 +4,7 @@ import type { SessionManager } from '../session.js'
 import type { ResolvedLocation } from '../config/resolve.js'
 import type { ParsedMessage } from '../types.js'
 import { createRemoteClient } from '../remote/client.js'
+import { assertSecureBearerUrl } from '../remote/auth-clerk.js'
 import { RemoteTransport } from './remote.js'
 import type { TransportRouter } from './router.js'
 import type { Transport, TransportTopicMessage } from './index.js'
@@ -18,7 +19,7 @@ import type { Transport, TransportTopicMessage } from './index.js'
  * same function and produce the same runtime shape.
  *
  * `transportFactory` is injectable so tests can swap in a FakeTransport
- * and drive the auto-subscribe / DM-wiring / replace-in-place branches
+ * and drive the auto-subscribe / replace-in-place branches
  * without standing up a real Convex client.
  */
 export interface AttachCtx {
@@ -26,19 +27,13 @@ export interface AttachCtx {
   context: ActiveContext
   router: TransportRouter
   messageBus: MessageBus
-  /** Mutable map of DM-subscription unsubscribe callbacks, keyed by
-   *  location name. `server.ts`'s shutdown hook drains the whole map on
-   *  SIGTERM / stdin close; `attachLocation`'s replace-in-place path
-   *  looks up the old entry by location name and invokes it before
-   *  swapping the new transport in. One subscription per location. */
-  remoteUnsubscribes: Map<string, () => void>
   /** Mutable map of topic-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${topicId}`. Populated when a remote
    *  transport establishes a `subscribeTopicMessages` reactive feed
    *  during the auto-subscribe loop, and mirrored in the tool layer's
    *  join/start paths so a user-triggered `join_topic` or `start_topic`
    *  also wires an inbound stream. Drained on shutdown and on the
-   *  replace-in-place path in the same way as `remoteUnsubscribes`. */
+   *  replace-in-place path (filtered by the location-name prefix). */
   remoteTopicUnsubscribes: Map<string, () => void>
   /** Mutable map of channel-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${channelName}`. Populated on channel join
@@ -89,14 +84,11 @@ export type AttachResult =
  *   4. If a prior transport exists for the same name, tear it down
  *      (`deregisterSession` + stored unsubscribe) before swapping.
  *   5. Register the new transport with the router.
- *   6. Wire the DM inbox reactive subscription via MessageBus and push
- *      the unsubscribe fn onto `remoteUnsubscribes` so shutdown cleans
- *      it up.
- *   7. Best-effort auto-subscribe: join configured channels, join-or-
+ *   6. Best-effort auto-subscribe: join configured channels, join-or-
  *      create configured topics. Failures here are logged and swallowed
  *      - the transport is live at this point so the attach has already
  *      succeeded.
- *   8. If no channel is currently runtime-active, optionally cascade
+ *   7. If no channel is currently runtime-active, optionally cascade
  *      the resolved-config's active state into `ActiveContext`. This
  *      matches the startup cold-path behaviour while protecting a user
  *      who may have `set_active_channel`'d elsewhere after startup.
@@ -150,9 +142,8 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
 
   // Step 4 + 5: if something else holds this name in the router, tear
   // it down first. Order matters:
-  //   (a) invoke the prior transport's stored DM unsubscribe - this
-  //       closes out the reactive subscription and releases the
-  //       MessageBus callback reference.
+  //   (a) tear down its topic and channel subscriptions so the reactive
+  //       feeds close and release their MessageBus callback references.
   //   (b) call its `deregisterSession` so the backend stops attributing
   //       messages to a stale session id.
   //   (c) call its `shutdown()` so the underlying ConvexClient websocket
@@ -163,17 +154,6 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   // transport survive this function."
   const prior = ctx.router.unregister(name)
   if (prior) {
-    const priorUnsub = ctx.remoteUnsubscribes.get(name)
-    if (priorUnsub !== undefined) {
-      ctx.remoteUnsubscribes.delete(name)
-      try {
-        priorUnsub()
-      } catch (err) {
-        logError(
-          `Prior transport DM unsubscribe failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
     // Tear down every topic subscription owned by the prior transport
     // before the swap. Keys are `${location}::${topicId}`; we filter by
     // the location prefix so other locations' subscriptions are
@@ -219,24 +199,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   }
   ctx.router.register(transport)
 
-  // Step 6: DM subscription, if this transport supports one. The map is
-  // keyed by location name so a subsequent re-attach can find and tear
-  // down this subscription cleanly.
-  if (hasDirectMessageSubscription(transport)) {
-    try {
-      const unsub = transport.subscribeDirectMessages((msg) => {
-        void ctx.messageBus.push(msg, transport.source)
-      })
-      ctx.remoteUnsubscribes.set(name, unsub)
-    } catch (err) {
-      // A transport that advertises the subscription method but throws
-      // on the first call is unusual; log and continue so the rest of
-      // the transport still works.
-      logError(`DM subscription wiring failed for "${name}": ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
-
-  // Step 7: auto-subscribe to configured channels and topics.
+  // Step 6: auto-subscribe to configured channels and topics.
   const displayName = ctx.session.hasName() ? ctx.session.displayName : undefined
   if (displayName !== undefined) {
     for (const channel of location.channels) {
@@ -422,10 +385,16 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
       `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must supply the Clerk app pointer.`,
     )
   }
+  // Fail closed on a non-HTTPS (and non-loopback) deployment URL: the OIDC ID
+  // token is attached to this Convex client, so a mistyped `http://` host would
+  // otherwise leak a ~24h credential over plaintext ws://. The Clerk token
+  // endpoints have their own guard; this covers the Convex URL itself.
+  assertSecureBearerUrl(new URL(location.url), `Convex location URL ("${location.name}")`)
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
     accessToken: location.accessToken ?? '',
+    idToken: location.idToken ?? '',
     refreshToken: location.refreshToken ?? '',
     accessTokenExpiresAt: location.accessTokenExpiresAt,
     clerkIssuer: location.clerkIssuer,
@@ -434,16 +403,6 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
     userId: location.userId,
   })
   return new RemoteTransport({ client, source: location.name })
-}
-
-/** Type guard: does this transport expose a DM reactive subscription?
- *  Both the real `RemoteTransport` and the test `FakeRemoteTransport`
- *  do; `LocalTransport` does not (broker DMs arrive via the SSE
- *  `BrokerEventListener` instead). */
-function hasDirectMessageSubscription(
-  transport: Transport,
-): transport is Transport & { subscribeDirectMessages: RemoteTransport['subscribeDirectMessages'] } {
-  return typeof (transport as { subscribeDirectMessages?: unknown }).subscribeDirectMessages === 'function'
 }
 
 /** Type guard: does this transport expose per-topic reactive subscriptions?

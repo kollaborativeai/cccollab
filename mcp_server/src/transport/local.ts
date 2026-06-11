@@ -1,6 +1,5 @@
 import {
   BROKER_UUID_PATTERN,
-  DmDeliveryError,
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
@@ -138,34 +137,13 @@ export class LocalTransport implements Transport {
     })
   }
 
-  // ─── Sessions & DMs ───────────────────────────────────────────────────
+  // ─── Sessions ─────────────────────────────────────────────────────────
   async listSessions(args: { channel?: string }): Promise<TransportSession[]> {
     const params = new URLSearchParams()
     if (args.channel) params.set('channel', args.channel)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.brokerGet<{ sessions: TransportSession[] }>(`/sessions${qs}`)
     return data.sessions
-  }
-
-  async sendDirectMessage(args: {
-    fromSessionName: string
-    toSessionName: string
-    text: string
-  }): Promise<{ viaChannel?: string }> {
-    const res = await fetch(`${this.base()}/direct-message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: args.fromSessionName, to: args.toSessionName, text: args.text }),
-    })
-    if (res.status === 403 || res.status === 404) {
-      const body = (await res.json()) as { error?: string }
-      throw new DmDeliveryError(body.error ?? `Could not deliver DM to ${args.toSessionName}.`)
-    }
-    if (!res.ok) {
-      throw new Error(`Broker ${res.status}: ${await res.text()}`)
-    }
-    const body = (await res.json()) as { viaChannel?: string }
-    return { viaChannel: body.viaChannel }
   }
 
   // ─── Message history ──────────────────────────────────────────────────
@@ -180,14 +158,6 @@ export class LocalTransport implements Transport {
   }
 
   async readTopicMessages(_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
-    return { messages: [], hasMore: false }
-  }
-
-  async readDmThread(_args: {
-    peerSessionName: string
-    limit?: number
-    before?: number
-  }): Promise<TransportHistoryPage> {
     return { messages: [], hasMore: false }
   }
 

@@ -7,13 +7,19 @@ import {
   exchangeCodeForTokens,
   refreshAccessToken,
   runClerkPkce,
+  decodeJwtExp,
   DEFAULT_CLERK_REDIRECT_PORT,
-  CLERK_CONVEX_AUDIENCE,
-  exchangeOAuthTokenForConvexJwt,
-  ConvexJwtExchangeError,
-  deploymentUrlToHttpActionUrl,
 } from '../../src/remote/auth-clerk.js'
 import type { startLoopbackListener } from '../../src/remote/loopback.js'
+
+/** Build a syntactically-valid JWT carrying only an `exp` claim (no real
+ *  signature) for exercising the local freshness checks. */
+function jwtWithExp(expSecondsFromNow: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expSecondsFromNow })).toString(
+    'base64url',
+  )
+  return `eyJhbGciOiJSUzI1NiJ9.${payload}.sig`
+}
 
 describe('PKCE primitives', () => {
   it('generateCodeVerifier produces an 86-char base64url string', () => {
@@ -40,7 +46,7 @@ describe('PKCE primitives', () => {
 })
 
 describe('buildAuthorizeUrl', () => {
-  it('produces a Clerk-compatible OAuth authorize URL', () => {
+  it('produces a Clerk-compatible OAuth authorize URL with openid scope', () => {
     const url = buildAuthorizeUrl({
       issuer: 'https://x.clerk.accounts.dev',
       clientId: 'cccollab-cli',
@@ -56,25 +62,14 @@ describe('buildAuthorizeUrl', () => {
     expect(u.searchParams.get('code_challenge')).toBe('abc123')
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
     expect(u.searchParams.get('state')).toBe('state-xyz')
+    // `openid` is required: it makes Clerk issue the ID token that
+    // authenticates Convex.
     expect(u.searchParams.get('scope')).toBe('openid profile email')
-    expect(u.searchParams.has('resource')).toBe(false)
-  })
-
-  it('includes resource param when provided (RFC 8707)', () => {
-    const url = buildAuthorizeUrl({
-      issuer: 'https://x.clerk.accounts.dev',
-      clientId: 'cccollab-cli',
-      redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
-      codeChallenge: 'abc123',
-      state: 'state-xyz',
-      resource: CLERK_CONVEX_AUDIENCE,
-    })
-    expect(new URL(url).searchParams.get('resource')).toBe('convex')
   })
 })
 
 describe('exchangeCodeForTokens', () => {
-  it('POSTs the right form to /oauth/token and returns parsed tokens', async () => {
+  it('POSTs the right form to /oauth/token and returns parsed tokens including the ID token', async () => {
     const calls: { url: string; body: string; headers: Record<string, string> }[] = []
     const fetchMock = (async (url: string, init: RequestInit) => {
       calls.push({
@@ -86,6 +81,7 @@ describe('exchangeCodeForTokens', () => {
         JSON.stringify({
           access_token: 'at_123',
           refresh_token: 'rt_456',
+          id_token: 'id_789',
           expires_in: 60,
           token_type: 'Bearer',
         }),
@@ -106,6 +102,7 @@ describe('exchangeCodeForTokens', () => {
 
     expect(result.accessToken).toBe('at_123')
     expect(result.refreshToken).toBe('rt_456')
+    expect(result.idToken).toBe('id_789')
     expect(result.accessTokenExpiresAt).toBeGreaterThan(Date.now())
     expect(calls).toHaveLength(1)
     const [firstCall] = calls
@@ -117,6 +114,26 @@ describe('exchangeCodeForTokens', () => {
     expect(body.get('code_verifier')).toBe('verifier-xyz')
     expect(body.get('client_id')).toBe('cccollab-cli')
     expect(body.get('redirect_uri')).toBe('http://127.0.0.1:12345/cccollab-oauth-callback')
+  })
+
+  it('throws when the response omits id_token (openid scope contract violated)', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+    await expect(
+      exchangeCodeForTokens(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
+          code: 'c',
+          codeVerifier: 'v',
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Unexpected token response shape/)
   })
 
   it('throws on non-200 token response', async () => {
@@ -135,39 +152,16 @@ describe('exchangeCodeForTokens', () => {
       ),
     ).rejects.toThrow(/invalid_grant/)
   })
-
-  it('includes resource in the form body when provided (RFC 8707)', async () => {
-    const captured: { body: string } = { body: '' }
-    const fetchMock = (async (_url: string, init: RequestInit) => {
-      captured.body = init.body as string
-      return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as typeof fetch
-
-    await exchangeCodeForTokens(
-      {
-        issuer: 'https://x.clerk.accounts.dev',
-        clientId: 'cccollab-cli',
-        redirectUri: 'http://127.0.0.1:12345/cccollab-oauth-callback',
-        code: 'c',
-        codeVerifier: 'v',
-        resource: CLERK_CONVEX_AUDIENCE,
-      },
-      fetchMock,
-    )
-    expect(new URLSearchParams(captured.body).get('resource')).toBe('convex')
-  })
 })
 
 describe('refreshAccessToken', () => {
-  it('exchanges refresh token for new tokens', async () => {
+  it('exchanges refresh token for new tokens including a fresh ID token', async () => {
     const fetchMock = (async () =>
       new Response(
         JSON.stringify({
           access_token: 'new_at',
           refresh_token: 'new_rt',
+          id_token: 'new_id',
           expires_in: 60,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -179,11 +173,89 @@ describe('refreshAccessToken', () => {
     )
     expect(result.accessToken).toBe('new_at')
     expect(result.refreshToken).toBe('new_rt')
+    expect(result.idToken).toBe('new_id')
+  })
+
+  it('re-sends the openid scope on refresh so Clerk re-issues the id_token (RFC 6749 §6)', async () => {
+    const captured: { body: string } = { body: '' }
+    const fetchMock = (async (_url: string, init: RequestInit) => {
+      captured.body = init.body as string
+      return new Response(JSON.stringify({ access_token: 'new_at', id_token: 'new_id', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await refreshAccessToken(
+      { issuer: 'https://x.clerk.accounts.dev', clientId: 'cccollab-cli', refreshToken: 'old_rt' },
+      fetchMock,
+    )
+    expect(new URLSearchParams(captured.body).get('scope')).toBe('openid profile email')
+  })
+
+  it('falls back to a non-expired prior ID token when the refresh response omits one', async () => {
+    const validFallback = jwtWithExp(3600)
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    const result = await refreshAccessToken(
+      {
+        issuer: 'https://x.clerk.accounts.dev',
+        clientId: 'cccollab-cli',
+        refreshToken: 'old_rt',
+        fallbackIdToken: validFallback,
+      },
+      fetchMock,
+    )
+    expect(result.idToken).toBe(validFallback)
+  })
+
+  it('throws (does not cache) when id_token is omitted and the fallback is an empty string', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      refreshAccessToken(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          refreshToken: 'old_rt',
+          fallbackIdToken: '',
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Unexpected refresh response shape/)
+  })
+
+  it('throws when id_token is omitted and the fallback is already expired', async () => {
+    const fetchMock = (async () =>
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch
+
+    await expect(
+      refreshAccessToken(
+        {
+          issuer: 'https://x.clerk.accounts.dev',
+          clientId: 'cccollab-cli',
+          refreshToken: 'old_rt',
+          fallbackIdToken: jwtWithExp(-3600),
+        },
+        fetchMock,
+      ),
+    ).rejects.toThrow(/Unexpected refresh response shape/)
   })
 
   it('preserves prior refresh token if server omits one', async () => {
     const fetchMock = (async () =>
-      new Response(JSON.stringify({ access_token: 'new_at', expires_in: 60 }), {
+      new Response(JSON.stringify({ access_token: 'new_at', id_token: 'new_id', expires_in: 60 }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch
@@ -197,7 +269,7 @@ describe('refreshAccessToken', () => {
 
   it('preserves prior refresh token if server returns empty string', async () => {
     const fetchMock = (async () =>
-      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: '', expires_in: 60 }), {
+      new Response(JSON.stringify({ access_token: 'new_at', refresh_token: '', id_token: 'new_id', expires_in: 60 }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch
@@ -208,27 +280,19 @@ describe('refreshAccessToken', () => {
     )
     expect(result.refreshToken).toBe('old_rt')
   })
+})
 
-  it('includes resource in the form body when provided (RFC 8707)', async () => {
-    const captured: { body: string } = { body: '' }
-    const fetchMock = (async (_url: string, init: RequestInit) => {
-      captured.body = init.body as string
-      return new Response(JSON.stringify({ access_token: 'new_at', refresh_token: 'new_rt', expires_in: 60 }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as typeof fetch
+describe('decodeJwtExp', () => {
+  it('returns the numeric exp claim from a JWT payload', () => {
+    const exp = Math.floor(Date.now() / 1000) + 1234
+    const payload = Buffer.from(JSON.stringify({ exp, sub: 'u' })).toString('base64url')
+    expect(decodeJwtExp(`h.${payload}.s`)).toBe(exp)
+  })
 
-    await refreshAccessToken(
-      {
-        issuer: 'https://x.clerk.accounts.dev',
-        clientId: 'cccollab-cli',
-        refreshToken: 'old_rt',
-        resource: CLERK_CONVEX_AUDIENCE,
-      },
-      fetchMock,
-    )
-    expect(new URLSearchParams(captured.body).get('resource')).toBe('convex')
+  it('returns null for a malformed token or a payload without exp', () => {
+    expect(decodeJwtExp('not-a-jwt')).toBeNull()
+    const noExp = Buffer.from(JSON.stringify({ sub: 'u' })).toString('base64url')
+    expect(decodeJwtExp(`h.${noExp}.s`)).toBeNull()
   })
 })
 
@@ -240,6 +304,7 @@ describe('runClerkPkce', () => {
         JSON.stringify({
           access_token: 'flow_at',
           refresh_token: 'flow_rt',
+          id_token: 'flow_id',
           expires_in: 60,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -275,6 +340,7 @@ describe('runClerkPkce', () => {
     const result = await promise
     expect(result.accessToken).toBe('flow_at')
     expect(result.refreshToken).toBe('flow_rt')
+    expect(result.idToken).toBe('flow_id')
     expect(capturedAuthorizeUrl).toBeDefined()
     expect(capturedAuthorizeUrl).toContain('/oauth/authorize')
     expect(capturedAuthorizeUrl).toContain('code_challenge=')
@@ -338,7 +404,7 @@ describe('runClerkPkce', () => {
   it('uses DEFAULT_CLERK_REDIRECT_PORT when redirectPort is absent', async () => {
     let receivedPort: number | undefined
     const fetchMock = (async () =>
-      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', id_token: 'id', expires_in: 60 }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch
@@ -367,7 +433,7 @@ describe('runClerkPkce', () => {
   it('honors caller-supplied redirectPort', async () => {
     let receivedPort: number | undefined
     const fetchMock = (async () =>
-      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
+      new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', id_token: 'id', expires_in: 60 }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })) as typeof fetch
@@ -393,172 +459,12 @@ describe('runClerkPkce', () => {
 
     expect(receivedPort).toBe(54321)
   })
-
-  it('threads resource through to both authorize URL and token exchange', async () => {
-    let capturedAuthorizeUrl = ''
-    const tokenCalls: { body: string }[] = []
-    const fetchMock = (async (_url: string, init: RequestInit) => {
-      tokenCalls.push({ body: init.body as string })
-      return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 60 }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as typeof fetch
-
-    let capturedState = ''
-    await runClerkPkce({
-      issuer: 'https://x.clerk.accounts.dev',
-      clientId: 'cccollab-cli',
-      resource: CLERK_CONVEX_AUDIENCE,
-      onAuthorizeUrl: (url) => {
-        capturedAuthorizeUrl = url
-        capturedState = new URL(url).searchParams.get('state') ?? ''
-      },
-      fetchImpl: fetchMock,
-      startListenerImpl: (async () => ({
-        port: DEFAULT_CLERK_REDIRECT_PORT,
-        waitForCallback: async () => ({ code: 'c', state: capturedState }),
-        shutdown: () => {},
-      })) as typeof startLoopbackListener,
-    })
-
-    expect(new URL(capturedAuthorizeUrl).searchParams.get('resource')).toBe('convex')
-    expect(tokenCalls).toHaveLength(1)
-    const firstCall = tokenCalls[0]
-    expect(firstCall).toBeDefined()
-    expect(new URLSearchParams(firstCall?.body ?? '').get('resource')).toBe('convex')
-  })
-})
-
-describe('deploymentUrlToHttpActionUrl', () => {
-  it('swaps .convex.cloud → .convex.site on the hostname', () => {
-    expect(deploymentUrlToHttpActionUrl('https://clear-yak-990.convex.cloud')).toBe('https://clear-yak-990.convex.site')
-  })
-
-  it('preserves the scheme and slug exactly', () => {
-    expect(deploymentUrlToHttpActionUrl('https://wonderful-narwhal-409.convex.cloud')).toBe(
-      'https://wonderful-narwhal-409.convex.site',
-    )
-  })
-
-  it('strips trailing slash from the output', () => {
-    expect(deploymentUrlToHttpActionUrl('https://x.convex.cloud/')).toBe('https://x.convex.site')
-  })
-
-  it('passes non-.convex.cloud URLs through unchanged (self-hosted, tests)', () => {
-    expect(deploymentUrlToHttpActionUrl('https://convex.example.com')).toBe('https://convex.example.com')
-    expect(deploymentUrlToHttpActionUrl('http://127.0.0.1:8001')).toBe('http://127.0.0.1:8001')
-  })
-
-  it('only matches .convex.cloud as a suffix, not a substring', () => {
-    expect(deploymentUrlToHttpActionUrl('https://foo.convex.cloud.example.com')).toBe(
-      'https://foo.convex.cloud.example.com',
-    )
-  })
-})
-
-describe('exchangeOAuthTokenForConvexJwt', () => {
-  it('POSTs to /cccollab/exchangeToken with Bearer auth and returns parsed result', async () => {
-    const calls: { url: string; method: string; headers: Record<string, string> }[] = []
-    const futureExpiresAt = Date.now() + 60_000
-    const fetchMock = (async (url: string, init: RequestInit) => {
-      calls.push({
-        url,
-        method: init.method as string,
-        headers: init.headers as Record<string, string>,
-      })
-      return new Response(JSON.stringify({ jwt: 'cv-jwt-abc', expiresAt: futureExpiresAt }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as typeof fetch
-
-    const result = await exchangeOAuthTokenForConvexJwt(
-      { kaiUrl: 'https://x.convex.cloud', oauthToken: 'oauth-token-123' },
-      fetchMock,
-    )
-
-    expect(result.jwt).toBe('cv-jwt-abc')
-    expect(result.expiresAt).toBe(futureExpiresAt)
-    expect(calls).toHaveLength(1)
-    const [call] = calls
-    expect(call).toBeDefined()
-    // Convex HTTP actions are served on .convex.site, not .convex.cloud —
-    // deploymentUrlToHttpActionUrl translates the input URL.
-    expect(call?.url).toBe('https://x.convex.site/cccollab/exchangeToken')
-    expect(call?.method).toBe('POST')
-    expect(call?.headers['Authorization']).toBe('Bearer oauth-token-123')
-  })
-
-  it('throws ConvexJwtExchangeError with INVALID_OAUTH_TOKEN code on 401', async () => {
-    const fetchMock = (async () =>
-      new Response(JSON.stringify({ code: 'INVALID_OAUTH_TOKEN', message: 'Token verification failed' }), {
-        status: 401,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch
-
-    await expect(
-      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'bad-token' }, fetchMock),
-    ).rejects.toSatisfy((err) => {
-      return (
-        err instanceof ConvexJwtExchangeError &&
-        err.code === 'INVALID_OAUTH_TOKEN' &&
-        err.name === 'ConvexJwtExchangeError'
-      )
-    })
-  })
-
-  it('maps unknown 401 codes to EXCHANGE_FAILED', async () => {
-    const fetchMock = (async () =>
-      new Response(JSON.stringify({ code: 'SOME_UNKNOWN_ERROR', message: 'Something went wrong' }), {
-        status: 401,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch
-
-    await expect(
-      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
-    ).rejects.toSatisfy((err) => {
-      return err instanceof ConvexJwtExchangeError && err.code === 'EXCHANGE_FAILED'
-    })
-  })
-
-  it('throws on malformed response shape (missing jwt or expiresAt)', async () => {
-    const fetchMock = (async () =>
-      new Response(JSON.stringify({ something: 'else' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch
-
-    await expect(
-      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
-    ).rejects.toThrow(/Unexpected \/cccollab\/exchangeToken response shape/)
-  })
-
-  it.each([
-    ['MISSING_AUTH_HEADER', 401],
-    ['NO_ACTIVE_SESSION', 401],
-    ['TEMPLATE_RESPONSE_INVALID', 500],
-    ['SERVER_MISCONFIGURED', 500],
-    ['UPSTREAM_RATE_LIMITED', 429],
-    ['UPSTREAM_UNAVAILABLE', 503],
-  ] as const)('preserves the %s code from KAI (status %i)', async (code, status) => {
-    const fetchMock = (async () =>
-      new Response(JSON.stringify({ code, message: `synthetic ${code}` }), {
-        status,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch
-
-    await expect(
-      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock),
-    ).rejects.toSatisfy((err) => err instanceof ConvexJwtExchangeError && err.code === code)
-  })
 })
 
 describe('error message redaction', () => {
   const SECRET_ACCESS = 'super-secret-access-token-value-DO-NOT-LEAK'
   const SECRET_REFRESH = 'super-secret-refresh-token-value-DO-NOT-LEAK'
   const SECRET_ID = 'super-secret-id-token-value-DO-NOT-LEAK'
-  const SECRET_JWT = 'super-secret-jwt-value-DO-NOT-LEAK'
 
   it('exchangeCodeForTokens does not leak token fields on malformed response', async () => {
     // Malformed: access_token present but expires_in is the wrong type, so
@@ -598,7 +504,12 @@ describe('error message redaction', () => {
   it('refreshAccessToken does not leak token fields on malformed response', async () => {
     const fetchMock = (async () =>
       new Response(
-        JSON.stringify({ access_token: SECRET_ACCESS, refresh_token: SECRET_REFRESH, expires_in: 'not-a-number' }),
+        JSON.stringify({
+          access_token: SECRET_ACCESS,
+          refresh_token: SECRET_REFRESH,
+          id_token: SECRET_ID,
+          expires_in: 'not-a-number',
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )) as typeof fetch
 
@@ -612,24 +523,7 @@ describe('error message redaction', () => {
       const msg = err instanceof Error ? err.message : String(err)
       expect(msg).not.toContain(SECRET_ACCESS)
       expect(msg).not.toContain(SECRET_REFRESH)
-      expect(msg).toContain('<redacted>')
-    }
-  })
-
-  it('exchangeOAuthTokenForConvexJwt does not leak jwt on malformed response', async () => {
-    // Malformed: jwt present as the wrong type-shape (expiresAt missing).
-    const fetchMock = (async () =>
-      new Response(JSON.stringify({ jwt: SECRET_JWT, somethingElse: 'oops' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof fetch
-
-    try {
-      await exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock)
-      throw new Error('expected exchangeOAuthTokenForConvexJwt to throw')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      expect(msg).not.toContain(SECRET_JWT)
+      expect(msg).not.toContain(SECRET_ID)
       expect(msg).toContain('<redacted>')
     }
   })
@@ -667,46 +561,5 @@ describe('TLS enforcement on Bearer-token endpoints', () => {
         fetchMock,
       ),
     ).rejects.toThrow(/Refusing to send Bearer token to a non-HTTPS endpoint/)
-  })
-
-  it('exchangeOAuthTokenForConvexJwt rejects a non-HTTPS kaiUrl (public host)', async () => {
-    const fetchMock = (async () => {
-      throw new Error('fetch should not be reached')
-    }) as typeof fetch
-
-    await expect(
-      exchangeOAuthTokenForConvexJwt({ kaiUrl: 'http://evil.example.com', oauthToken: 'token' }, fetchMock),
-    ).rejects.toThrow(/Refusing to send Bearer token to a non-HTTPS endpoint/)
-  })
-
-  it.each(['http://127.0.0.1:8001', 'http://localhost:8001', 'http://[::1]:8001'])(
-    'allows loopback host %s over plaintext (local dev / tests)',
-    async (kaiUrl) => {
-      let called = false
-      const fetchMock = (async () => {
-        called = true
-        return new Response(JSON.stringify({ jwt: 'j', expiresAt: 0 }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      }) as typeof fetch
-
-      await exchangeOAuthTokenForConvexJwt({ kaiUrl, oauthToken: 'token' }, fetchMock)
-      expect(called).toBe(true)
-    },
-  )
-
-  it('allows HTTPS public host (the production case)', async () => {
-    let called = false
-    const fetchMock = (async () => {
-      called = true
-      return new Response(JSON.stringify({ jwt: 'j', expiresAt: 0 }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as typeof fetch
-
-    await exchangeOAuthTokenForConvexJwt({ kaiUrl: 'https://x.convex.cloud', oauthToken: 'token' }, fetchMock)
-    expect(called).toBe(true)
   })
 })

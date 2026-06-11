@@ -324,37 +324,6 @@ describe('RemoteTransport.introduce rethrow', () => {
   })
 })
 
-describe('RemoteTransport.subscribeDirectMessages dedup', () => {
-  it('dedupes same-ms DMs', () => {
-    const callbacks: Array<(rows: unknown) => void> = []
-    const stub = {
-      query: vi.fn(async () => undefined),
-      mutation: vi.fn(async (_ref: unknown, _args: Record<string, unknown>) => 'sess_1'),
-      onUpdate: vi.fn((_q: unknown, _args: Record<string, unknown>, cb: (rows: unknown) => void) => {
-        callbacks.push(cb)
-        return () => {}
-      }),
-      setAuth: vi.fn(),
-    }
-    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
-    // The DM subscription requires a sessionId from introduce(); set one.
-    // We piggy-back on private access via a cast rather than building the
-    // full OAuth fixture here — the behaviour being tested is pure
-    // callback plumbing, not the introduce path.
-    ;(transport as unknown as { sessionId: string | null }).sessionId = 'sess_1'
-
-    const delivered: Array<{ text: string }> = []
-    transport.subscribeDirectMessages((msg) => delivered.push({ text: msg.text }))
-
-    callbacks[0]!([
-      { _id: 'dm_a', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 },
-      { _id: 'dm_b', fromSessionId: 'alice', text: 'b', ts: 1_700_000_000_000 },
-    ])
-
-    expect(delivered.map((d) => d.text).sort()).toEqual(['a', 'b'])
-  })
-})
-
 describe('RemoteTransport — organizations', () => {
   it('listOrganizations returns the rows from the listForUser query', async () => {
     const { client } = makeStubClient(async () => [

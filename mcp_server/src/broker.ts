@@ -294,55 +294,6 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
-  if (pathname === '/direct-message' && method === 'POST') {
-    void (async () => {
-      try {
-        const body = JSON.parse(await readBody(req)) as { from?: string; to?: string; text?: string }
-        if (!body.from || !body.to || !body.text) {
-          jsonResponse(res, 400, { error: 'from, to, text are required' })
-          return
-        }
-        const fromInfo = sessions.get(body.from)
-        const toInfo = sessions.get(body.to)
-        if (!fromInfo) {
-          jsonResponse(res, 400, { error: `Sender "${body.from}" is not registered.` })
-          return
-        }
-        if (!toInfo) {
-          jsonResponse(res, 404, { error: `No session named "${body.to}" is registered.` })
-          return
-        }
-        let shared: string | null = null
-        for (const ch of fromInfo.channels) {
-          if (toInfo.channels.has(ch)) {
-            shared = ch
-            break
-          }
-        }
-        if (!shared) {
-          jsonResponse(res, 403, {
-            error: `You and "${body.to}" do not share any subscribed channel. Join a common channel first.`,
-          })
-          return
-        }
-        const event = {
-          source: 'local' as const,
-          type: 'direct_message' as const,
-          from: body.from,
-          to: body.to,
-          text: body.text,
-          ts: new Date().toISOString(),
-        }
-        broadcast(JSON.stringify(event))
-        log(`DM: ${body.from} -> ${body.to} via ${shared}`)
-        jsonResponse(res, 200, { ok: true })
-      } catch {
-        jsonResponse(res, 400, { error: 'invalid JSON' })
-      }
-    })()
-    return
-  }
-
   if (pathname === '/topics' && method === 'POST') {
     void (async () => {
       try {

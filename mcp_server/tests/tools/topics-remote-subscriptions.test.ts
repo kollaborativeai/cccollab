@@ -86,7 +86,6 @@ class FakeRemoteTransport implements Transport {
   unarchiveTopic = vi.fn(async () => {})
   sendTopicMessage = vi.fn(async () => {})
   listSessions = vi.fn(async (): Promise<TransportSession[]> => [])
-  sendDirectMessage = vi.fn(async () => ({}))
   deregisterSession = vi.fn(async () => {})
   readChannelMessages = vi.fn(
     async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
@@ -96,12 +95,6 @@ class FakeRemoteTransport implements Transport {
   )
   readTopicMessages = vi.fn(
     async (_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
-      messages: [],
-      hasMore: false,
-    }),
-  )
-  readDmThread = vi.fn(
-    async (_args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
       messages: [],
       hasMore: false,
     }),

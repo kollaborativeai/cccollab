@@ -197,11 +197,9 @@ describe('Topic Tools', () => {
         unarchiveTopic: async () => {},
         sendTopicMessage: async () => {},
         listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
         deregisterSession: async () => {},
         readChannelMessages: async () => ({ messages: [], hasMore: false }),
         readTopicMessages: async () => ({ messages: [], hasMore: false }),
-        readDmThread: async () => ({ messages: [], hasMore: false }),
       }
       const context = new ActiveContext()
       context.joinChannel('default', 'manual', 'remote')
@@ -519,11 +517,9 @@ describe('Topic Tools', () => {
         listSessions: async () => [
           { name: 'reviewer', objective: 'Review', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
         ],
-        sendDirectMessage: async () => ({}),
         deregisterSession: async () => {},
         readChannelMessages: async () => ({ messages: [], hasMore: false }),
         readTopicMessages: async () => ({ messages: [], hasMore: false }),
-        readDmThread: async () => ({ messages: [], hasMore: false }),
       }
       const context = new ActiveContext()
       context.joinChannel('default', 'fallback', 'remote')
@@ -539,35 +535,20 @@ describe('Topic Tools', () => {
       expect(result[0]).toMatchObject({ name: 'reviewer', objective: 'Review', channels: [] })
     })
 
-    it('send_message_to_session posts to /direct-message', async () => {
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ viaChannel: 'default' }) })
-      vi.stubGlobal('fetch', mockFetch)
-      const result = JSON.parse(await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hey Bob' }, deps))
-      expect(result).toEqual({ to: 'bob', viaChannel: 'default' })
-      const calledUrl = mockFetch.mock.calls[0]![0] as string
-      expect(calledUrl).toContain('/direct-message')
-      const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
-      expect(body.from).toBe('architect')
-      expect(body.to).toBe('bob')
-    })
-
-    it('send_message_to_session surfaces 403 as structured error', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 403,
-        json: () =>
-          Promise.resolve({ error: 'You and "bob" do not share any subscribed channel. Join a common channel first.' }),
-        text: () => Promise.resolve(''),
-      })
-      vi.stubGlobal('fetch', mockFetch)
-      const result = JSON.parse(await handleTopicTool('send_message_to_session', { to: 'bob', text: 'Hi' }, deps))
-      expect(result.error).toContain('do not share')
-    })
-
     it('throws on unknown tool', async () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
+    })
+
+    // Direct messaging was removed from the backend and the mcp_server.
+    // These tool names must no longer be handled - they fall through to
+    // the unknown-tool guard rather than silently doing anything.
+    it('no longer handles the removed direct-message tools', async () => {
+      await expect(handleTopicTool('send_message_to_session', { to: 'bob', text: 'hi' }, deps)).rejects.toThrow(
+        'Unknown topic tool',
+      )
+      await expect(handleTopicTool('read_dm_thread', { sessionName: 'bob' }, deps)).rejects.toThrow(
+        'Unknown topic tool',
+      )
     })
 
     it('read_topic_messages returns paged topic history from the transport', async () => {
@@ -596,11 +577,9 @@ describe('Topic Tools', () => {
         unarchiveTopic: async () => {},
         sendTopicMessage: async () => {},
         listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
         deregisterSession: async () => {},
         readChannelMessages: async () => ({ messages: [], hasMore: false }),
         readTopicMessages: vi.fn().mockResolvedValue(page),
-        readDmThread: async () => ({ messages: [], hasMore: false }),
       }
       const context = new ActiveContext()
       context.joinChannel('default', 'fallback', 'local')
@@ -615,94 +594,6 @@ describe('Topic Tools', () => {
       const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, stubDeps))
       expect(result.messages[0].text).toBe('topic msg')
       expect(result.hasMore).toBe(false)
-    })
-
-    it('read_dm_thread returns paged DM history from the transport', async () => {
-      const page = {
-        messages: [{ sender: 'bob', senderSessionName: 'bob', text: 'dm msg', ts: 1_767_398_400_000 }],
-        hasMore: false,
-        oldestTs: 1_767_398_400_000,
-      }
-      const stubTransport = {
-        source: 'remote',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 1 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
-        deregisterSession: async () => {},
-        readChannelMessages: async () => ({ messages: [], hasMore: false }),
-        readTopicMessages: async () => ({ messages: [], hasMore: false }),
-        readDmThread: vi.fn().mockResolvedValue(page),
-      }
-      const context = new ActiveContext()
-      context.joinChannel('default', 'fallback', 'remote')
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('architect')
-      const stubDeps: TopicToolDeps = {
-        session,
-        context,
-        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
-      }
-      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
-      expect(result.messages[0].text).toBe('dm msg')
-      expect(result.hasMore).toBe(false)
-    })
-
-    it('read_dm_thread falls back to the local transport when no remote is enabled', async () => {
-      const stubTransport = {
-        source: 'local',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 1 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        sendDirectMessage: async () => ({}),
-        deregisterSession: async () => {},
-        readChannelMessages: async () => ({ messages: [], hasMore: false }),
-        readTopicMessages: async () => ({ messages: [], hasMore: false }),
-        readDmThread: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
-      }
-      const context = new ActiveContext()
-      context.joinChannel('default', 'fallback', 'local')
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('architect')
-      const stubDeps: TopicToolDeps = {
-        session,
-        context,
-        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
-      }
-      const result = JSON.parse(await handleTopicTool('read_dm_thread', { sessionName: 'bob' }, stubDeps))
-      expect(result.error).toBeUndefined()
-      expect(result.hasMore).toBe(false)
-      expect(result.messages).toEqual([])
     })
   })
 })

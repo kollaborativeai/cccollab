@@ -61,8 +61,9 @@ Runtime:
   Fan-out and merging happen per-call based on the location the tool names.
 - The `authenticate` tool performs Clerk-based auth and hot-attaches the remote
   transport to the running session (no restart). On a `force: true` re-auth
-  the old transport is torn down (DM unsubscribe fired, `shutdown()` called,
-  ConvexClient websocket closed) before the new one is swapped in.
+  the old transport is torn down (`shutdown()` called, all tracked
+  unsubscribes fired, ConvexClient websocket closed) before the new one is
+  swapped in.
 - When only local is available, behaviour is identical to pre-CCC-3.
 
 ### Hosted HTTP MCP server (future - NOT in this story)

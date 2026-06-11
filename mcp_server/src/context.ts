@@ -132,8 +132,8 @@ export class ActiveContext {
    *  a free-form string - the user may configure arbitrary names
    *  (`"flatout"`, `"acme"`) alongside or instead of the reserved
    *  `"local"`. We check `"local"` first as a deterministic tie-break
-   *  (matching the routing preference in `list_sessions` / DM routing),
-   *  then fall back to whichever subscription has this channel name. */
+   *  (matching the routing preference in `list_sessions`), then fall back
+   *  to whichever subscription has this channel name. */
   getChannelLocation(name: string): ChannelLocation | undefined {
     const channel = normalizeChannelName(name)
     if (this.subscribed.has(channelKey(channel, LOCAL_LOCATION))) return LOCAL_LOCATION

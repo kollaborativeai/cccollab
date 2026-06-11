@@ -49,6 +49,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'A0',
       refreshToken: 'R0',
+      idToken: 'I0',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     const startupSnapshot = loadPersistedLocationAuth('flatout')
@@ -62,6 +63,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'A1',
       refreshToken: 'R1',
+      idToken: 'I1',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
 
@@ -102,6 +104,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
         url: 'https://a.convex.cloud',
         accessToken: 'A2',
         refreshToken: 'R2',
+        idToken: 'I2',
         accessTokenExpiresAt: 1_700_000_000_000,
         updatedAt: 1_700_000_000_000,
       })
@@ -139,6 +142,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'A3',
       refreshToken: 'R3',
+      idToken: 'I3',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(loadPersistedLocationAuth('flatout')?.accessToken).toBe('A3')
@@ -151,6 +155,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'A4',
       refreshToken: 'R4',
+      idToken: 'I4',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(loadPersistedLocationAuth('does-not-exist')).toBeNull()

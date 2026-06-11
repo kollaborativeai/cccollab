@@ -16,6 +16,7 @@ vi.mock('../../src/remote/auth-clerk.js', async () => {
     runClerkPkce: vi.fn(async () => ({
       accessToken: 'clerk-access-token',
       refreshToken: 'clerk-refresh-token',
+      idToken: 'clerk-id-token',
       accessTokenExpiresAt: 9999999999000,
     })),
   }
@@ -70,7 +71,6 @@ function makeDepsWithRemote(
     unarchiveTopic: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     sendMessage: vi.fn(async () => {}),
-    sendDirectMessage: vi.fn(async () => {}),
     hasTopic: vi.fn(() => false),
     ...remoteOverrides,
   }
@@ -366,24 +366,24 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
 
-        // runClerkPkce must have been called with the correct issuer + clientId + resource
+        // runClerkPkce must have been called with the correct issuer + clientId
         expect(runClerkPkce).toHaveBeenCalledWith({
           issuer: 'https://x.clerk.accounts.dev',
           clientId: 'cccollab-cli',
           redirectPort: undefined,
-          resource: 'convex',
         })
 
-        // saveLocationAuth must persist the clerk tokens AND the
-        // clerkIssuer/clerkClientId that minted them, so a later session
-        // (without the CCCOLLAB_CLERK_* env override that may have supplied
-        // the issuer at auth time) refreshes against the same Clerk
-        // instance the refresh token belongs to.
+        // saveLocationAuth must persist the clerk tokens — including the ID
+        // token used for Convex auth — AND the clerkIssuer/clerkClientId that
+        // minted them, so a later session (without the CCCOLLAB_CLERK_* env
+        // override that may have supplied the issuer at auth time) refreshes
+        // against the same Clerk instance the refresh token belongs to.
         expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
           authType: 'clerk',
           url: 'https://kai.convex.cloud',
           accessToken: 'clerk-access-token',
           refreshToken: 'clerk-refresh-token',
+          idToken: 'clerk-id-token',
           accessTokenExpiresAt: 9999999999000,
           clerkIssuer: 'https://x.clerk.accounts.dev',
           clerkClientId: 'cccollab-cli',

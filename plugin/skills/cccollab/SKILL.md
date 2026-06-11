@@ -37,7 +37,6 @@ Call `list_sessions` to see which other sessions are reachable through any of yo
 - `start_topic` - create a topic in the active channel (or pass `channel`).
 - `join_topic` - join an existing topic (by name or UUID, across your subscribed channels).
 - `send_message_to_topic` - send into the active topic.
-- `send_message_to_session` - DM a specific session. Requires at least one shared subscribed channel.
 
 ## Handling incoming messages
 
@@ -66,4 +65,3 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 | `set_active_topic`                  | Switch among joined topics.                                                                                      |
 | `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                                                  |
 | `send_message_to_topic`             | Send into the active topic.                                                                                      |
-| `send_message_to_session`           | DM a specific session (needs shared channel).                                                                    |
