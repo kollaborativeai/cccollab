@@ -4,6 +4,10 @@ import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
+import { ensureLazyAttach } from '../../src/transport/attach.js'
+import type { MessageBus } from '../../src/message-bus.js'
+import type { Transport } from '../../src/transport/index.js'
+import type { ResolvedLocation } from '../../src/config/resolve.js'
 
 function createDeps(): ChannelToolDeps {
   const context = new ActiveContext()
@@ -333,6 +337,63 @@ describe('Channel Tools', () => {
       expect(result.channels[0].messageCount).toBe(7)
       expect(result.channels[0].subscriberCount).toBe(2)
       expect(result.channels[0].sessionCount).toBe(5)
+    })
+
+    it('lazily attaches a dormant token-bearing remote so its channels appear without authenticate', async () => {
+      // The remote is valid in config but startup gating left it dormant
+      // (not in the router). list_channels must bring it online and union
+      // its channels — no `authenticate` round-trip required.
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const context = new ActiveContext()
+      const router = new TransportRouter([new LocalTransport(7850)])
+      const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+      const fakeRemote = {
+        source: 'remote',
+        enabled: true,
+        introduce: vi.fn(async () => {}),
+        listChannels: vi.fn(async () => [{ name: 'shared', subscriberCount: 3 }]),
+      } as unknown as Transport
+      const dormant: ResolvedLocation = {
+        name: 'remote',
+        isLocal: false,
+        url: 'https://example.convex.cloud',
+        accessToken: 'a',
+        refreshToken: 'r',
+        idToken: 'i',
+        clerkIssuer: 'https://x.clerk.accounts.dev',
+        clerkClientId: 'cid',
+        channels: [],
+      }
+      const lazyDeps: ChannelToolDeps = {
+        session,
+        context,
+        router,
+        ensureAttached: (target?: string) =>
+          ensureLazyAttach(target, {
+            session,
+            context,
+            router,
+            messageBus: bus,
+            remoteTopicUnsubscribes: new Map(),
+            remoteChannelUnsubscribes: new Map(),
+            inflight: new Map<string, Promise<void>>(),
+            candidates: ['remote'],
+            resolve: () => ({
+              locations: [dormant],
+              activeLocation: undefined,
+              activeChannel: undefined,
+              activeTopic: undefined,
+            }),
+            transportFactory: () => fakeRemote,
+          }),
+      }
+
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, lazyDeps))
+      expect(router.has('remote')).toBe(true)
+      expect(
+        result.channels.some((c: { name: string; location: string }) => c.name === 'shared' && c.location === 'remote'),
+      ).toBe(true)
     })
 
     it('degrades gracefully when broker is unreachable and returns subscribed-only entries', async () => {

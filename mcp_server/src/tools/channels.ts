@@ -19,6 +19,12 @@ export interface ChannelToolDeps {
    *  drained on leave_channel. Shutdown + replace-in-place drain is
    *  handled by `server.ts` and `attachLocation` respectively. */
   remoteChannelUnsubscribes?: Map<string, () => void>
+  /** Bring a dormant token-bearing location online before routing to it,
+   *  so a remote in config works without a fresh `authenticate`. `target`
+   *  names a location; omit for "every non-local". No-op for 'local' and
+   *  already-attached locations. Optional so legacy unit tests that build
+   *  deps by hand keep compiling. See `ensureLazyAttach`. */
+  ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
 }
 
 const NO_NAME_ERROR = JSON.stringify({
@@ -78,6 +84,7 @@ export async function handleChannelTool(
         })
       }
       targetLocation = targetLocation ?? deps.context.getChannelLocation(targetName) ?? 'local'
+      await deps.ensureAttached?.(targetLocation)
       let transport
       try {
         transport = deps.router.get(targetLocation)
@@ -111,6 +118,7 @@ interface ChannelRow {
 }
 
 async function handleListChannels(deps: ChannelToolDeps, locationFilter?: ChannelLocation): Promise<string> {
+  await deps.ensureAttached?.(locationFilter)
   const subscribed = deps.context.getSubscribedChannels()
   const subscribedByKey = new Map(subscribed.map((c) => [`${c.location}::${c.name}`, c]))
   const active = deps.context.getActiveChannelRef()
@@ -181,6 +189,7 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
   const normalized = normalizeChannelName(rawName)
   if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
 
+  await deps.ensureAttached?.(location)
   let transport
   try {
     transport = deps.router.get(location)

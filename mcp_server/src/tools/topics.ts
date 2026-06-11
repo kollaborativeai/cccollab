@@ -27,6 +27,12 @@ export interface TopicToolDeps {
    *  drained on leave/archive; shutdown and replace-in-place are
    *  handled by `server.ts` / `attachLocation` respectively. */
   remoteTopicUnsubscribes?: Map<string, () => void>
+  /** Bring a dormant token-bearing location online before routing to it,
+   *  so a remote in config works without a fresh `authenticate`. `target`
+   *  names a location; omit for "every non-local". No-op for 'local' and
+   *  already-attached locations. Optional so legacy unit tests that build
+   *  deps by hand keep compiling. See `ensureLazyAttach`. */
+  ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -184,6 +190,10 @@ export async function handleTopicTool(
           error: 'No active topic. Pass a `topic` id, or join one with join_topic.',
         })
       }
+      // A raw topic id carries no location, so bring every dormant remote
+      // online before asking which transport owns it — the user is
+      // explicitly reading a (possibly remote) topic.
+      await deps.ensureAttached?.()
       let transport: Transport
       try {
         transport = resolveTopicTransport(deps, topicId)
@@ -205,6 +215,7 @@ async function handleListTopics(
   includeArchived?: boolean,
   locationFilter?: ChannelLocation,
 ): Promise<string> {
+  await deps.ensureAttached?.(locationFilter)
   const located: LocatedTopic[] = []
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
@@ -559,6 +570,7 @@ async function handleListSessions(
   channelArg?: string,
   locationFilter?: ChannelLocation,
 ): Promise<string> {
+  await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
   // Merged by session name. Channels union across transports, each
