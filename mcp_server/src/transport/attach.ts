@@ -408,6 +408,11 @@ function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolve
  *     gate on the eventual introduce. `authenticate` opts in explicitly via
  *     `opts.force`, which also bypasses the once-per-session guard so an
  *     earlier transient failure can't block a deliberate sign-in.
+ *   - `opts.allowWithoutName` lifts only the name gate (keeping the inflight
+ *     dedup and once-per-session guard) for tools that are *meant* to run
+ *     before `introduce` — `list_organizations`, the org-discovery tool you
+ *     call to pick an org to introduce with. Without it that tool is a
+ *     chicken-and-egg dead end on a session that has not yet introduced.
  *   - Concurrent calls for the same location dedupe through `ctx.inflight`,
  *     so a name is attached at most once even under overlapping tool calls.
  *   - A location missing url / tokens / Clerk pointer is skipped quietly and
@@ -418,10 +423,10 @@ function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolve
 export async function ensureLazyAttach(
   target: string | undefined,
   ctx: LazyAttachCtx,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; allowWithoutName?: boolean } = {},
 ): Promise<void> {
   const force = opts.force === true
-  if (!force && !ctx.session.hasName()) return
+  if (!force && !opts.allowWithoutName && !ctx.session.hasName()) return
 
   const names = (target !== undefined ? [target] : ctx.candidates).filter((n) => n !== LOCAL_LOCATION)
   // Resolve config only when at least one requested name needs a fresh

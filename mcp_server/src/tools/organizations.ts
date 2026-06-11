@@ -5,7 +5,7 @@ export interface OrganizationToolDeps {
   /** Bring dormant token-bearing locations online before enumerating, so a
    *  remote in config is queried without a fresh `authenticate`. Optional so
    *  legacy unit tests keep compiling. See `ensureLazyAttach`. */
-  ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
+  ensureAttached?: (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => Promise<void>
 }
 
 /** A transport that can list organizations (remote transports only). */
@@ -26,9 +26,14 @@ function canListOrganizations(transport: unknown): transport is OrgCapableTransp
  * Lists the authenticated user's organizations across every enabled remote
  * transport. The local in-process broker is single-tenant and contributes
  * nothing. Callable before `introduce` — it is a read, not a session action.
+ *
+ * Because it is the pre-`introduce` discovery tool (you call it to pick an
+ * org to introduce with), it attaches dormant remotes with
+ * `allowWithoutName` so it works on a session that has not introduced yet —
+ * lifting only the name gate, not the dedup/once-per-session guards.
  */
 export async function handleListOrganizations(deps: OrganizationToolDeps): Promise<string> {
-  await deps.ensureAttached?.()
+  await deps.ensureAttached?.(undefined, { allowWithoutName: true })
   const organizations: Array<{ id: string; name: string; location: string }> = []
   for (const transport of deps.router.enabled()) {
     if (!canListOrganizations(transport)) continue

@@ -249,7 +249,10 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   const lazyCandidates = resolved.locations.filter((l) => !l.isLocal).map((l) => l.name)
   const cwd = process.cwd()
   const env = process.env
-  const ensureAttached = async (target?: string, opts: { force?: boolean } = {}): Promise<void> => {
+  const ensureAttached = async (
+    target?: string,
+    opts: { force?: boolean; allowWithoutName?: boolean } = {},
+  ): Promise<void> => {
     await ensureLazyAttach(
       target,
       {
@@ -380,9 +383,11 @@ interface ToolDeps {
   /** Bring a token-bearing non-local location online on first tool use.
    *  `target` names a location; omit it to cover every non-local candidate
    *  (the list/broadcast tools). `opts.force` (used by `authenticate`)
-   *  bypasses the introduce gate and the once-per-session guard. Cheap and
-   *  idempotent after the first attach — see `ensureLazyAttach`. */
-  ensureAttached: (target?: string, opts?: { force?: boolean }) => Promise<void>
+   *  bypasses the introduce gate and the once-per-session guard;
+   *  `opts.allowWithoutName` (used by `list_organizations`) lifts only the
+   *  name gate for pre-introduce discovery. Cheap and idempotent after the
+   *  first attach — see `ensureLazyAttach`. */
+  ensureAttached: (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => Promise<void>
 }
 
 function buildInstructions(session: SessionManager, resolved: ResolvedConfig, router: TransportRouter): string {
