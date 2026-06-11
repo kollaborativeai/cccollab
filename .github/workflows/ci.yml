@@ -9,7 +9,13 @@
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
 #
 #   Secrets:
-#     GITHUB_TOKEN - auto-provided by Actions; used by npm publish
+#     GITHUB_TOKEN          - auto-provided by Actions; used for the version
+#                             bump commit/tag/push and GitHub Release.
+#     PACKAGES_PUBLISH_TOKEN - classic PAT with write:packages on the
+#                             flatoutsolutions org; used for `npm publish`
+#                             because the package scope (@flatoutsolutions)
+#                             differs from this repo's org (kollaborativeai),
+#                             which GITHUB_TOKEN cannot publish across.
 # -------------------------------------------------------------------
 
 name: CI
@@ -205,7 +211,12 @@ jobs:
         working-directory: mcp_server
         run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The package is scoped @flatoutsolutions but this repo lives in the
+          # kollaborativeai org, so the auto-provided GITHUB_TOKEN (scoped to
+          # kollaborativeai) gets a 403 publishing to the @flatoutsolutions
+          # GitHub Packages registry. Use a classic PAT with write:packages on
+          # the flatoutsolutions org instead. See PACKAGES_PUBLISH_TOKEN below.
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_PUBLISH_TOKEN }}
 
       - name: Commit, tag, and push
         if: steps.semver.outputs.nextStrict != ''
