@@ -257,6 +257,12 @@ async function handleAuthenticate(
       refreshToken: tokens.refreshToken,
       idToken: tokens.idToken,
       accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      // Persist the app-pointer that actually minted these tokens (the
+      // guard above guarantees both are present) so a later session's
+      // refresh uses the matching Clerk instance even if the issuer came
+      // from a CCCOLLAB_CLERK_* env override absent at refresh time.
+      clerkIssuer: locationInfo.clerkIssuer,
+      clerkClientId: locationInfo.clerkClientId,
     })
     authResult = { locationName: targetName, url }
   } catch (err) {

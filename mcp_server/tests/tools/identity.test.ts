@@ -373,7 +373,11 @@ describe('Identity Tools', () => {
           redirectPort: undefined,
         })
 
-        // saveLocationAuth must persist the clerk tokens, including the ID token
+        // saveLocationAuth must persist the clerk tokens — including the ID
+        // token used for Convex auth — AND the clerkIssuer/clerkClientId that
+        // minted them, so a later session (without the CCCOLLAB_CLERK_* env
+        // override that may have supplied the issuer at auth time) refreshes
+        // against the same Clerk instance the refresh token belongs to.
         expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
           authType: 'clerk',
           url: 'https://kai.convex.cloud',
@@ -381,6 +385,8 @@ describe('Identity Tools', () => {
           refreshToken: 'clerk-refresh-token',
           idToken: 'clerk-id-token',
           accessTokenExpiresAt: 9999999999000,
+          clerkIssuer: 'https://x.clerk.accounts.dev',
+          clerkClientId: 'cccollab-cli',
         })
 
         // The response should reference the location name (hot-attach

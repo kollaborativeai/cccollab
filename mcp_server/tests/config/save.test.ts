@@ -310,6 +310,30 @@ describe('saveLocationAuth with authType=clerk', () => {
     }
   })
 
+  it('persists clerkIssuer and clerkClientId so refresh uses the app-pointer that minted the tokens', () => {
+    // Regression: `authenticate` mints tokens against the resolved
+    // clerkIssuer/clerkClientId (which CCCOLLAB_CLERK_* env vars can
+    // override). If those app-pointer fields are not persisted alongside
+    // the tokens, a later session whose env lacks the override resolves a
+    // stale on-disk issuer and the refresh POSTs the refresh token to the
+    // wrong Clerk instance -> "backend rejected introduce". Persisting the
+    // minting pointer keeps the token and the issuer that produced it
+    // together.
+    saveLocationAuth('kai', {
+      authType: 'clerk',
+      url: 'https://x.convex.cloud',
+      accessToken: 'tok',
+      refreshToken: 'rt',
+      idToken: 'id-tok',
+      accessTokenExpiresAt: 1_700_000_000_000,
+      clerkIssuer: 'https://clerk.kollaborativeai.com',
+      clerkClientId: 'fPDyXbk1afJeEE2S',
+    })
+    const onDisk = loadPersistedLocationAuth('kai')
+    expect(onDisk?.clerkIssuer).toBe('https://clerk.kollaborativeai.com')
+    expect(onDisk?.clerkClientId).toBe('fPDyXbk1afJeEE2S')
+  })
+
   it('loadPersistedLocationAuth surfaces clerkIssuer and clerkClientId from disk', () => {
     // Simulate a location written by both static config (clerkIssuer/clerkClientId)
     // and saveLocationAuth (tokens).
