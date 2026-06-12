@@ -5,6 +5,42 @@ environment variables for one-off overrides. All fields are optional. When
 nothing is configured, cccollab runs in local-only mode with a session
 identity pulled from the environment (or prompted for via `introduce`).
 
+## Defaults (zero-config path)
+
+A brand-new install talks to the production cccollab backend without any
+on-disk config. The MCP server injects these defaults during
+`resolveConfig` (between the file merge and env overrides):
+
+| Field                            | Default                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------- |
+| `locations.remote.url`           | `https://collab.kollaborativeai.com` (Cloudflare proxy in front of KAI's Convex deployment) |
+| `locations.remote.clerkIssuer`   | `https://clerk.kollaborativeai.com` (KAI's production Clerk instance)                       |
+| `locations.remote.clerkClientId` | `fPDyXbk1afJeEE2S`                                                                          |
+| `locations.remote.authType`      | `clerk`                                                                                     |
+
+Defaults only ever touch the location named `remote`. Any field you set
+explicitly under `locations.remote` wins over the baked value (precedence:
+user config, then env vars, then defaults). A non-`local` location under any
+**other** name (e.g. `locations.selfhosted`) is left completely untouched —
+its missing `clerkIssuer` / `clerkClientId` are **not** back-filled, so the
+normal "missing Clerk pointer" / "non-local location must have a url" errors
+still fire for an incomplete self-hosted entry. The `remote` name also
+matches the `CCCOLLAB_REMOTE_URL` env override, so that env var updates this
+same location rather than adding a parallel one.
+
+The synthesized `remote` location is added present-but-inactive: it is never
+marked `active`. A fresh install therefore resolves to no active location
+and does not auto-route messages to the hosted backend. After signing in
+with the `authenticate` tool, engage it by joining a channel there —
+`join_channel` (or `set_active_channel`) with `location: "remote"`.
+(Automatic activation on sign-in is deferred to later work.)
+
+To suppress the baked-in default entirely (no synthesized location, no
+back-fill), set `CCCOLLAB_NO_DEFAULT_REMOTE=1`.
+
+Env-var overrides (`CCCOLLAB_REMOTE_URL`, etc.) run after defaults
+injection, so they still take precedence as documented below.
+
 ## File layering
 
 ```
@@ -178,14 +214,15 @@ field will be stripped at load time and a warning logged.
 
 All env vars are applied after file merging and win over anything on disk.
 
-| Variable                   | Effect                                                                                                                                                                      |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CCCOLLAB_NAME`            | Overrides the top-level `name`.                                                                                                                                             |
-| `CCCOLLAB_OBJECTIVE`       | Overrides the top-level `objective`.                                                                                                                                        |
-| `CCCOLLAB_REMOTE_URL`      | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds. |
-| `CCCOLLAB_CLERK_ISSUER`    | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.    |
-| `CCCOLLAB_CLERK_CLIENT_ID` | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.            |
-| `CCCOLLAB_PROFILE`         | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.            |
+| Variable                     | Effect                                                                                                                                                                                  |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CCCOLLAB_NAME`              | Overrides the top-level `name`.                                                                                                                                                         |
+| `CCCOLLAB_OBJECTIVE`         | Overrides the top-level `objective`.                                                                                                                                                    |
+| `CCCOLLAB_REMOTE_URL`        | Registers (or updates) a location named `remote` with this URL and marks it active. Every other location's `active` flag is cleared so "exactly one active location" holds.             |
+| `CCCOLLAB_CLERK_ISSUER`      | Sets `clerkIssuer` on the env-registered `remote` (if `CCCOLLAB_REMOTE_URL` is set this pass) or on the first existing non-local location with `active: true` otherwise.                |
+| `CCCOLLAB_CLERK_CLIENT_ID`   | Same target as `CCCOLLAB_CLERK_ISSUER`; sets `clerkClientId`. Set both alongside `CCCOLLAB_REMOTE_URL` for a complete, on-disk-free remote-location declaration.                        |
+| `CCCOLLAB_NO_DEFAULT_REMOTE` | Any non-empty value suppresses the baked-in hosted-backend default: no `remote` location is synthesized and no baked pointer is filled in. For self-hosting / privacy-sensitive setups. |
+| `CCCOLLAB_PROFILE`           | Keys the local broker's runtime state. Sessions with the same profile share the same broker; different profiles stay isolated. Affects only the local transport.                        |
 
 ## Reserved `local` location
 

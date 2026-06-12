@@ -1,6 +1,7 @@
-# Clerk OAuth Setup for cccollab CLI
+# Self-Hosting / Override: Clerk OAuth Setup
 
-Required for the `clerk` auth path against KAI's Convex deployment.
+**You do NOT need this for the default install** — the cccollab MCP server ships with the production Clerk app pointer and proxy URL baked in (see `docs/config.md` → Defaults). Use this page only if you want to point cccollab at your own Convex deployment + Clerk app (self-hosting, CI fixtures, second Clerk environment, etc.).
+
 One-time setup per Clerk environment (dev / prod).
 
 ## In Clerk Dashboard
@@ -40,7 +41,7 @@ End users put this in `~/.cccollab/config.json`:
 ```jsonc
 {
   "locations": {
-    "kai": {
+    "remote": {
       "url": "https://<kai-deployment>.convex.cloud",
       "clerkIssuer": "https://<clerk-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
@@ -56,11 +57,11 @@ End users put this in `~/.cccollab/config.json`:
 writes alongside the tokens — see below), but is optional today since
 Clerk is the only auth flow.
 
-After running `authenticate --location kai`, tokens are appended by the CLI:
+After running `authenticate --location remote`, tokens are appended by the CLI:
 
 ```json
 {
-  "kai": {
+  "remote": {
     "url": "...",
     "authType": "clerk",
     "clerkIssuer": "...",

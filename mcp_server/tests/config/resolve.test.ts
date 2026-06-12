@@ -9,7 +9,14 @@ process.env.HOME = TMP_HOME
 process.env.USERPROFILE = TMP_HOME
 
 const { resolveConfig } = await import('../../src/config/resolve.js')
-const { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } = await import('../../src/constants.js')
+const {
+  CCCOLLAB_CONFIG_FILE,
+  CCCOLLAB_HOME,
+  DEFAULT_REMOTE_LOCATION_NAME,
+  DEFAULT_REMOTE_URL,
+  DEFAULT_CLERK_ISSUER,
+  DEFAULT_CLERK_CLIENT_ID,
+} = await import('../../src/constants.js')
 
 function writeUserConfig(content: unknown): void {
   mkdirSync(CCCOLLAB_HOME, { recursive: true })
@@ -237,5 +244,81 @@ describe('resolveConfig', () => {
     const remote = resolved.locations.find((l) => l.name === 'remote')
     expect(remote?.authType).toBe('clerk')
     expect(remote?.url).toBe('https://x.convex.cloud')
+  })
+
+  describe('defaults injection (KAI-316)', () => {
+    it('synthesizes the default remote location when only local is configured', () => {
+      // Empty user + empty project: applyDefaults runs between merge and env
+      // overrides, producing the default remote location wired with the
+      // baked-in URL + Clerk pointer.
+      const resolved = resolveConfig(projectRoot, {})
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+      expect(remote?.clerkIssuer).toBe(DEFAULT_CLERK_ISSUER)
+      expect(remote?.clerkClientId).toBe(DEFAULT_CLERK_CLIENT_ID)
+    })
+
+    it('still lets CCCOLLAB_REMOTE_URL override the baked-in proxy URL', () => {
+      // Env overrides run AFTER defaults injection. The default location and
+      // the env-registered location share the name "remote", so
+      // applyEnvOverrides updates the same entry (overriding the baked URL)
+      // and marks it active rather than adding a parallel location.
+      const resolved = resolveConfig(projectRoot, { CCCOLLAB_REMOTE_URL: 'https://override.example' })
+      const remote = resolved.locations.find((l) => l.name === 'remote')
+      expect(remote?.url).toBe('https://override.example')
+      expect(resolved.active.activeLocation).toBe('remote')
+    })
+
+    it('lets CCCOLLAB_CLERK_ISSUER/CLIENT_ID override the synthesized default without CCCOLLAB_REMOTE_URL', () => {
+      // applyDefaults synthesizes `remote`; applyEnvOverrides then targets that
+      // same entry, so the Clerk env vars override the baked pointer even when
+      // CCCOLLAB_REMOTE_URL is absent (the URL stays the baked proxy).
+      const resolved = resolveConfig(projectRoot, {
+        CCCOLLAB_CLERK_ISSUER: 'https://env.clerk.accounts.dev',
+        CCCOLLAB_CLERK_CLIENT_ID: 'env-client',
+      })
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote?.url).toBe(DEFAULT_REMOTE_URL)
+      expect(remote?.clerkIssuer).toBe('https://env.clerk.accounts.dev')
+      expect(remote?.clerkClientId).toBe('env-client')
+    })
+
+    it('does not synthesize the default when a different non-local location is configured', () => {
+      writeUserConfig({
+        locations: {
+          selfhosted: { url: 'https://my.convex.cloud', clerkIssuer: 'https://my.clerk', clerkClientId: 'my-id' },
+        },
+      })
+      const resolved = resolveConfig(projectRoot, {})
+      expect(resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)).toBeUndefined()
+      const selfhosted = resolved.locations.find((l) => l.name === 'selfhosted')
+      expect(selfhosted?.clerkIssuer).toBe('https://my.clerk') // untouched, not back-filled
+    })
+
+    it('CCCOLLAB_NO_DEFAULT_REMOTE suppresses the synthesized default', () => {
+      const resolved = resolveConfig(projectRoot, { CCCOLLAB_NO_DEFAULT_REMOTE: '1' })
+      expect(resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)).toBeUndefined()
+    })
+
+    it('does not throw on resolveConfig when a project file has a cascade-active local topic', () => {
+      // The synthesized default remote location is always inactive, so it can
+      // never collide with a cascade-active `local`: resolveActive sees exactly
+      // one active location (local) and does not reject with "exactly one
+      // active location required".
+      writeFileSync(
+        join(projectRoot, '.cccollab.json'),
+        JSON.stringify({
+          locations: {
+            local: { channels: { platform: { topics: { planning: { active: true } } } } },
+          },
+        }),
+      )
+      expect(() => resolveConfig(projectRoot, {})).not.toThrow()
+      const resolved = resolveConfig(projectRoot, {})
+      expect(resolved.active.activeLocation).toBe('local')
+      // the default remote location is synthesized but not active
+      const remote = resolved.locations.find((l) => l.name === DEFAULT_REMOTE_LOCATION_NAME)
+      expect(remote).toBeDefined()
+    })
   })
 })

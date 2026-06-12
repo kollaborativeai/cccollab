@@ -1,4 +1,5 @@
 import { resolveActive, type ResolvedActive } from './active.js'
+import { applyDefaults } from './defaults.js'
 import { applyEnvOverrides } from './env.js'
 import { loadProjectConfig, loadUserConfig } from './load.js'
 import { mergeConfigs, stripProjectCredentials } from './merge.js'
@@ -71,7 +72,8 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
     project.filePath === null ? project.config : stripProjectCredentials(project.config, project.filePath).stripped
 
   const merged = mergeConfigs(user, strippedProject)
-  const withEnv = applyEnvOverrides(merged, env)
+  const withDefaults = applyDefaults(merged, env)
+  const withEnv = applyEnvOverrides(withDefaults, env)
 
   // Always ensure `local` is present in the resolved view.
   const final: UserCccollabConfig = withEnv
