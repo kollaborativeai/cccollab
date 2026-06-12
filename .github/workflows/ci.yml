@@ -9,7 +9,10 @@
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
 #
 #   Secrets:
-#     GITHUB_TOKEN - auto-provided by Actions; used by npm publish
+#     GITHUB_TOKEN - auto-provided by Actions; used for `npm publish` (the
+#                    package scope @kollaborativeai matches this repo's org,
+#                    so the default token can publish), plus the version-bump
+#                    commit/tag/push and GitHub Release.
 # -------------------------------------------------------------------
 
 name: CI
@@ -106,7 +109,7 @@ jobs:
               - 'yarn.lock'
 
   # ============================================
-  # Phase III - Release @flatoutsolutions/cccollab
+  # Phase III - Release @kollaborativeai/cccollab
   # ============================================
   # Gating:
   #   * Phase I jobs must have succeeded (explicit result checks because the
@@ -142,7 +145,7 @@ jobs:
         with:
           node-version: '24.x'
           registry-url: 'https://npm.pkg.github.com'
-          scope: '@flatoutsolutions'
+          scope: '@kollaborativeai'
 
       - name: Enable Corepack
         run: corepack enable
@@ -186,7 +189,7 @@ jobs:
 
       - name: Build
         if: steps.semver.outputs.nextStrict != ''
-        run: yarn workspace @flatoutsolutions/cccollab build
+        run: yarn workspace @kollaborativeai/cccollab build
 
       - name: Update version in mcp_server/package.json and plugin.json
         if: steps.semver.outputs.nextStrict != ''
@@ -205,6 +208,9 @@ jobs:
         working-directory: mcp_server
         run: npm publish
         env:
+          # @kollaborativeai is the same org as this repo, so the auto-provided
+          # GITHUB_TOKEN (with packages: write) can publish to the org's GitHub
+          # Packages registry — no PAT needed.
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Commit, tag, and push

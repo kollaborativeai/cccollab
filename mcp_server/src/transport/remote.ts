@@ -5,7 +5,6 @@ import { anyApi } from 'convex/server'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
-  DmDeliveryError,
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
@@ -62,16 +61,13 @@ export type Refs = {
     mutations: {
       sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
       sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
-      sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
       ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
     }
     queries: {
       listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
       listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
-      listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
       readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
       readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
-      readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
     }
   }
   organizations: {
@@ -121,14 +117,11 @@ export function makeRefs(): Refs {
         messages: {
           sendToChannel: FunctionReference<'query' | 'mutation' | 'action'>
           sendToTopic: FunctionReference<'query' | 'mutation' | 'action'>
-          sendToSession: FunctionReference<'query' | 'mutation' | 'action'>
           ackChannel: FunctionReference<'query' | 'mutation' | 'action'>
           listByTopic: FunctionReference<'query' | 'mutation' | 'action'>
           listByChannel: FunctionReference<'query' | 'mutation' | 'action'>
-          listDirectMessagesForSession: FunctionReference<'query' | 'mutation' | 'action'>
           readChannelHistory: FunctionReference<'query' | 'mutation' | 'action'>
           readTopicHistory: FunctionReference<'query' | 'mutation' | 'action'>
-          readDmThread: FunctionReference<'query' | 'mutation' | 'action'>
         }
         organizations: {
           listForUser: FunctionReference<'query' | 'mutation' | 'action'>
@@ -171,16 +164,13 @@ export function makeRefs(): Refs {
       mutations: {
         sendToChannel: c.messages.sendToChannel,
         sendToTopic: c.messages.sendToTopic,
-        sendToSession: c.messages.sendToSession,
         ackChannel: c.messages.ackChannel,
       },
       queries: {
         listByTopic: c.messages.listByTopic,
         listByChannel: c.messages.listByChannel,
-        listDirectMessagesForSession: c.messages.listDirectMessagesForSession,
         readChannelHistory: c.messages.readChannelHistory,
         readTopicHistory: c.messages.readTopicHistory,
-        readDmThread: c.messages.readDmThread,
       },
     },
     organizations: {
@@ -271,8 +261,8 @@ export class RemoteTransport implements Transport {
   /** Every unsubscribe callback returned by this transport's own
    *  `subscribe*` methods. On shutdown we invoke all of them before
    *  closing the underlying ConvexClient so no callback is still in
-   *  flight when the websocket disappears. DM unsubscribes handed out
-   *  to `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
+   *  flight when the websocket disappears. Unsubscribes handed out to
+   *  `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
    *  call is sufficient even if the caller forgets the external list. */
   private readonly trackedUnsubscribes = new Set<() => void>()
 
@@ -761,30 +751,6 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  async sendDirectMessage(args: {
-    fromSessionName: string
-    toSessionName: string
-    text: string
-  }): Promise<{ viaChannel?: string }> {
-    void args.fromSessionName
-    if (!this.enabled || this.sessionId === null) return {}
-    try {
-      await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToSession), {
-        sessionId: this.sessionId,
-        toSessionName: args.toSessionName,
-        text: args.text,
-      })
-      return {}
-    } catch (err) {
-      const code = extractConvexErrorCode(err)
-      if (code === 'DM_NO_SHARED_CHANNEL' || code === 'DM_RECIPIENT_NOT_FOUND' || code === 'DM_RECIPIENT_AMBIGUOUS') {
-        throw new DmDeliveryError(extractConvexErrorMessage(err))
-      }
-      this.registerFailure('sendDirectMessage', err)
-      return {}
-    }
-  }
-
   // ─── Message history ──────────────────────────────────────────────────
 
   private static toHistoryPage(raw: {
@@ -857,31 +823,6 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  async readDmThread(args: {
-    peerSessionName: string
-    limit?: number
-    before?: number
-  }): Promise<TransportHistoryPage> {
-    if (!this.enabled) return { messages: [], hasMore: false }
-    try {
-      const raw = (await this.client.query(
-        fn<'query'>(this.refs.messages.queries.readDmThread),
-        this.orgScopedArgs({
-          peerSessionName: args.peerSessionName,
-          limit: args.limit,
-          before: args.before,
-        }),
-      )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
-        hasMore: boolean
-      }
-      return RemoteTransport.toHistoryPage(raw)
-    } catch (err) {
-      this.registerFailure('readDmThread', err)
-      return { messages: [], hasMore: false }
-    }
-  }
-
   // ─── Lifecycle ────────────────────────────────────────────────────────
   async deregisterSession(args: { sessionName: string }): Promise<void> {
     void args.sessionName
@@ -896,54 +837,6 @@ export class RemoteTransport implements Transport {
   }
 
   // ─── Inbound subscriptions ────────────────────────────────────────────
-
-  /**
-   * Subscribe to the current session's DM inbox and push each new
-   * message into `onEvent`. Idempotent: returns an unsubscribe fn.
-   */
-  subscribeDirectMessages(onEvent: (msg: ParsedMessage) => void): () => void {
-    if (this.sessionId === null || this.shutdownStarted) return () => {}
-    // Per-subscription id dedup. Necessary because Convex's `ts` has
-    // millisecond resolution and two DMs inserted in the same mutation
-    // share a `ts` — filtering on `row.ts <= lastTs` would drop the
-    // second one. See convex/messages/queries.ts for the matching
-    // inclusive cursor on the server side.
-    const seen = new BoundedIdSet(DEDUP_CAPACITY)
-    const ownSessionId = this.sessionId
-    const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(this.refs.messages.queries.listDirectMessagesForSession),
-      { sessionId: this.sessionId },
-      (rows) => {
-        const arr = rows as Array<{
-          _id: string
-          fromSessionId: string
-          text: string
-          ts: number
-          channelId?: string
-        }>
-        for (const row of arr) {
-          if (seen.has(row._id)) continue
-          seen.add(row._id)
-          // Skip self-echo: messages this session sent shouldn't push back
-          // into our own Claude as `<channel>` tags. Mirrors the local
-          // broker's `isExactSelf` drop in broker-event-listener.ts.
-          if (row.fromSessionId === ownSessionId) continue
-          onEvent({
-            sender: row.fromSessionId,
-            text: row.text,
-            ts: new Date(row.ts).toISOString(),
-            channel: row.channelId ?? 'direct',
-            channelName: row.channelId ?? 'direct',
-            threadTs: undefined,
-          })
-        }
-      },
-      (err) => {
-        this.registerSubscriptionFailure('subscribeDirectMessages', err)
-      },
-    )
-    return this.trackUnsubscribe(() => rawUnsubscribe())
-  }
 
   /**
    * Subscribe to a topic's reactive message feed. Each new message is
@@ -1181,8 +1074,9 @@ export class RemoteTransport implements Transport {
   /**
    * Wrap an unsubscribe callback so (a) it only runs once, (b) calling
    * it removes the entry from `trackedUnsubscribes`. Callers hand the
-   * returned fn out - e.g. to `server.ts`'s `remoteUnsubscribes` map -
-   * and `shutdown()` still catches it via the internal set.
+   * returned fn out - e.g. to `server.ts`'s `remoteTopicUnsubscribes` /
+   * `remoteChannelUnsubscribes` maps - and `shutdown()` still catches it
+   * via the internal set.
    */
   private trackUnsubscribe(fn: () => void): () => void {
     let invoked = false

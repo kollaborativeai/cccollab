@@ -17,14 +17,14 @@ if ! gh auth status 2>&1 | grep -q "read:packages"; then
   gh auth refresh -s read:packages
 fi
 
-# 3. Idempotently configure ~/.npmrc for @flatoutsolutions scope
+# 3. Idempotently configure ~/.npmrc for @kollaborativeai scope
 NPMRC="${HOME}/.npmrc"
 TOKEN=$(gh auth token)
 touch "$NPMRC"
 
-if ! grep -q "^@flatoutsolutions:registry=" "$NPMRC"; then
-  log "Adding @flatoutsolutions registry to ~/.npmrc"
-  echo "@flatoutsolutions:registry=https://npm.pkg.github.com" >> "$NPMRC"
+if ! grep -q "^@kollaborativeai:registry=" "$NPMRC"; then
+  log "Adding @kollaborativeai registry to ~/.npmrc"
+  echo "@kollaborativeai:registry=https://npm.pkg.github.com" >> "$NPMRC"
 fi
 
 if grep -q "^//npm.pkg.github.com/:_authToken=" "$NPMRC"; then
@@ -39,8 +39,8 @@ else
 fi
 
 # 4. Install the npm package globally
-log "Installing @flatoutsolutions/cccollab..."
-npm i -g @flatoutsolutions/cccollab
+log "Installing @kollaborativeai/cccollab..."
+npm i -g @kollaborativeai/cccollab
 
 # 5. Ensure the flatoutsolutions marketplace is registered with Claude Code
 if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ flatoutsolutions$"; then

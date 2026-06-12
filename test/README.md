@@ -1,7 +1,7 @@
 # cccollab test harness
 
 Manual end-to-end walkthrough for the local-only MVP. Two Claude Code sessions
-auto-join a shared local channel, discover each other, exchange direct messages,
+auto-join a shared local channel, discover each other, broadcast on the channel,
 and converse inside a shared topic - all without any Slack credentials present
 and zero `slack.com` traffic.
 
@@ -20,7 +20,7 @@ break every production cccollab session on the machine. Instead, `test/start.sh`
 prepends this repo's `mcp_server/bin/` to PATH for just the test session, so
 the spawned MCP server resolves to local `mcp_server/src/` via tsx while
 production sessions outside the harness keep using the globally installed
-`@flatoutsolutions/cccollab`.
+`@kollaborativeai/cccollab`.
 
 `test/.claude/settings.json` enables `cccollab@cccollab-test` and disables the
 production `cccollab@flatoutsolutions` plugin so the two never collide in this
@@ -93,9 +93,9 @@ If they don't see each other, the most likely cause is a profile mismatch -
 the broker is per-profile, so check that `~/.cccollab/run/test/` is the only
 recently-active profile dir while both sessions are running.
 
-### 3. Direct message
+### 3. Channel broadcast
 
-From `left`, call `send_message_to_session(to: "right", text: "ping")`.
+From `left`, call `send_message_to_channel(text: "ping")` on the shared channel.
 Confirm `right` receives it as a `<channel source="cccollab" ...>` event tagged
 with the channel and sender.
 

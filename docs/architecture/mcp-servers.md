@@ -61,8 +61,9 @@ Runtime:
   Fan-out and merging happen per-call based on the location the tool names.
 - The `authenticate` tool performs Clerk-based auth and hot-attaches the remote
   transport to the running session (no restart). On a `force: true` re-auth
-  the old transport is torn down (DM unsubscribe fired, `shutdown()` called,
-  ConvexClient websocket closed) before the new one is swapped in.
+  the old transport is torn down (`shutdown()` called, all tracked
+  unsubscribes fired, ConvexClient websocket closed) before the new one is
+  swapped in.
 - When only local is available, behaviour is identical to pre-CCC-3.
 
 ### Hosted HTTP MCP server (future - NOT in this story)
@@ -91,7 +92,7 @@ server" or "the HTTP server" explicitly.
 ### 2. Additive-only backend discipline
 
 Because the local stdio server is published as an npm package
-(`@flatoutsolutions/cccollab`) and older clients continue running in the wild,
+(`@kollaborativeai/cccollab`) and older clients continue running in the wild,
 the Convex backend must evolve additively:
 
 - **Never rename** a Convex query, mutation, or function argument.
@@ -100,7 +101,7 @@ the Convex backend must evolve additively:
 - **Add new fields** rather than changing existing ones.
 - **Deprecate, wait, then remove.** Document the deprecation in the function's
   JSDoc and in the release notes. Remove only after at least two published
-  `@flatoutsolutions/cccollab` releases have shipped without using the
+  `@kollaborativeai/cccollab` releases have shipped without using the
   deprecated path.
 
 This constraint applies equally to both MCP servers: the HTTP MCP server will

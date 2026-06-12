@@ -4,6 +4,11 @@ import { handleListOrganizations } from '../../src/tools/organizations.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 import type { Transport } from '../../src/transport/index.js'
+import { ensureLazyAttach, type LazyAttachCtx } from '../../src/transport/attach.js'
+import { SessionManager } from '../../src/session.js'
+import { ActiveContext } from '../../src/context.js'
+import type { MessageBus } from '../../src/message-bus.js'
+import type { ResolvedLocation } from '../../src/config/resolve.js'
 
 /**
  * Build a TransportRouter that contains the always-present local transport
@@ -51,6 +56,58 @@ describe('list_organizations tool', () => {
     const deps = makeDepsWithTransports([failingRemote, workingRemote])
     const result = JSON.parse(await handleListOrganizations(deps))
     expect(result.organizations).toEqual([{ id: 'org_b', name: 'Beta Corp', location: 'remote-b' }])
+  })
+
+  it('lazily attaches a dormant token-bearing remote even with no session name (pre-introduce discovery)', async () => {
+    // list_organizations is the tool you call BEFORE introduce, to pick an
+    // org to introduce with. A session with no name (config has none, no
+    // introduce yet) must still get the remote attached so its orgs are
+    // listed — otherwise the discovery tool is a chicken-and-egg dead end.
+    const session = new SessionManager({ username: 'tester', cwd: '/tmp/proj' }) // intentionally un-named
+    const context = new ActiveContext()
+    const router = new TransportRouter([new LocalTransport(7850)])
+    const bus = { push: async () => {} } as unknown as MessageBus
+    const fakeRemote = {
+      source: 'remote',
+      enabled: true,
+      introduce: async () => {},
+      listOrganizations: async () => [{ id: 'org_a', name: 'Acme' }],
+    } as unknown as Transport
+    const dormant: ResolvedLocation = {
+      name: 'remote',
+      isLocal: false,
+      url: 'https://example.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      idToken: 'i',
+      clerkIssuer: 'https://x.clerk.accounts.dev',
+      clerkClientId: 'cid',
+      channels: [],
+    }
+    const ensureAttached = (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => {
+      const ctx: LazyAttachCtx = {
+        session,
+        context,
+        router,
+        messageBus: bus,
+        remoteTopicUnsubscribes: new Map<string, () => void>(),
+        remoteChannelUnsubscribes: new Map<string, () => void>(),
+        inflight: new Map<string, Promise<void>>(),
+        candidates: ['remote'],
+        resolve: () => ({
+          locations: [dormant],
+          activeLocation: undefined,
+          activeChannel: undefined,
+          activeTopic: undefined,
+        }),
+        transportFactory: () => fakeRemote,
+      }
+      return ensureLazyAttach(target, ctx, opts)
+    }
+
+    const result = JSON.parse(await handleListOrganizations({ router, ensureAttached }))
+    expect(router.has('remote')).toBe(true)
+    expect(result.organizations).toEqual([{ id: 'org_a', name: 'Acme', location: 'remote' }])
   })
 
   it('skips a remote transport that does not expose listOrganizations', async () => {

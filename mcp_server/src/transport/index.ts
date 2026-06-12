@@ -134,18 +134,12 @@ export interface Transport {
   unarchiveTopic(args: { sessionName: string; topicId: string }): Promise<void>
   sendTopicMessage(args: { sessionName: string; topicId: string; text: string }): Promise<void>
 
-  // ─── Sessions & DMs ───────────────────────────────────────────────────
+  // ─── Sessions ─────────────────────────────────────────────────────────
   listSessions(args: { channel?: string }): Promise<TransportSession[]>
-  sendDirectMessage(args: {
-    fromSessionName: string
-    toSessionName: string
-    text: string
-  }): Promise<{ viaChannel?: string }>
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
   readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
-  readDmThread(args: { peerSessionName: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
 
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */
@@ -178,17 +172,5 @@ export class TopicNameConflictError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'TopicNameConflictError'
-  }
-}
-
-/**
- * Raised when a DM fails because sender and recipient don't share a
- * channel (broker 403) or the recipient is unknown (broker 404).
- */
-export class DmDeliveryError extends Error {
-  readonly code = 'DM_DELIVERY_FAILED' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'DmDeliveryError'
   }
 }

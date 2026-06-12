@@ -4,6 +4,10 @@ import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
+import { ensureLazyAttach } from '../../src/transport/attach.js'
+import type { MessageBus } from '../../src/message-bus.js'
+import type { Transport } from '../../src/transport/index.js'
+import type { ResolvedLocation } from '../../src/config/resolve.js'
 
 // Mock runClerkPkce so tests for the Clerk branch don't open a browser
 // or start a loopback listener.
@@ -16,6 +20,7 @@ vi.mock('../../src/remote/auth-clerk.js', async () => {
     runClerkPkce: vi.fn(async () => ({
       accessToken: 'clerk-access-token',
       refreshToken: 'clerk-refresh-token',
+      idToken: 'clerk-id-token',
       accessTokenExpiresAt: 9999999999000,
     })),
   }
@@ -70,7 +75,6 @@ function makeDepsWithRemote(
     unarchiveTopic: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     sendMessage: vi.fn(async () => {}),
-    sendDirectMessage: vi.fn(async () => {}),
     hasTopic: vi.fn(() => false),
     ...remoteOverrides,
   }
@@ -344,6 +348,73 @@ describe('Identity Tools', () => {
         expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
       })
 
+      it('lazily attaches a dormant token-bearing location and short-circuits without a fresh sign-in', async () => {
+        // The reported regression: a remote with valid tokens on disk that
+        // startup gating left dormant (not active, no channels) was never in
+        // the router, so authenticate fell through to a full OAuth round-trip.
+        // With lazy attach, authenticate brings it online from the stored
+        // tokens and reports "already authenticated".
+        const { runClerkPkce } = await import('../../src/remote/auth-clerk.js')
+        ;(runClerkPkce as ReturnType<typeof vi.fn>).mockClear()
+
+        const dormant: ResolvedLocation = {
+          name: 'flatout',
+          isLocal: false,
+          url: 'https://example.convex.cloud',
+          accessToken: 'a',
+          refreshToken: 'r',
+          idToken: 'i',
+          clerkIssuer: 'https://x.clerk.accounts.dev',
+          clerkClientId: 'cid',
+          userEmail: 'stefan@flatout.solutions',
+          channels: [],
+        }
+        const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+        session.setName('architect')
+        const context = new ActiveContext()
+        const router = new TransportRouter([new LocalTransport(7850)])
+        const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+        const fakeRemote = {
+          source: 'flatout',
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+        } as unknown as Transport
+
+        const ensureAttached = (target?: string): Promise<void> =>
+          ensureLazyAttach(target, {
+            session,
+            context,
+            router,
+            messageBus: bus,
+            remoteTopicUnsubscribes: new Map(),
+            remoteChannelUnsubscribes: new Map(),
+            inflight: new Map<string, Promise<void>>(),
+            candidates: ['flatout'],
+            resolve: () => ({
+              locations: [dormant],
+              activeLocation: undefined,
+              activeChannel: undefined,
+              activeTopic: undefined,
+            }),
+            transportFactory: () => fakeRemote,
+          })
+
+        const customDeps: IdentityToolDeps = {
+          session,
+          context,
+          router,
+          locations: [dormant],
+          ensureAttached,
+        }
+
+        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
+
+        expect(runClerkPkce).not.toHaveBeenCalled()
+        expect(router.has('flatout')).toBe(true)
+        expect(result).toContain('Already authenticated to "flatout"')
+        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+      })
+
       it('authenticate dispatches to runClerkPkce when location.authType === "clerk"', async () => {
         const { runClerkPkce } = await import('../../src/remote/auth-clerk.js')
         const { saveLocationAuth } = await import('../../src/config/save.js')
@@ -366,24 +437,24 @@ describe('Identity Tools', () => {
         }
         const result = await handleIdentityTool('authenticate', { location: 'kai' }, clerkDeps)
 
-        // runClerkPkce must have been called with the correct issuer + clientId + resource
+        // runClerkPkce must have been called with the correct issuer + clientId
         expect(runClerkPkce).toHaveBeenCalledWith({
           issuer: 'https://x.clerk.accounts.dev',
           clientId: 'cccollab-cli',
           redirectPort: undefined,
-          resource: 'convex',
         })
 
-        // saveLocationAuth must persist the clerk tokens AND the
-        // clerkIssuer/clerkClientId that minted them, so a later session
-        // (without the CCCOLLAB_CLERK_* env override that may have supplied
-        // the issuer at auth time) refreshes against the same Clerk
-        // instance the refresh token belongs to.
+        // saveLocationAuth must persist the clerk tokens — including the ID
+        // token used for Convex auth — AND the clerkIssuer/clerkClientId that
+        // minted them, so a later session (without the CCCOLLAB_CLERK_* env
+        // override that may have supplied the issuer at auth time) refreshes
+        // against the same Clerk instance the refresh token belongs to.
         expect(saveLocationAuth).toHaveBeenCalledWith('kai', {
           authType: 'clerk',
           url: 'https://kai.convex.cloud',
           accessToken: 'clerk-access-token',
           refreshToken: 'clerk-refresh-token',
+          idToken: 'clerk-id-token',
           accessTokenExpiresAt: 9999999999000,
           clerkIssuer: 'https://x.clerk.accounts.dev',
           clerkClientId: 'cccollab-cli',

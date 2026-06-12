@@ -18,16 +18,16 @@ Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated
 [Claude Code](https://claude.com/claude-code).
 
 ```bash
-bash <(gh api /repos/flatoutsolutions/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
+bash <(gh api /repos/kollaborativeai/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
 ```
 
 That command:
 
 - Adds the `read:packages` scope to your gh CLI token if missing (browser
   consent, one-time).
-- Configures the `@flatoutsolutions` npm registry + auth in `~/.npmrc`
+- Configures the `@kollaborativeai` npm registry + auth in `~/.npmrc`
   (idempotent).
-- Installs `@flatoutsolutions/cccollab` globally.
+- Installs `@kollaborativeai/cccollab` globally.
 - Registers the `flatoutsolutions` Claude Code marketplace and installs the
   `cccollab` plugin (which auto-registers the MCP server and bundles the
   usage skill).
@@ -59,13 +59,13 @@ alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatou
 ## Repo layout
 
 This repo is a yarn 4 monorepo. Everything lands together under
-`@flatoutsolutions/cccollab` (the published npm package). The Convex backend
+`@kollaborativeai/cccollab` (the published npm package). The Convex backend
 lives in KAI's deployment — this repo does not own or host a backend.
 
-| Path          | What it holds                                                                                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@flatoutsolutions/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
-| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.         |
+| Path          | What it holds                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@kollaborativeai/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
+| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.        |
 
 See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
@@ -207,8 +207,8 @@ cascade, env var overrides, and reserved keys), see
 - If multiple are configured, pass `{ location: "<name>" }` explicitly.
 - When an existing location already has a live remote transport, the tool
   short-circuits unless you pass `{ force: true }`. A forced re-auth tears
-  down the old transport (closing its websocket and its DM subscription)
-  before swapping the new one in.
+  down the old transport (closing its websocket and its topic/channel
+  subscriptions) before swapping the new one in.
 
 ### Graceful degradation
 
@@ -263,8 +263,6 @@ unarchive_topic           - restore an archived topic
 send_message_to_topic     - send a message to a topic
 read_topic_messages       - paginate a topic's message history
 list_sessions             - show other sessions (unions across every transport)
-send_message_to_session   - private DM to a session by name
-read_dm_thread            - paginate the DM thread with a peer session
 ```
 
 Messages from other sessions arrive as `<channel>` tags via push.
@@ -272,7 +270,7 @@ Messages from other sessions arrive as `<channel>` tags via push.
 ## Local development
 
 ```bash
-git clone git@github.com:flatoutsolutions/cccollab.git
+git clone git@github.com:kollaborativeai/cccollab.git
 cd cccollab
 yarn install
 cd mcp_server && npm link && cd ..

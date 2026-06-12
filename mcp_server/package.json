@@ -1,6 +1,6 @@
 {
-  "name": "@flatoutsolutions/cccollab",
-  "version": "2.0.0",
+  "name": "@kollaborativeai/cccollab",
+  "version": "3.0.3",
   "type": "module",
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
@@ -11,7 +11,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flatoutsolutions/cccollab.git"
+    "url": "git+https://github.com/kollaborativeai/cccollab.git"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",

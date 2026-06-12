@@ -26,3 +26,6 @@ test/.claude/settings.local.json
 /i/
 
 .env.local
+
+# Local git worktrees (never commit these — they're per-developer)
+.worktrees/

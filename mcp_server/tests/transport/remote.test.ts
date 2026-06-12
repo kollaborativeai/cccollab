@@ -59,15 +59,11 @@ describe('makeRefs – cccollab/* flat namespace', () => {
   it('messages.mutations paths resolve to cccollab/messages:*', () => {
     expect(getFunctionName(refs.messages.mutations.sendToChannel)).toBe('cccollab/messages:sendToChannel')
     expect(getFunctionName(refs.messages.mutations.sendToTopic)).toBe('cccollab/messages:sendToTopic')
-    expect(getFunctionName(refs.messages.mutations.sendToSession)).toBe('cccollab/messages:sendToSession')
     expect(getFunctionName(refs.messages.mutations.ackChannel)).toBe('cccollab/messages:ackChannel')
   })
 
   it('messages.queries paths resolve to cccollab/messages:*', () => {
     expect(getFunctionName(refs.messages.queries.listByTopic)).toBe('cccollab/messages:listByTopic')
     expect(getFunctionName(refs.messages.queries.listByChannel)).toBe('cccollab/messages:listByChannel')
-    expect(getFunctionName(refs.messages.queries.listDirectMessagesForSession)).toBe(
-      'cccollab/messages:listDirectMessagesForSession',
-    )
   })
 })

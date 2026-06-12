@@ -18,6 +18,9 @@ export interface ClerkLocationAuth {
   url?: string
   accessToken: string
   refreshToken: string
+  /** OIDC ID token (JWT) — the token sent to Convex. Its `aud` is the OAuth
+   *  Client ID, matching the deployment's auth.config.ts provider. */
+  idToken: string
   /** Unix epoch milliseconds at which the access token expires. Required so
    *  the refresh path can determine token liveness without an introspection
    *  round-trip. */
@@ -212,6 +215,7 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
     authType: 'clerk' as const,
     accessToken: auth.accessToken,
     refreshToken: auth.refreshToken,
+    idToken: auth.idToken,
     accessTokenExpiresAt: auth.accessTokenExpiresAt,
     ...(auth.clerkIssuer !== undefined ? { clerkIssuer: auth.clerkIssuer } : {}),
     ...(auth.clerkClientId !== undefined ? { clerkClientId: auth.clerkClientId } : {}),
@@ -278,6 +282,7 @@ export function loadPersistedLocationAuth(locationName: string): {
   authType?: 'clerk'
   accessToken?: string
   refreshToken?: string
+  idToken?: string
   accessTokenExpiresAt?: number
   clerkIssuer?: string
   clerkClientId?: string
@@ -301,6 +306,7 @@ export function loadPersistedLocationAuth(locationName: string): {
     authType: loc.authType,
     accessToken: loc.accessToken,
     refreshToken: loc.refreshToken,
+    idToken: loc.idToken,
     accessTokenExpiresAt: loc.accessTokenExpiresAt,
     clerkIssuer: loc.clerkIssuer,
     clerkClientId: loc.clerkClientId,

@@ -32,6 +32,7 @@ export interface ResolvedLocation {
   authType?: 'clerk'
   accessToken?: string
   refreshToken?: string
+  idToken?: string
   accessTokenExpiresAt?: number
   clerkIssuer?: string
   clerkClientId?: string
@@ -98,6 +99,7 @@ export function resolveConfig(cwd: string, env: NodeJS.ProcessEnv = process.env)
       authType: loc.authType,
       accessToken: loc.accessToken,
       refreshToken: loc.refreshToken,
+      idToken: loc.idToken,
       accessTokenExpiresAt: loc.accessTokenExpiresAt,
       clerkIssuer: loc.clerkIssuer,
       clerkClientId: loc.clerkClientId,

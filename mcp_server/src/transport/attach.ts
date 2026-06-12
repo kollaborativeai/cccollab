@@ -4,9 +4,10 @@ import type { SessionManager } from '../session.js'
 import type { ResolvedLocation } from '../config/resolve.js'
 import type { ParsedMessage } from '../types.js'
 import { createRemoteClient } from '../remote/client.js'
+import { assertSecureBearerUrl } from '../remote/auth-clerk.js'
 import { RemoteTransport } from './remote.js'
 import type { TransportRouter } from './router.js'
-import type { Transport, TransportTopicMessage } from './index.js'
+import { LOCAL_LOCATION, type Transport, type TransportTopicMessage } from './index.js'
 
 /**
  * Everything `attachLocation` needs to turn a resolved non-local
@@ -18,7 +19,7 @@ import type { Transport, TransportTopicMessage } from './index.js'
  * same function and produce the same runtime shape.
  *
  * `transportFactory` is injectable so tests can swap in a FakeTransport
- * and drive the auto-subscribe / DM-wiring / replace-in-place branches
+ * and drive the auto-subscribe / replace-in-place branches
  * without standing up a real Convex client.
  */
 export interface AttachCtx {
@@ -26,19 +27,13 @@ export interface AttachCtx {
   context: ActiveContext
   router: TransportRouter
   messageBus: MessageBus
-  /** Mutable map of DM-subscription unsubscribe callbacks, keyed by
-   *  location name. `server.ts`'s shutdown hook drains the whole map on
-   *  SIGTERM / stdin close; `attachLocation`'s replace-in-place path
-   *  looks up the old entry by location name and invokes it before
-   *  swapping the new transport in. One subscription per location. */
-  remoteUnsubscribes: Map<string, () => void>
   /** Mutable map of topic-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${topicId}`. Populated when a remote
    *  transport establishes a `subscribeTopicMessages` reactive feed
    *  during the auto-subscribe loop, and mirrored in the tool layer's
    *  join/start paths so a user-triggered `join_topic` or `start_topic`
    *  also wires an inbound stream. Drained on shutdown and on the
-   *  replace-in-place path in the same way as `remoteUnsubscribes`. */
+   *  replace-in-place path (filtered by the location-name prefix). */
   remoteTopicUnsubscribes: Map<string, () => void>
   /** Mutable map of channel-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${channelName}`. Populated on channel join
@@ -89,14 +84,11 @@ export type AttachResult =
  *   4. If a prior transport exists for the same name, tear it down
  *      (`deregisterSession` + stored unsubscribe) before swapping.
  *   5. Register the new transport with the router.
- *   6. Wire the DM inbox reactive subscription via MessageBus and push
- *      the unsubscribe fn onto `remoteUnsubscribes` so shutdown cleans
- *      it up.
- *   7. Best-effort auto-subscribe: join configured channels, join-or-
+ *   6. Best-effort auto-subscribe: join configured channels, join-or-
  *      create configured topics. Failures here are logged and swallowed
  *      - the transport is live at this point so the attach has already
  *      succeeded.
- *   8. If no channel is currently runtime-active, optionally cascade
+ *   7. If no channel is currently runtime-active, optionally cascade
  *      the resolved-config's active state into `ActiveContext`. This
  *      matches the startup cold-path behaviour while protecting a user
  *      who may have `set_active_channel`'d elsewhere after startup.
@@ -150,9 +142,8 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
 
   // Step 4 + 5: if something else holds this name in the router, tear
   // it down first. Order matters:
-  //   (a) invoke the prior transport's stored DM unsubscribe - this
-  //       closes out the reactive subscription and releases the
-  //       MessageBus callback reference.
+  //   (a) tear down its topic and channel subscriptions so the reactive
+  //       feeds close and release their MessageBus callback references.
   //   (b) call its `deregisterSession` so the backend stops attributing
   //       messages to a stale session id.
   //   (c) call its `shutdown()` so the underlying ConvexClient websocket
@@ -163,17 +154,6 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   // transport survive this function."
   const prior = ctx.router.unregister(name)
   if (prior) {
-    const priorUnsub = ctx.remoteUnsubscribes.get(name)
-    if (priorUnsub !== undefined) {
-      ctx.remoteUnsubscribes.delete(name)
-      try {
-        priorUnsub()
-      } catch (err) {
-        logError(
-          `Prior transport DM unsubscribe failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
     // Tear down every topic subscription owned by the prior transport
     // before the swap. Keys are `${location}::${topicId}`; we filter by
     // the location prefix so other locations' subscriptions are
@@ -219,24 +199,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   }
   ctx.router.register(transport)
 
-  // Step 6: DM subscription, if this transport supports one. The map is
-  // keyed by location name so a subsequent re-attach can find and tear
-  // down this subscription cleanly.
-  if (hasDirectMessageSubscription(transport)) {
-    try {
-      const unsub = transport.subscribeDirectMessages((msg) => {
-        void ctx.messageBus.push(msg, transport.source)
-      })
-      ctx.remoteUnsubscribes.set(name, unsub)
-    } catch (err) {
-      // A transport that advertises the subscription method but throws
-      // on the first call is unusual; log and continue so the rest of
-      // the transport still works.
-      logError(`DM subscription wiring failed for "${name}": ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
-
-  // Step 7: auto-subscribe to configured channels and topics.
+  // Step 6: auto-subscribe to configured channels and topics.
   const displayName = ctx.session.hasName() ? ctx.session.displayName : undefined
   if (displayName !== undefined) {
     for (const channel of location.channels) {
@@ -337,6 +300,148 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   return { ok: true, transport, location }
 }
 
+/**
+ * Everything `ensureLazyAttach` needs to bring a dormant-but-token-bearing
+ * location online the first time a tool touches it. It is the superset of
+ * `AttachCtx`'s static collaborators plus the bookkeeping that makes lazy
+ * attach safe to call on the hot path of every tool invocation.
+ */
+export interface LazyAttachCtx {
+  session: SessionManager
+  context: ActiveContext
+  router: TransportRouter
+  messageBus: MessageBus
+  remoteTopicUnsubscribes: Map<string, () => void>
+  remoteChannelUnsubscribes: Map<string, () => void>
+  /** In-flight (and completed) lazy-attach attempts, keyed by location name.
+   *  The first caller for a name stores its attach promise here; concurrent
+   *  and later callers await that same promise instead of starting a second
+   *  attach — this both dedupes overlapping tool calls (no double introduce /
+   *  websocket) and keeps a stale/unreachable remote from being retried on
+   *  every tool call. A failed attempt's resolved promise is retained so the
+   *  dead remote is tried at most once per process; a non-constructable
+   *  location's entry is dropped so a later token write can still be picked
+   *  up (see `lazyAttachOne`). */
+  inflight: Map<string, Promise<void>>
+  /** Non-local location names eligible for lazy attach (the non-local
+   *  locations present in the startup config). Used as the candidate set
+   *  when `target` is undefined ("every non-local"). */
+  candidates: string[]
+  /** Re-resolve the config so a location authenticated (or refreshed by a
+   *  peer process) since startup is attached with its current tokens. Only
+   *  invoked when there is an unregistered, not-yet-in-flight candidate, so
+   *  the common already-attached path costs nothing. */
+  resolve: () => AttachResolved
+  /** Passed through to `attachLocation`; tests inject a fake. */
+  transportFactory?: (location: ResolvedLocation) => Transport
+}
+
+/** Can this location be turned into a live transport? Mirrors the
+ *  constructability half of `planStartupAttachments` (url + tokens + Clerk
+ *  pointer, matching `defaultTransportFactory`). A location that fails this
+ *  is not attemptable yet — it is not recorded as a spent attempt, so a
+ *  later config re-resolve (peer token write) can still pick it up. */
+function isConstructable(location: ResolvedLocation | undefined): location is ResolvedLocation {
+  return (
+    !!location &&
+    !location.isLocal &&
+    !!location.url &&
+    !!location.accessToken &&
+    !!location.refreshToken &&
+    !!location.clerkIssuer &&
+    !!location.clerkClientId
+  )
+}
+
+const NOOP_ATTACH: Promise<void> = Promise.resolve()
+
+/** Attach one location, deduping against any in-flight/completed attempt.
+ *  Synchronously records its promise in `ctx.inflight` *before* the first
+ *  await so a concurrent caller observes it and awaits rather than starting
+ *  a second attach. */
+function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolved, force: boolean): Promise<void> {
+  if (name === LOCAL_LOCATION || ctx.router.has(name)) return NOOP_ATTACH
+  if (!force) {
+    const existing = ctx.inflight.get(name)
+    if (existing) return existing
+  }
+  // Constructability is checked synchronously, before registering the
+  // in-flight promise: a not-yet-attemptable location (missing url/tokens/
+  // Clerk) must NOT be memoized, so a later resolve picking up peer-written
+  // tokens can still attach it.
+  const location = resolved.locations.find((l) => l.name === name)
+  if (!isConstructable(location)) return NOOP_ATTACH
+  const attempt = (async () => {
+    const result = await attachLocation(name, {
+      session: ctx.session,
+      context: ctx.context,
+      router: ctx.router,
+      messageBus: ctx.messageBus,
+      remoteTopicUnsubscribes: ctx.remoteTopicUnsubscribes,
+      remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
+      resolved,
+      transportFactory: ctx.transportFactory,
+    })
+    if (!result.ok) {
+      // Retain the resolved in-flight entry so the dead remote is not retried
+      // on every subsequent tool call this session.
+      logError(`Lazy-attach for "${name}" failed: ${result.reason}`)
+    }
+  })()
+  ctx.inflight.set(name, attempt)
+  return attempt
+}
+
+/**
+ * Attach a token-bearing non-local location on demand so a valid remote in
+ * config "just works" through any tool without an explicit `authenticate`
+ * call. Startup gating (`planStartupAttachments`) deliberately leaves a
+ * dormant remote unattached to avoid touching stale endpoints on every
+ * launch; this restores access the moment a tool actually needs the
+ * location.
+ *
+ *   - `target` names a single location; `undefined` means "every non-local
+ *     candidate" (the list/broadcast tools that union across transports).
+ *   - Implicit (tool-triggered) attach only fires once the session has a
+ *     name. Before `introduce`, attachLocation would register a remote
+ *     *without* a validating introduce, which then trips the org-required
+ *     gate on the eventual introduce. `authenticate` opts in explicitly via
+ *     `opts.force`, which also bypasses the once-per-session guard so an
+ *     earlier transient failure can't block a deliberate sign-in.
+ *   - `opts.allowWithoutName` lifts only the name gate (keeping the inflight
+ *     dedup and once-per-session guard) for tools that are *meant* to run
+ *     before `introduce` — `list_organizations`, the org-discovery tool you
+ *     call to pick an org to introduce with. Without it that tool is a
+ *     chicken-and-egg dead end on a session that has not yet introduced.
+ *   - Concurrent calls for the same location dedupe through `ctx.inflight`,
+ *     so a name is attached at most once even under overlapping tool calls.
+ *   - A location missing url / tokens / Clerk pointer is skipped quietly and
+ *     not recorded as spent (a later token write is still picked up).
+ *   - Best-effort: a failed attach is logged and swallowed; the caller
+ *     proceeds and the router surfaces "not configured / degraded".
+ */
+export async function ensureLazyAttach(
+  target: string | undefined,
+  ctx: LazyAttachCtx,
+  opts: { force?: boolean; allowWithoutName?: boolean } = {},
+): Promise<void> {
+  const force = opts.force === true
+  if (!force && !opts.allowWithoutName && !ctx.session.hasName()) return
+
+  const names = (target !== undefined ? [target] : ctx.candidates).filter((n) => n !== LOCAL_LOCATION)
+  // Resolve config only when at least one requested name needs a fresh
+  // attempt; otherwise every name is already attached or in flight.
+  const needsWork = names.some((n) => !ctx.router.has(n) && (force || !ctx.inflight.has(n)))
+  if (!needsWork) {
+    // Still await any in-flight attempts for the requested names so a caller
+    // doesn't proceed to router.get() before a concurrent attach completes.
+    await Promise.all(names.map((n) => ctx.inflight.get(n)).filter((p): p is Promise<void> => p !== undefined))
+    return
+  }
+  const resolved = ctx.resolve()
+  await Promise.all(names.map((n) => lazyAttachOne(n, ctx, resolved, force)))
+}
+
 /** Why a configured location was not attached at startup. `local` and
  *  `dormant` are the quiet, expected reasons (nothing surfaced to the
  *  user); the rest flag an actionable misconfiguration on a location the
@@ -422,10 +527,16 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
       `defaultTransportFactory: location "${location.name}" is missing clerkIssuer or clerkClientId — every non-local location must supply the Clerk app pointer.`,
     )
   }
+  // Fail closed on a non-HTTPS (and non-loopback) deployment URL: the OIDC ID
+  // token is attached to this Convex client, so a mistyped `http://` host would
+  // otherwise leak a ~24h credential over plaintext ws://. The Clerk token
+  // endpoints have their own guard; this covers the Convex URL itself.
+  assertSecureBearerUrl(new URL(location.url), `Convex location URL ("${location.name}")`)
   const client = createRemoteClient({
     locationName: location.name,
     url: location.url,
     accessToken: location.accessToken ?? '',
+    idToken: location.idToken ?? '',
     refreshToken: location.refreshToken ?? '',
     accessTokenExpiresAt: location.accessTokenExpiresAt,
     clerkIssuer: location.clerkIssuer,
@@ -434,16 +545,6 @@ export function defaultTransportFactory(location: ResolvedLocation): Transport {
     userId: location.userId,
   })
   return new RemoteTransport({ client, source: location.name })
-}
-
-/** Type guard: does this transport expose a DM reactive subscription?
- *  Both the real `RemoteTransport` and the test `FakeRemoteTransport`
- *  do; `LocalTransport` does not (broker DMs arrive via the SSE
- *  `BrokerEventListener` instead). */
-function hasDirectMessageSubscription(
-  transport: Transport,
-): transport is Transport & { subscribeDirectMessages: RemoteTransport['subscribeDirectMessages'] } {
-  return typeof (transport as { subscribeDirectMessages?: unknown }).subscribeDirectMessages === 'function'
 }
 
 /** Type guard: does this transport expose per-topic reactive subscriptions?

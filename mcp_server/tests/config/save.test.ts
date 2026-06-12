@@ -31,6 +31,7 @@ describe('saveLocationAuth', () => {
       url: 'https://wonderful-narwhal-409.convex.cloud',
       accessToken: 'jwt-abc',
       refreshToken: 'refresh-xyz',
+      idToken: 'id-abc',
       accessTokenExpiresAt: 1_700_000_000_000,
       userEmail: 'stefan@flatout.solutions',
       userId: 'abc123',
@@ -51,6 +52,7 @@ describe('saveLocationAuth', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'a',
       refreshToken: 'b',
+      idToken: 'id-a',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     if (process.platform !== 'win32') {
@@ -90,6 +92,7 @@ describe('saveLocationAuth', () => {
       authType: 'clerk',
       accessToken: 'new-token',
       refreshToken: 'new-refresh',
+      idToken: 'id-new-token',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
@@ -110,6 +113,7 @@ describe('saveLocationAuth', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'a',
       refreshToken: 'b',
+      idToken: 'id-a',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(true)
@@ -135,6 +139,7 @@ describe('saveLocationAuth', () => {
       url: 'https://a.convex.cloud',
       accessToken: 'after-stale',
       refreshToken: 'r',
+      idToken: 'id-after-stale',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
@@ -162,6 +167,7 @@ describe('saveLocationAuth', () => {
         url: 'https://a.convex.cloud',
         accessToken: 'should-not-write',
         refreshToken: 'r',
+        idToken: 'id-should-not-write',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
     ).toThrow(/timed out/)
@@ -200,6 +206,7 @@ describe('saveLocationAuth', () => {
         url: 'https://a.convex.cloud',
         accessToken: 'new-token',
         refreshToken: 'new-refresh',
+        idToken: 'id-new-token',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
     ).toThrow(/not valid JSON|failed to parse/i)
@@ -220,6 +227,7 @@ describe('saveLocationAuth', () => {
         url: 'https://x.convex.cloud',
         accessToken: 'tok',
         refreshToken: 'rt',
+        idToken: 'id-tok',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
     ).toThrow()
@@ -240,6 +248,7 @@ describe('saveLocationAuth with authType=clerk', () => {
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
       refreshToken: 'rt',
+      idToken: 'id-tok',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     const onDisk = loadPersistedLocationAuth('kai')
@@ -257,6 +266,7 @@ describe('saveLocationAuth with authType=clerk', () => {
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
       refreshToken: 'rt',
+      idToken: 'id-tok',
       accessTokenExpiresAt: 1_700_000_000_000,
       userEmail: 'test@example.com',
       userId: 'u-999',
@@ -273,6 +283,7 @@ describe('saveLocationAuth with authType=clerk', () => {
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
       refreshToken: 'rt',
+      idToken: 'id-tok',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     // Write clerkIssuer and clerkClientId manually (they come from static
@@ -313,6 +324,7 @@ describe('saveLocationAuth with authType=clerk', () => {
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
       refreshToken: 'rt',
+      idToken: 'id-tok',
       accessTokenExpiresAt: 1_700_000_000_000,
       clerkIssuer: 'https://clerk.kollaborativeai.com',
       clerkClientId: 'fPDyXbk1afJeEE2S',
