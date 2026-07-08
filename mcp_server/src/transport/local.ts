@@ -147,18 +147,42 @@ export class LocalTransport implements Transport {
   }
 
   // ─── Message history ──────────────────────────────────────────────────
-  // The local broker does not expose a paged read-history API; these
-  // return empty pages so the interface contract is satisfied.
+  // Channel broadcasts are fanned out over SSE and never persisted, so the
+  // local broker has no channel history to page. Rather than return a silent
+  // empty page (which reads as "no messages"), surface the limitation.
   async readChannelMessages(_args: {
     channel: string
     limit?: number
     before?: number
   }): Promise<TransportHistoryPage> {
-    return { messages: [], hasMore: false }
+    throw new Error(
+      'Channel broadcast history is not available on the local transport — broadcasts are delivered live and not persisted. Read history is only available for remote locations.',
+    )
   }
 
-  async readTopicMessages(_args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
-    return { messages: [], hasMore: false }
+  // Topic history lives in the broker's memory; page it through the broker's
+  // read-history endpoint and map it onto the shared history-page contract.
+  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+    const params = new URLSearchParams()
+    if (args.limit !== undefined) params.set('limit', String(args.limit))
+    if (args.before !== undefined) params.set('before', String(args.before))
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    const data = await this.brokerGet<{
+      messages: Array<{ sender: string; text: string; ts: number }>
+      hasMore: boolean
+    }>(`/topics/${encodeURIComponent(args.topicId)}/messages${qs}`)
+    return {
+      messages: data.messages.map((m) => ({
+        sender: m.sender,
+        // The local broker is single-tenant: the sender name *is* the session
+        // name, so mirror it onto senderSessionName for parity with remote.
+        senderSessionName: m.sender,
+        text: m.text,
+        ts: m.ts,
+      })),
+      hasMore: data.hasMore,
+      oldestTs: data.messages.length > 0 ? data.messages[0]!.ts : undefined,
+    }
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────

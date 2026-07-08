@@ -240,6 +240,94 @@ describe('Broker: isolation guards and invariants', () => {
     })
   })
 
+  describe('paged topic history (GET /topics/:id/messages)', () => {
+    async function readHistory(
+      topicId: string,
+      query: { limit?: number; before?: number } = {},
+    ): Promise<{
+      status: number
+      body: { messages: Array<{ sender: string; text: string; ts: number }>; hasMore: boolean }
+    }> {
+      const params = new URLSearchParams()
+      if (query.limit !== undefined) params.set('limit', String(query.limit))
+      if (query.before !== undefined) params.set('before', String(query.before))
+      const qs = params.toString() ? `?${params.toString()}` : ''
+      const res = await fetch(`http://127.0.0.1:${port}/topics/${topicId}/messages${qs}`)
+      return { status: res.status, body: (await res.json()) as never }
+    }
+
+    async function seed(
+      session: string,
+      channel: string,
+      topic: string,
+      texts: string[],
+      spacingMs = 0,
+    ): Promise<string> {
+      await registerSession(port, session)
+      await joinChannel(port, session, channel)
+      const { id } = (await (await createTopic(port, session, topic, channel)).json()) as { id: string }
+      for (const text of texts) {
+        await postTopicMessage(port, id, session, text)
+        if (spacingMs > 0) await new Promise<void>((r) => setTimeout(r, spacingMs))
+      }
+      return id
+    }
+
+    it('returns all messages oldest-first with epoch-ms numeric timestamps', async () => {
+      const id = await seed('hist-a', 'hist-ch', 'hist-topic-a', ['one', 'two', 'three'])
+      const { status, body } = await readHistory(id)
+      expect(status).toBe(200)
+      expect(body.messages.map((m) => m.text)).toEqual(['one', 'two', 'three'])
+      expect(body.messages.every((m) => typeof m.ts === 'number' && Number.isFinite(m.ts))).toBe(true)
+      // Non-decreasing timestamps (oldest-first).
+      for (let i = 1; i < body.messages.length; i++) {
+        expect(body.messages[i]!.ts).toBeGreaterThanOrEqual(body.messages[i - 1]!.ts)
+      }
+      expect(body.hasMore).toBe(false)
+    })
+
+    it('returns an empty page (not an error) for a topic with no messages', async () => {
+      const id = await seed('hist-empty', 'hist-empty-ch', 'hist-empty-topic', [])
+      const { status, body } = await readHistory(id)
+      expect(status).toBe(200)
+      expect(body.messages).toEqual([])
+      expect(body.hasMore).toBe(false)
+    })
+
+    it('caps the page to `limit`, returns the newest page, and sets hasMore', async () => {
+      const id = await seed('hist-b', 'hist-b-ch', 'hist-topic-b', ['m1', 'm2', 'm3', 'm4', 'm5'], 2)
+      const { body } = await readHistory(id, { limit: 2 })
+      // Newest two, still oldest-first within the page.
+      expect(body.messages.map((m) => m.text)).toEqual(['m4', 'm5'])
+      expect(body.hasMore).toBe(true)
+    })
+
+    it('pages backwards with the `before` cursor until hasMore is false', async () => {
+      const id = await seed('hist-c', 'hist-c-ch', 'hist-topic-c', ['a', 'b', 'c', 'd'], 2)
+      const first = await readHistory(id, { limit: 2 })
+      expect(first.body.messages.map((m) => m.text)).toEqual(['c', 'd'])
+      expect(first.body.hasMore).toBe(true)
+
+      const cursor = first.body.messages[0]!.ts
+      const second = await readHistory(id, { limit: 2, before: cursor })
+      expect(second.body.messages.map((m) => m.text)).toEqual(['a', 'b'])
+      expect(second.body.hasMore).toBe(false)
+    })
+
+    it('clamps `limit` to a maximum of 200', async () => {
+      const id = await seed('hist-clamp', 'hist-clamp-ch', 'hist-clamp-topic', ['x'])
+      const { status } = await readHistory(id, { limit: 999999 })
+      // The broker must accept the request (clamped internally), not reject it.
+      expect(status).toBe(200)
+    })
+
+    it('returns 404 for an unknown topic id', async () => {
+      const { status, body } = await readHistory('00000000-0000-0000-0000-000000000000')
+      expect(status).toBe(404)
+      expect((body as unknown as { error: string }).error).toMatch(/not found/i)
+    })
+  })
+
   describe('leave_channel cascade (regression)', () => {
     it('drops the session from every topic in the channel it left', async () => {
       await registerSession(port, 'casc-a')

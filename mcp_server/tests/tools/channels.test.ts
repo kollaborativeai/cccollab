@@ -476,6 +476,16 @@ describe('Channel Tools', () => {
       expect(result.messages[0].text).toBe('hi')
       expect(result.hasMore).toBe(false)
     })
+
+    it('surfaces a "not supported" error on the local transport instead of a silent empty page', async () => {
+      const deps = createDeps()
+      deps.context.joinChannel('dev', 'manual', 'local')
+      // The tool layer lets the transport error propagate; server.ts turns it
+      // into an MCP error result. Regression guard for KAI-371.
+      await expect(handleChannelTool('read_channel_messages', { channel: 'dev' }, deps)).rejects.toThrow(
+        /not available on the local transport/i,
+      )
+    })
   })
 
   describe('send_message_to_channel', () => {

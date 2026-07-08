@@ -145,7 +145,18 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
 
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
 const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
+const TOPIC_MESSAGES_ROUTE = /^\/topics\/([^/]+)\/messages$/
 const SESSION_NAME_ROUTE = /^\/sessions\/([^/]+)$/
+
+const HISTORY_DEFAULT_LIMIT = 50
+const HISTORY_MAX_LIMIT = 200
+
+/** Clamp a raw `?limit=` value to [1, 200], defaulting to 50 when absent/invalid. */
+function clampHistoryLimit(raw: string | null): number {
+  const n = raw === null ? NaN : Number(raw)
+  if (!Number.isFinite(n)) return HISTORY_DEFAULT_LIMIT
+  return Math.max(1, Math.min(HISTORY_MAX_LIMIT, Math.floor(n)))
+}
 
 const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   const { pathname, searchParams } = parseUrl(req.url ?? '/')
@@ -418,6 +429,31 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       },
       messages: t.messages,
     })
+    return
+  }
+
+  // Paged read-history for a topic. Unlike GET /topics/:id (which returns the
+  // full message list for a subscribed session), this pages the in-memory
+  // history newest-page-first via `before`/`limit` and normalizes `ts` to
+  // epoch-ms so it matches the shared TransportHistoryPage contract.
+  const historyMatch = TOPIC_MESSAGES_ROUTE.exec(pathname)
+  if (historyMatch && method === 'GET') {
+    const id = historyMatch[1]!
+    const t = topics.get(id)
+    if (!t) {
+      jsonResponse(res, 404, { error: 'topic not found' })
+      return
+    }
+    const limit = clampHistoryLimit(searchParams.get('limit'))
+    const beforeRaw = searchParams.get('before')
+    const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
+    const before = Number.isFinite(beforeNum) ? beforeNum : null
+    const all = t.messages.map((m) => ({ sender: m.sender, text: m.text, ts: Date.parse(m.ts) }))
+    const older = before === null ? all : all.filter((m) => m.ts < before)
+    const hasMore = older.length > limit
+    // Newest `limit` messages, still oldest-first within the page.
+    const page = older.slice(Math.max(0, older.length - limit))
+    jsonResponse(res, 200, { messages: page, hasMore })
     return
   }
 
