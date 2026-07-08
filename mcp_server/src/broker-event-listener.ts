@@ -204,6 +204,10 @@ export class BrokerEventListener {
           this.log(`DROPPED topic_archived: topic ${event.topicId ?? 'none'} not joined`)
           return
         }
+        if (event.archivedBy && this.session.isExactSelf(event.archivedBy)) {
+          this.log(`DROPPED: self topic_archived from ${event.archivedBy}`)
+          return
+        }
         const msg: ParsedMessage = {
           sender: event.archivedBy ?? 'unknown',
           text: 'Topic archived',
@@ -224,6 +228,10 @@ export class BrokerEventListener {
         }
         if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
           this.log(`DROPPED topic_unarchived: topic ${event.topicId ?? 'none'} not joined`)
+          return
+        }
+        if (event.unarchivedBy && this.session.isExactSelf(event.unarchivedBy)) {
+          this.log(`DROPPED: self topic_unarchived from ${event.unarchivedBy}`)
           return
         }
         const msg: ParsedMessage = {

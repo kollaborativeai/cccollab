@@ -550,7 +550,10 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
       }
       throw err
     }
-    // Restore membership so the unarchiver is joined again (KAI-373).
+    // Join the acting session to the now-active topic so it's a member again
+    // (KAI-373). Must run after unarchive — join rejects archived topics. A
+    // transient failure here surfaces as an error; the topic is already active,
+    // so the caller can recover with join_topic.
     await registerTopicMembership(deps, byId, transport)
     return JSON.stringify({ id: byId.id, name: byId.topic, channel: byId.channel, location: transport.source })
   }
@@ -578,7 +581,8 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
     }
     throw err
   }
-  // Restore membership so the unarchiver is joined again (KAI-373).
+  // Join the acting session to the now-active topic so it's a member again
+  // (KAI-373); see the id-path above for the ordering/failure rationale.
   await registerTopicMembership(deps, match, transport)
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel, location: match.location })
 }

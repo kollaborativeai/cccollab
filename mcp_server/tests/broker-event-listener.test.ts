@@ -126,20 +126,20 @@ describe('BrokerEventListener (channel-aware)', () => {
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
-  it('pushes topic_archived events for joined topics on subscribed channel', async () => {
+  it('pushes topic_archived events from a peer for joined topics on subscribed channel', async () => {
     context.joinTopic('uuid-archived', 'Archived topic', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_archived',
       channel: 'default',
       topicId: 'uuid-archived',
-      archivedBy: 'architect',
+      archivedBy: 'peer',
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
-          sender: 'architect',
+          sender: 'peer',
           text: 'Topic archived',
           channel: 'default',
           threadTs: 'uuid-archived',
@@ -148,26 +148,54 @@ describe('BrokerEventListener (channel-aware)', () => {
     })
   })
 
-  it('pushes topic_unarchived attributed to the unarchiver (KAI-373)', async () => {
+  it('drops self topic_archived so the archiver is not notified of its own action (KAI-373)', async () => {
+    context.joinTopic('uuid-self-arch', 'Self archived', 'default')
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'topic_archived',
+      channel: 'default',
+      topicId: 'uuid-self-arch',
+      archivedBy: 'architect',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('pushes topic_unarchived from a peer attributed to the unarchiver (KAI-373)', async () => {
     context.joinTopic('uuid-unarch', 'Unarchived', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_unarchived',
       channel: 'default',
       topicId: 'uuid-unarch',
-      unarchivedBy: 'architect',
+      unarchivedBy: 'peer',
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
-          sender: 'architect',
+          sender: 'peer',
           text: 'Topic unarchived',
           channel: 'default',
           threadTs: 'uuid-unarch',
         }),
       )
     })
+  })
+
+  it('drops self topic_unarchived so the unarchiver is not notified of its own action (KAI-373)', async () => {
+    context.joinTopic('uuid-self-unarch', 'Self unarchived', 'default')
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'topic_unarchived',
+      channel: 'default',
+      topicId: 'uuid-self-unarch',
+      unarchivedBy: 'architect',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
   })
 
   it('pushes broadcast events from other sessions on subscribed channel', async () => {
