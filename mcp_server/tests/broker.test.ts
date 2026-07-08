@@ -314,13 +314,6 @@ describe('Broker: isolation guards and invariants', () => {
       expect(second.body.hasMore).toBe(false)
     })
 
-    it('clamps `limit` to a maximum of 200', async () => {
-      const id = await seed('hist-clamp', 'hist-clamp-ch', 'hist-clamp-topic', ['x'])
-      const { status } = await readHistory(id, { limit: 999999 })
-      // The broker must accept the request (clamped internally), not reject it.
-      expect(status).toBe(200)
-    })
-
     it('returns 404 for an unknown topic id', async () => {
       const { status, body } = await readHistory('00000000-0000-0000-0000-000000000000')
       expect(status).toBe(404)

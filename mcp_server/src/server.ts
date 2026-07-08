@@ -866,7 +866,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'read_channel_messages',
     {
       description:
-        "Read a channel's broadcast history (newest page first; oldest-last within the page). Defaults to the active channel. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. To read further back, call again with `before` set to the previous page's `oldestTs` until `hasMore` is false.",
+        "Read a channel's broadcast history (newest page first; oldest-first within the page). Defaults to the active channel. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. To read further back, call again with `before` set to the previous page's `oldestTs` until `hasMore` is false.",
       inputSchema: {
         channel: z.string().optional().describe('Channel name. Defaults to the active channel.'),
         location: z.string().optional().describe('Location name of the target channel.'),
@@ -890,7 +890,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'read_topic_messages',
     {
       description:
-        "Read a topic's message history (oldest-last within the page). Defaults to the active topic. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. Page further back with `before` = previous `oldestTs` until `hasMore` is false.",
+        "Read a topic's message history (oldest-first within the page). Defaults to the active topic. Returns {messages:[{sender,senderSessionName,text,ts}], hasMore, oldestTs}. Page further back with `before` = previous `oldestTs` until `hasMore` is false.",
       inputSchema: {
         topic: z.string().optional().describe('Topic id. Defaults to the active topic.'),
         limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
