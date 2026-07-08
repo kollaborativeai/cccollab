@@ -5,6 +5,7 @@ import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 import { ensureLazyAttach } from '../../src/transport/attach.js'
+import { AttachDiagnostics } from '../../src/transport/diagnostics.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { Transport } from '../../src/transport/index.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
@@ -199,6 +200,28 @@ describe('Identity Tools', () => {
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations).toEqual({ local: { enabled: true, organization: 'local' } })
+      })
+
+      it('surfaces a failed-to-attach remote (not in the router) as disabled+degraded from diagnostics', async () => {
+        // KAI-368: a remote whose introduce failed at startup is NOT in
+        // the router (invariant: router holds only healthy transports).
+        // whoami must still report it as ✗ degraded, sourced from the
+        // separate diagnostics registry, so the user can see *why* it's
+        // missing without the plugin having bricked.
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const diagnostics = new AttachDiagnostics()
+        diagnostics.recordFailure('personal', 'introduce() failed for "personal": Server Error')
+        deps.diagnostics = diagnostics
+
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+
+        expect(result.locations.local).toEqual({ enabled: true, organization: 'local' })
+        expect(result.locations.personal).toEqual({
+          enabled: false,
+          degradation: 'introduce() failed for "personal": Server Error',
+        })
       })
     })
 

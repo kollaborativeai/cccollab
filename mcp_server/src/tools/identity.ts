@@ -7,6 +7,7 @@ import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
 export interface IdentityToolDeps {
@@ -55,6 +56,12 @@ export interface IdentityToolDeps {
    *  as enabled. Optional so legacy unit tests keep compiling. See
    *  `ensureLazyAttach`. */
   ensureAttached?: (target?: string, opts?: { force?: boolean }) => Promise<void>
+  /** Records of transport attaches that FAILED (introduce error, etc).
+   *  A failed remote is deliberately never registered in the router
+   *  (KAI-368: the router holds only healthy transports), so `whoami`
+   *  reads this separate registry to still surface the location as
+   *  disabled + degraded. Optional so legacy unit tests keep compiling. */
+  diagnostics?: AttachDiagnostics
 }
 
 export async function handleIdentityTool(
@@ -131,7 +138,7 @@ export async function handleIdentityTool(
       // token-bearing locations online first so a valid remote reports as
       // enabled rather than missing.
       await deps.ensureAttached?.()
-      const locationStates = await buildLocationStates(deps.router)
+      const locationStates = await buildLocationStates(deps.router, deps.diagnostics)
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -172,9 +179,16 @@ export async function handleIdentityTool(
  * `organization` is `"local"` for the local broker, the bound
  * organization name for a remote transport (via `getBoundOrganizationName`),
  * or omitted when a remote transport has no session yet.
+ *
+ * `diagnostics`, when provided, contributes an entry for every location
+ * whose attach FAILED and which is therefore absent from the router
+ * (KAI-368). Those surface as `{ enabled: false, degradation: <reason> }`.
+ * A location that is live in the router takes precedence over a stale
+ * diagnostics entry for the same name.
  */
 async function buildLocationStates(
   router: TransportRouter,
+  diagnostics?: AttachDiagnostics,
 ): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
@@ -196,7 +210,18 @@ async function buildLocationStates(
       return [transport.source, state] as const
     }),
   )
-  return Object.fromEntries(entries)
+  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
+    Object.fromEntries(entries)
+
+  // Merge in failed-attach locations that never made it into the router.
+  // A live router entry always wins over a diagnostics record for the
+  // same name, so a location that recovered isn't shown as degraded.
+  for (const failure of diagnostics?.entries() ?? []) {
+    if (states[failure.location] !== undefined) continue
+    states[failure.location] = { enabled: false, degradation: failure.reason }
+  }
+
+  return states
 }
 
 async function handleAuthenticate(
@@ -346,6 +371,10 @@ async function handleAuthenticate(
       activeTopic: refreshed.active.activeTopic,
     },
     transportFactory: deps.transportFactory,
+    // Clear any prior startup/lazy attach failure for this location on a
+    // successful hot-attach (and refresh the reason on a repeat failure)
+    // so whoami stops showing a resolved "✗" after re-authentication.
+    diagnostics: deps.diagnostics,
   }
 
   const result = await attachLocation(authResult.locationName, ctx)

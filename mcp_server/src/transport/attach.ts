@@ -7,6 +7,7 @@ import { createRemoteClient } from '../remote/client.js'
 import { assertSecureBearerUrl } from '../remote/auth-clerk.js'
 import { RemoteTransport } from './remote.js'
 import type { TransportRouter } from './router.js'
+import type { AttachDiagnostics } from './diagnostics.js'
 import { LOCAL_LOCATION, type Transport, type TransportTopicMessage } from './index.js'
 
 /**
@@ -49,6 +50,12 @@ export interface AttachCtx {
    *  (`defaultTransportFactory`) builds a `RemoteTransport` wrapping a
    *  `ConvexClient`; tests pass a fake. */
   transportFactory?: (location: ResolvedLocation) => Transport
+  /** Optional registry of failed attaches (KAI-368). When present,
+   *  `attachLocation` records the reason on every failure return and
+   *  clears it on success, so `whoami`/`list_locations` can surface a
+   *  location that failed to attach even though it is deliberately never
+   *  placed in the router. */
+  diagnostics?: AttachDiagnostics
 }
 
 /** Subset of `ResolvedConfig` that `attachLocation` needs. Kept
@@ -94,21 +101,28 @@ export type AttachResult =
  *      who may have `set_active_channel`'d elsewhere after startup.
  */
 export async function attachLocation(name: string, ctx: AttachCtx): Promise<AttachResult> {
+  // Record every failure in the diagnostics registry (when one is wired
+  // in) so a location that never makes it into the router is still
+  // visible via whoami/list_locations. The success path clears it.
+  const fail = (reason: string): AttachResult => {
+    ctx.diagnostics?.recordFailure(name, reason)
+    return { ok: false, reason }
+  }
+
   const location = ctx.resolved.locations.find((l) => l.name === name)
   if (!location) {
-    return { ok: false, reason: `Location "${name}" is not present in the resolved config.` }
+    return fail(`Location "${name}" is not present in the resolved config.`)
   }
   if (location.isLocal) {
-    return {
-      ok: false,
-      reason: `Location "${name}" is the reserved local broker location; attachLocation is for remote transports only.`,
-    }
+    return fail(
+      `Location "${name}" is the reserved local broker location; attachLocation is for remote transports only.`,
+    )
   }
   if (!location.url) {
-    return { ok: false, reason: `Location "${name}" has no URL configured.` }
+    return fail(`Location "${name}" has no URL configured.`)
   }
   if (!location.accessToken || !location.refreshToken) {
-    return { ok: false, reason: `Location "${name}" has no tokens; call authenticate first.` }
+    return fail(`Location "${name}" has no tokens; call authenticate first.`)
   }
 
   const factory = ctx.transportFactory ?? defaultTransportFactory
@@ -116,7 +130,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   try {
     transport = factory(location)
   } catch (err) {
-    return { ok: false, reason: `Could not construct transport: ${err instanceof Error ? err.message : String(err)}` }
+    return fail(`Could not construct transport: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // Step 3: introduce FIRST. A failure here must not register the
@@ -133,10 +147,24 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
     try {
       await transport.introduce({ sessionName: displayName, objective })
     } catch (err) {
-      return {
-        ok: false,
-        reason: `introduce() failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
+      // The transport was constructed (its ConvexClient opened a
+      // websocket and installed an auth fetcher) but never registered.
+      // Tear it down before bailing so no orphaned client keeps running
+      // with no owner — an unowned background rejection (e.g. a prod
+      // "Server Error") would otherwise crash the whole process and brick
+      // the local broker for every session (KAI-368). Best-effort:
+      // shutdown() never throws, but guard anyway so a cleanup hiccup
+      // can't mask the original introduce failure.
+      if (typeof transport.shutdown === 'function') {
+        try {
+          await transport.shutdown()
+        } catch (shutdownErr) {
+          logError(
+            `Cleanup of failed attach for "${name}" hit an error: ${shutdownErr instanceof Error ? shutdownErr.message : String(shutdownErr)}`,
+          )
+        }
       }
+      return fail(`introduce() failed for "${name}": ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -297,6 +325,9 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
     }
   }
 
+  // Attach succeeded — clear any earlier recorded failure so a location
+  // that has recovered stops being surfaced as degraded.
+  ctx.diagnostics?.clear(name)
   return { ok: true, transport, location }
 }
 
@@ -334,6 +365,10 @@ export interface LazyAttachCtx {
   resolve: () => AttachResolved
   /** Passed through to `attachLocation`; tests inject a fake. */
   transportFactory?: (location: ResolvedLocation) => Transport
+  /** Passed through to `attachLocation` so a failed lazy attach is
+   *  recorded (and a recovered one cleared) in the shared diagnostics
+   *  registry — see `AttachCtx.diagnostics`. */
+  diagnostics?: AttachDiagnostics
 }
 
 /** Can this location be turned into a live transport? Mirrors the
@@ -381,6 +416,7 @@ function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolve
       remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
       resolved,
       transportFactory: ctx.transportFactory,
+      diagnostics: ctx.diagnostics,
     })
     if (!result.ok) {
       // Retain the resolved in-flight entry so the dead remote is not retried
