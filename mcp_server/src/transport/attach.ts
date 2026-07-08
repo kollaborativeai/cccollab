@@ -151,10 +151,11 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
       // websocket and installed an auth fetcher) but never registered.
       // Tear it down before bailing so no orphaned client keeps running
       // with no owner — an unowned background rejection (e.g. a prod
-      // "Server Error") would otherwise crash the whole process and brick
-      // the local broker for every session (KAI-368). Best-effort:
-      // shutdown() never throws, but guard anyway so a cleanup hiccup
-      // can't mask the original introduce failure.
+      // "Server Error") would otherwise crash the whole process, killing
+      // this session's in-process local transport (and, because every
+      // session loads the same config, each of them in turn) (KAI-368).
+      // Best-effort: shutdown() never throws, but guard anyway so a
+      // cleanup hiccup can't mask the original introduce failure.
       if (typeof transport.shutdown === 'function') {
         try {
           await transport.shutdown()

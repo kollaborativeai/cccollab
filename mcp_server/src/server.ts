@@ -998,8 +998,8 @@ async function ensureBroker(): Promise<number> {
 async function main() {
   // Install the process-level safety net FIRST, before any transport work
   // starts. A remote location whose ConvexClient websocket/auth rejects in
-  // the background must never crash the process and take the local broker
-  // down with it (KAI-368).
+  // the background must never crash the process and take this session's
+  // in-process local transport down with it (KAI-368).
   installProcessSafetyNet((msg) => console.error(`[cccollab] ${msg}`))
 
   const config = loadConfig()
