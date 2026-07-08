@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
+import http from 'node:http'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -82,6 +83,71 @@ async function joinTopic(port: number, topicId: string, sessionId: string): Prom
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId }),
+  })
+}
+
+async function archiveTopic(port: number, topicId: string, archivedBy: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/topics/${topicId}/archive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ archivedBy }),
+  })
+}
+
+async function unarchiveTopic(port: number, topicId: string, unarchivedBy: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/topics/${topicId}/unarchive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unarchivedBy }),
+  })
+}
+
+/**
+ * Opens the broker's SSE `/events` stream (via raw node:http, which streams
+ * small SSE frames reliably), fires `trigger` once the connection is live, and
+ * resolves the first broadcast event matching `predicate`.
+ */
+function nextEvent(
+  port: number,
+  predicate: (evt: Record<string, unknown>) => boolean,
+  trigger: () => Promise<void>,
+  timeoutMs = 4000,
+): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (value: Record<string, unknown> | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      req.destroy()
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    const req = http.get(
+      { host: '127.0.0.1', port, path: '/events', headers: { Accept: 'text/event-stream' } },
+      (res) => {
+        res.setEncoding('utf-8')
+        let buffer = ''
+        res.on('data', (chunk: string) => {
+          buffer += chunk
+          const frames = buffer.split('\n\n')
+          buffer = frames.pop() ?? ''
+          for (const frame of frames) {
+            const line = frame.split('\n').find((l) => l.startsWith('data:'))
+            if (!line) continue
+            try {
+              const evt = JSON.parse(line.slice(5).trim()) as Record<string, unknown>
+              if (predicate(evt)) finish(evt)
+            } catch {
+              /* keepalive / non-JSON frame */
+            }
+          }
+        })
+        // Connection is live — safe to fire the action that produces the event.
+        trigger().catch(reject)
+      },
+    )
+    req.on('error', reject)
   })
 }
 
@@ -340,6 +406,29 @@ describe('Broker: isolation guards and invariants', () => {
       expect(rejoin.status).toBe(403)
       const send = await postTopicMessage(port, id, 'casc-b', 'no')
       expect(send.status).toBe(403)
+    })
+  })
+
+  describe('topic lifecycle attribution (KAI-373)', () => {
+    it('attributes the unarchive event to the acting session', async () => {
+      await registerSession(port, 'attrib-a')
+      await joinChannel(port, 'attrib-a', 'attrib-ch')
+      const created = await createTopic(port, 'attrib-a', 'attrib-topic', 'attrib-ch')
+      const { id } = (await created.json()) as { id: string }
+      await archiveTopic(port, id, 'attrib-a')
+
+      const evt = await nextEvent(
+        port,
+        (e) => e.type === 'topic_unarchived' && e.topicId === id,
+        async () => {
+          const res = await unarchiveTopic(port, id, 'attrib-a')
+          expect(res.status).toBe(200)
+        },
+      )
+
+      expect(evt).not.toBeNull()
+      // Mirrors topic_archived's archivedBy so the event isn't attributed to "system".
+      expect(evt!.unarchivedBy).toBe('attrib-a')
     })
   })
 })

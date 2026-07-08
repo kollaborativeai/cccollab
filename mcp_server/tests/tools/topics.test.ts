@@ -409,13 +409,15 @@ describe('Topic Tools', () => {
       expect(result.error).toContain('No joined topic')
     })
 
-    it('archive_topic via active topic', async () => {
+    it('archive_topic keeps the archiver joined (KAI-373)', async () => {
       deps.context.joinTopic('uuid-archive', 'Archive me', 'default', 'local')
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('archive_topic', {}, deps))
       expect(result).toEqual({ id: 'uuid-archive', name: 'Archive me' })
-      expect(deps.context.hasTopic()).toBe(false)
+      // Archiving must NOT drop the archiver's own membership: the peer stays
+      // joined, so dropping only the archiver's was asymmetric (KAI-373).
+      expect(deps.context.isTopicJoined('uuid-archive')).toBe(true)
     })
 
     it('leave_topic via active topic', async () => {
@@ -439,7 +441,7 @@ describe('Topic Tools', () => {
       )
     })
 
-    it('unarchive_topic via name', async () => {
+    it('unarchive_topic via name restores membership and attributes the actor (KAI-373)', async () => {
       const mockFetch = vi
         .fn()
         .mockResolvedValueOnce({
@@ -458,10 +460,18 @@ describe('Topic Tools', () => {
               ],
             }),
         })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true }) }) // unarchive
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ messages: [] }) }) // join (restore membership)
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleTopicTool('unarchive_topic', { topic: 'Unarchive' }, deps))
       expect(result).toEqual({ id: 'uuid-unarch', name: 'Unarchive me', channel: 'default', location: 'local' })
+      // Unarchiving restores the acting session's membership so isJoined is true
+      // again — symmetric with archive keeping it (KAI-373).
+      expect(deps.context.isTopicJoined('uuid-unarch')).toBe(true)
+      // The unarchive request carries who unarchived, mirroring archive's archivedBy.
+      const unarchiveCall = mockFetch.mock.calls.find((call) => String(call[0]).includes('/unarchive'))
+      expect(unarchiveCall).toBeDefined()
+      expect(JSON.parse(unarchiveCall![1].body)).toEqual({ unarchivedBy: 'architect' })
     })
 
     it('list_sessions with channel arg rejects unsubscribed', async () => {

@@ -7,6 +7,7 @@ import {
   type ChannelLocation,
   type Transport,
   type TransportTopic,
+  type TransportTopicMessage,
 } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
 import { ensureTopicSubscription, teardownTopicSubscription } from '../transport/attach.js'
@@ -405,11 +406,19 @@ async function handleSetActiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: found.threadTs, name: found.topicName, channel: found.channel, location: found.location })
 }
 
-async function joinTopicByData(
+/**
+ * Registers the caller's session as a member of `topic`: joins on the transport
+ * (creating the backing membership so `isJoined` is true on both the local
+ * broker and the remote backend), records it in the local context, and — when a
+ * message bus is wired — subscribes to its live updates. Shared by `join_topic`
+ * and `unarchive_topic` so unarchiving revives membership the same way joining
+ * establishes it. Returns the joined location and the primed message history.
+ */
+async function registerTopicMembership(
   deps: TopicToolDeps,
   topic: LocatedTopic | (TransportTopic & { location?: ChannelLocation }),
   transport: Transport,
-): Promise<string> {
+): Promise<{ location: ChannelLocation; history: TransportTopicMessage[] }> {
   const location = (topic as LocatedTopic).location ?? transport.source
   const { history } = await transport.joinTopic({
     sessionName: deps.session.displayName,
@@ -436,6 +445,15 @@ async function joinTopicByData(
       map: deps.remoteTopicUnsubscribes,
     })
   }
+  return { location, history }
+}
+
+async function joinTopicByData(
+  deps: TopicToolDeps,
+  topic: LocatedTopic | (TransportTopic & { location?: ChannelLocation }),
+  transport: Transport,
+): Promise<string> {
+  const { location, history } = await registerTopicMembership(deps, topic, transport)
   return JSON.stringify({
     id: topic.id,
     name: topic.topic,
@@ -465,14 +483,9 @@ async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
   await transport.archiveTopic({ sessionName: deps.session.displayName, topicId })
-  deps.context.leaveTopic(topicId)
-  if (deps.remoteTopicUnsubscribes) {
-    teardownTopicSubscription({
-      locationName: transport.source,
-      topicId,
-      map: deps.remoteTopicUnsubscribes,
-    })
-  }
+  // Keep the archiver's membership and live subscription: the peer stays a
+  // member, so dropping only the archiver's was asymmetric — and it must stay
+  // subscribed to receive the topic's own unarchive event (KAI-373).
   return JSON.stringify({ id: topicId, name: topicName })
 }
 
@@ -481,7 +494,8 @@ async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Prom
   if ('error' in resolved) return JSON.stringify(resolved)
   const transport = deps.router.get(resolved.location)
   await transport.archiveTopic({ sessionName: deps.session.displayName, topicId: resolved.id })
-  deps.context.leaveTopic(resolved.id)
+  // Archiving never drops membership (KAI-373); this by-name path only runs for
+  // topics the session hasn't joined, so there's nothing to leave anyway.
   return JSON.stringify({ id: resolved.id, name: resolved.topicName })
 }
 
@@ -536,6 +550,8 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
       }
       throw err
     }
+    // Restore membership so the unarchiver is joined again (KAI-373).
+    await registerTopicMembership(deps, byId, transport)
     return JSON.stringify({ id: byId.id, name: byId.topic, channel: byId.channel, location: transport.source })
   }
 
@@ -562,6 +578,8 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
     }
     throw err
   }
+  // Restore membership so the unarchiver is joined again (KAI-373).
+  await registerTopicMembership(deps, match, transport)
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel, location: match.location })
 }
 

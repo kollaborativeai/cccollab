@@ -148,21 +148,23 @@ describe('BrokerEventListener (channel-aware)', () => {
     })
   })
 
-  it('pushes topic_unarchived for joined topics on subscribed channel', async () => {
+  it('pushes topic_unarchived attributed to the unarchiver (KAI-373)', async () => {
     context.joinTopic('uuid-unarch', 'Unarchived', 'default')
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'topic_unarchived',
       channel: 'default',
       topicId: 'uuid-unarch',
+      unarchivedBy: 'architect',
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
-          sender: 'system',
+          sender: 'architect',
           text: 'Topic unarchived',
           channel: 'default',
+          threadTs: 'uuid-unarch',
         }),
       )
     })

@@ -182,7 +182,7 @@ describe('tool-layer remote topic subscriptions', () => {
     expect(unsubscribes.has(`flatout::${res.id}`)).toBe(true)
   })
 
-  it('archive_topic tears down the topic subscription (active-topic path)', async () => {
+  it('archive_topic keeps the archiver joined and subscribed (KAI-373)', async () => {
     const { deps, transport, unsubscribes } = makeRemoteDeps()
     const startRes = JSON.parse(
       await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
@@ -192,8 +192,33 @@ describe('tool-layer remote topic subscriptions', () => {
 
     const archived = JSON.parse(await handleTopicTool('archive_topic', {}, deps))
     expect(archived.id).toBe(topicId)
-    expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(true)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(false)
+    // Archiving must not drop the archiver's own membership or live subscription
+    // — peers keep both, so the archiver stays symmetric with them and keeps
+    // receiving the topic's own unarchive event (KAI-373).
+    expect(deps.context.isTopicJoined(topicId)).toBe(true)
+    expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(false)
+    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
+  })
+
+  it('unarchive_topic re-establishes membership and subscription on the remote transport (KAI-373)', async () => {
+    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const topicId = 'abcdefghij0123456789' // matches looksLikeTopicId's convex-id shape
+    transport.registerTopic({
+      id: topicId,
+      topic: 'cross-machine',
+      channel: 'dev',
+      creator: 'someone',
+      state: 'archived',
+      createdAt: '2026-04-20T00:00:00Z',
+    })
+
+    const res = JSON.parse(await handleTopicTool('unarchive_topic', { topic: topicId }, deps))
+    expect(res.id).toBe(topicId)
+    expect(transport.unarchiveTopic).toHaveBeenCalledWith({ sessionName: 'architect', topicId })
+    // The unarchiver is joined again and re-subscribed to live updates.
+    expect(deps.context.isTopicJoined(topicId)).toBe(true)
+    expect(transport.subscribedTopics.has(topicId)).toBe(true)
+    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
   })
 
   it('leave_topic tears down the topic subscription on the remote transport', async () => {

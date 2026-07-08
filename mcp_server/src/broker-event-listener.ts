@@ -28,6 +28,7 @@ export interface BrokerLocalEvent {
   sender?: string
   text?: string
   archivedBy?: string
+  unarchivedBy?: string
   ts?: string
 }
 
@@ -226,7 +227,7 @@ export class BrokerEventListener {
           return
         }
         const msg: ParsedMessage = {
-          sender: 'system',
+          sender: event.unarchivedBy ?? 'unknown',
           text: 'Topic unarchived',
           ts: new Date().toISOString(),
           channel,

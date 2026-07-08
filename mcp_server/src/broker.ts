@@ -167,6 +167,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     const sseRes = res as SSEResponse
     clients.add(sseRes)
+    // Push the headers now instead of waiting for the first event: SSE clients
+    // (and the event listener) need a live connection immediately, before any
+    // broadcast, so they don't miss events that fire right after connecting.
+    res.flushHeaders()
     log(`SSE client connected (total: ${clients.size})`)
 
     req.on('close', () => {
@@ -537,15 +541,17 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'unarchive': {
+            const unarchivedBy = body.unarchivedBy as string | undefined
             t.state = 'active'
             const event = {
               source: 'local' as const,
               type: 'topic_unarchived' as const,
               channel: t.channel,
               topicId: id,
+              unarchivedBy: unarchivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))
-            log(`TOPIC UNARCHIVED: ${id}`)
+            log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy ?? 'unknown'}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
