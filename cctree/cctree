@@ -138,17 +138,21 @@ def gather():
         cc = match_cccollab(full, members)
         real = os.path.realpath(cwd) if cwd else ""
         repo, linked = git_info(cwd)
+        # For a linked worktree the worktree dir is NOT a folder level — use its container
+        # (the repo's folder) as the current folder, so pitcrew-1 → folder "projects/pitcrew".
+        fbase = os.path.dirname(real) if (real and linked) else real
         rows.append({
             "id":       s.get("id", "") or str(s.get("pid", "")),
             "company":  company_of(cwd),
             "status":   s.get("status", "?"),
             "repo":     repo,
-            "folder":   os.path.basename(os.path.dirname(real)) if real else "?",
+            "folder":   f"{os.path.basename(os.path.dirname(fbase))}/{os.path.basename(fbase)}" if fbase else "?",
             "worktree": os.path.basename(real) if (real and linked) else "",
             "name":     full,
             "msg":      (s.get("latestMessage") or "").replace("\n", " ").strip(),
             "channels": ",".join(cc["channels"]) if cc else "",
             "topics":   ",".join(cc["topics"]) if cc else "",
+            "pid":      s.get("pid"),
             "tty":      pid2tty.get(str(s.get("pid")), ""),
         })
     return rows
@@ -157,7 +161,7 @@ def col_widths(maxx):
     """Distribute width across STATUS·FOLDER·REPO·WORKTREE·SESSION·CHANNELS·TOPICS·MESSAGE."""
     SW = 13
     rem = maxx - 2 - (SW + 2)
-    FO = min(16, max(8, int(rem * 0.09)))
+    FO = min(24, max(12, int(rem * 0.13)))
     RE = min(16, max(8, int(rem * 0.09)))
     WT = min(20, max(8, int(rem * 0.11)))
     NW = min(38, max(16, int(rem * 0.22)))
@@ -240,25 +244,50 @@ def _pane_tty_by_name(name):
               '      end repeat\n    end repeat\n  end repeat\nend tell\nreturn ""\n')
     return run(["osascript", "-e", script]).strip()
 
-def kill_session(name="", tty=""):
-    """Kill a session's REAL claude process (resolved via its iTerm pane), not c9watch's
-    mis-attributed pid. Refuses if the pane can't be located (safer to no-op than mis-kill)."""
-    ptty = _pane_tty_by_name(name) if (name and len(name) >= 4) else ""
-    ptty = ptty or (tty if tty.startswith("/dev/") else "")
-    if not ptty.startswith("/dev/"):
-        return "no-pane (not killed)"
+def _claude_pids_on_tty(ptty):
     short = ptty.replace("/dev/", "")
-    pids = []
-    for l in run(["ps", "-t", short, "-o", "pid=,comm="]).splitlines():
+    out, pids = run(["ps", "-t", short, "-o", "pid=,comm="]), []
+    for l in out.splitlines():
         parts = l.split(None, 1)
         if len(parts) == 2 and parts[1].strip().endswith("claude"):
             pids.append(parts[0])
-    if not pids:
-        return "no claude on pane (not killed)"
-    for p in pids:
-        try: subprocess.run(["kill", p], timeout=5)
-        except Exception: pass
-    return f"killed claude {','.join(pids)}"
+    return pids
+
+def kill_session(name="", tty="", pid=None):
+    """Kill a session. Order:
+    1) LIVE session — its iTerm pane (title 'NAME (node)') has a claude process → kill that claude.
+       Pane match requires the ' (node)' suffix so 'tala' can't hit 'tala Assessment'.
+    2) STALE/no-pane/orphaned — fall back to the c9watch-reported pid + its descendants
+       (clears lingering MCP leftovers of an exited session). This is what makes stale kills work."""
+    # 1) live pane by exact-ish name
+    if name and len(name) >= 3:
+        ptty = _pane_tty_by_name(f"{name} (node)") or _pane_tty_by_name(f"{name} (")
+        if ptty.startswith("/dev/"):
+            cp = _claude_pids_on_tty(ptty)
+            if cp:
+                for p in cp:
+                    try: subprocess.run(["kill", p], timeout=5)
+                    except Exception: pass
+                return f"killed claude {','.join(cp)} (pane)"
+    # 1b) a tty we already know, with a live claude
+    if tty.startswith("/dev/"):
+        cp = _claude_pids_on_tty(tty)
+        if cp:
+            for p in cp:
+                try: subprocess.run(["kill", p], timeout=5)
+                except Exception: pass
+            return f"killed claude {','.join(cp)} (tty)"
+    # 2) fallback: c9watch pid + its descendants (stale/orphaned/duplicate — per-row unique)
+    if pid:
+        pid = str(pid)
+        if not run(["ps", "-o", "pid=", "-p", pid]).strip():
+            return f"pid {pid} already gone"
+        kids = run(["pgrep", "-P", pid]).split()
+        for p in [pid] + kids:
+            try: subprocess.run(["kill", p], timeout=5)
+            except Exception: pass
+        return f"killed pid {pid} (+{len(kids)} children)"
+    return "could not resolve process (not killed)"
 
 # ---------- interactive TUI ----------
 def run_tui(stdscr):
@@ -372,7 +401,7 @@ def run_tui(stdscr):
                 continue
             if pending_kill is not None:
                 if typ == "k" and val in (ord('y'), ord('Y')):
-                    res = kill_session(pending_kill.get("name"), pending_kill.get("tty"))
+                    res = kill_session(pending_kill.get("name"), pending_kill.get("tty"), pending_kill.get("pid"))
                     flash = (f"killed {str(pending_kill.get('name'))[:26]} → {res}", time.time() + 3)
                 pending_kill = None
                 continue
