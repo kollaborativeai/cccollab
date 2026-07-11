@@ -34,19 +34,31 @@ def run(cmd, inp=None):
     except Exception:
         return ""
 
-_repo_cache = {}
-def repo_of(cwd):
-    if not cwd: return "(no cwd)"
-    if cwd in _repo_cache: return _repo_cache[cwd]
+_git_cache = {}
+def git_info(cwd):
+    """(repo_name, is_linked_worktree). repo_name = basename of the MAIN repo dir;
+    is_linked_worktree = True only for `git worktree` checkouts (git-dir != common-dir),
+    False for a plain clone / main working tree."""
+    if not cwd: return ("(no cwd)", False)
+    if cwd in _git_cache: return _git_cache[cwd]
     common = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
     if common:
         root = os.path.dirname(common) if os.path.basename(common) == ".git" \
                else (run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).strip() or cwd)
-        res = os.path.basename(root)
+        # repo NAME from origin remote (the real repo), not the local clone folder
+        url = run(["git", "-C", cwd, "remote", "get-url", "origin"]).strip().rstrip("/")
+        if url.endswith(".git"): url = url[:-4]
+        repo = re.split(r"[/:]", url)[-1] if url else os.path.basename(root)
+        gd = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir"]).strip()
+        linked = bool(gd and os.path.realpath(gd) != os.path.realpath(common))
     else:
-        res = os.path.basename(cwd)
-    _repo_cache[cwd] = res
+        repo, linked = os.path.basename(cwd), False
+    res = (repo, linked)
+    _git_cache[cwd] = res
     return res
+
+def repo_of(cwd):
+    return git_info(cwd)[0]
 
 def company_of(cwd):
     if not cwd: return "(no cwd)"
@@ -124,11 +136,15 @@ def gather():
         cwd = s.get("projectPath", "")
         full = s.get("customTitle") or s.get("sessionName") or "?"
         cc = match_cccollab(full, members)
+        real = os.path.realpath(cwd) if cwd else ""
+        repo, linked = git_info(cwd)
         rows.append({
             "id":       s.get("id", "") or str(s.get("pid", "")),
             "company":  company_of(cwd),
             "status":   s.get("status", "?"),
-            "worktree": f"{repo_of(cwd)}/{os.path.basename(cwd) if cwd else '?'}",
+            "repo":     repo,
+            "folder":   os.path.basename(os.path.dirname(real)) if real else "?",
+            "worktree": os.path.basename(real) if (real and linked) else "",
             "name":     full,
             "msg":      (s.get("latestMessage") or "").replace("\n", " ").strip(),
             "channels": ",".join(cc["channels"]) if cc else "",
@@ -138,15 +154,17 @@ def gather():
     return rows
 
 def col_widths(maxx):
-    """Distribute width. STATUS fixed; message takes the remainder."""
+    """Distribute width across STATUS·FOLDER·REPO·WORKTREE·SESSION·CHANNELS·TOPICS·MESSAGE."""
     SW = 13
     rem = maxx - 2 - (SW + 2)
-    WW = min(28, max(12, int(rem * 0.15)))
-    NW = min(42, max(18, int(rem * 0.26)))
-    CW = min(30, max(12, int(rem * 0.16)))
-    TW = min(32, max(12, int(rem * 0.18)))
-    MW = max(10, rem - (WW + 2 + NW + 2 + CW + 2 + TW + 2))
-    return SW, WW, NW, CW, TW, MW
+    FO = min(16, max(8, int(rem * 0.09)))
+    RE = min(16, max(8, int(rem * 0.09)))
+    WT = min(20, max(8, int(rem * 0.11)))
+    NW = min(38, max(16, int(rem * 0.22)))
+    CW = min(26, max(10, int(rem * 0.13)))
+    TW = min(28, max(10, int(rem * 0.14)))
+    MW = max(10, rem - (FO + 2 + RE + 2 + WT + 2 + NW + 2 + CW + 2 + TW + 2))
+    return SW, FO, RE, WT, NW, CW, TW, MW
 
 def grouped(rows, collapsed=frozenset()):
     """-> list of ('header', company, n) / ('row', dict). Collapsed companies show header only."""
@@ -167,21 +185,21 @@ def render_once():
         return f"\033[1;31mcctree:\033[0m cannot read c9watch (~/.local/bin/c9watch)"
     try: maxx = os.get_terminal_size().columns
     except Exception: maxx = 200
-    SW, WW, NW, CW, TW, MW = col_widths(maxx)
+    SW, FO, RE, WT, NW, CW, TW, MW = col_widths(maxx)
     needs = sum(1 for r in rows if r["status"] == "NeedsAttention")
     work  = sum(1 for r in rows if r["status"] == "Working")
     L = [f"\n{BOLD}Claude Code — live map{RESET}   {len(rows)} sessions · "
          f"\033[1;31m{needs} need input{RESET} · \033[1;32m{work} working{RESET}   {DIM}{time.strftime('%H:%M:%S')}{RESET}",
-         f"  {DIM}{'STATUS'.ljust(SW)}  {'WORKTREE'.ljust(WW)}  {'SESSION'.ljust(NW)}  "
-         f"{'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING{RESET}"]
+         f"  {DIM}{'STATUS'.ljust(SW)}  {'FOLDER'.ljust(FO)}  {'REPO'.ljust(RE)}  {'WORKTREE'.ljust(WT)}  "
+         f"{'SESSION'.ljust(NW)}  {'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING{RESET}"]
     for kind, *rest in grouped(rows):
         if kind == "header":
             comp, n = rest; L.append(f"{CYAN}{comp}{RESET} {DIM}({n}){RESET}")
         else:
             r = rest[0]; label, color, _ = STATUS.get(r["status"], (r["status"], "", 9))
-            L.append(f"  {color}{label.ljust(SW)}{RESET}  {trunc(r['worktree'],WW).ljust(WW)}  "
-                     f"{BOLD}{trunc(r['name'],NW).ljust(NW)}{RESET}  {CYAN}{trunc(r['channels'],CW).ljust(CW)}{RESET}  "
-                     f"{DIM}{trunc(r['topics'],TW).ljust(TW)}{RESET}  {DIM}{trunc(r['msg'],MW)}{RESET}")
+            L.append(f"  {color}{label.ljust(SW)}{RESET}  {trunc(r['folder'],FO).ljust(FO)}  {trunc(r['repo'],RE).ljust(RE)}  "
+                     f"{trunc(r['worktree'],WT).ljust(WT)}  {BOLD}{trunc(r['name'],NW).ljust(NW)}{RESET}  "
+                     f"{CYAN}{trunc(r['channels'],CW).ljust(CW)}{RESET}  {DIM}{trunc(r['topics'],TW).ljust(TW)}{RESET}  {DIM}{trunc(r['msg'],MW)}{RESET}")
     return "\n".join(L)
 
 # ---------- jump ----------
@@ -303,7 +321,7 @@ def run_tui(stdscr):
             if disp: sel_key = keyof(disp[sel])
 
             maxy, maxx = stdscr.getmaxyx()
-            SW, WW, NW, CW, TW, MW = col_widths(maxx)
+            SW, FO, RE, WT, NW, CW, TW, MW = col_widths(maxx)
             H = maxy - 2
             if sel < top: top = sel
             elif sel >= top + H: top = sel - H + 1
@@ -321,8 +339,8 @@ def run_tui(stdscr):
                 x = put(0, x, f"{needs} need input", RED, maxx)
                 put(0, x + 2, f"{work} working", GRN, maxx)
                 put(0, max(0, maxx - 62), "↑↓ move · Shift+↑↓ project · ←/→ fold · ⏎ jump · x kill · q", curses.A_DIM, maxx)
-            put(1, 2, f"{'STATUS'.ljust(SW)}  {'WORKTREE'.ljust(WW)}  {'SESSION'.ljust(NW)}  "
-                      f"{'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING", curses.A_DIM, maxx)
+            put(1, 2, f"{'STATUS'.ljust(SW)}  {'FOLDER'.ljust(FO)}  {'REPO'.ljust(RE)}  {'WORKTREE'.ljust(WT)}  "
+                      f"{'SESSION'.ljust(NW)}  {'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING", curses.A_DIM, maxx)
             y = 2
             for di in range(top, len(disp)):
                 if y >= maxy: break
@@ -336,7 +354,9 @@ def run_tui(stdscr):
                     label, at = st_attr.get(r["status"], (r["status"], 0))
                     xx = 2
                     xx = put(y, xx, label.ljust(SW), at | rev, maxx); xx += 2
-                    xx = put(y, xx, trunc(r["worktree"], WW).ljust(WW), rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["folder"], FO).ljust(FO), rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["repo"], RE).ljust(RE), rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["worktree"], WT).ljust(WT), rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["name"], NW).ljust(NW), curses.A_BOLD | rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["channels"], CW).ljust(CW), CYN | rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["topics"], TW).ljust(TW), curses.A_DIM | rev, maxx); xx += 2
