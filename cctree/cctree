@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""
+cctree — one interactive live map of every Claude Code session.
+
+  cctree            live TUI: auto-refreshes, ↑↓/j k to move, Enter = jump to that
+                    session's pane (tmux or iTerm2), q = quit
+  cctree once       one-shot plain table (for piping / non-tty)
+  cctree jump <tty> jump to the pane on <tty>
+
+Columns: STATUS · WORKTREE · SESSION · CHANNELS · TOPICS · WHAT'S HAPPENING (one row each).
+Data: c9watch (discovery+status) x git (worktree) x ~/projects (company)
+      x cccollab broker/log (channels+topics, name-joined, best-effort).
+"""
+import subprocess, json, os, sys, time, collections, re
+
+C9    = os.path.expanduser("~/.local/bin/c9watch")
+PROJ  = os.path.expanduser("~/projects")
+CCLOG = os.path.expanduser("~/.cccollab/logs/default.log")
+BROKER = "http://localhost:50643"
+
+FRIENDLY = {"pitcrew": "Pit Crew", "kollaborativeai": "Kollaborative AI",
+            "tala": "tala", "tow123": "Tow123", "finance": "Finance",
+            "automation": "Automation", "cccollab": "cccollab",
+            "flatoutsolutions": "FlatOut Solutions", "travel": "Travel"}
+# status -> (label, ansi-color, sort-priority)
+STATUS = {"NeedsAttention":  ("● NEEDS INPUT", "\033[1;31m", 0),
+          "Working":         ("▶ working",     "\033[1;32m", 1),
+          "WaitingForInput": ("◦ waiting",     "\033[33m",   2)}
+RESET, DIM, CYAN, BOLD = "\033[0m", "\033[2m", "\033[1;36m", "\033[1m"
+
+def run(cmd, inp=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15, input=inp).stdout
+    except Exception:
+        return ""
+
+_repo_cache = {}
+def repo_of(cwd):
+    if not cwd: return "(no cwd)"
+    if cwd in _repo_cache: return _repo_cache[cwd]
+    common = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
+    if common:
+        root = os.path.dirname(common) if os.path.basename(common) == ".git" \
+               else (run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).strip() or cwd)
+        res = os.path.basename(root)
+    else:
+        res = os.path.basename(cwd)
+    _repo_cache[cwd] = res
+    return res
+
+def company_of(cwd):
+    if not cwd: return "(no cwd)"
+    rel = os.path.relpath(os.path.realpath(cwd), PROJ)
+    parts = rel.split(os.sep)
+    if parts[0] == ".." or rel == ".": return "other"
+    seg = parts[1] if parts[0] == "fv" and len(parts) > 1 else parts[0]
+    return FRIENDLY.get(seg, seg.replace("_", " ").title())
+
+def trunc(s, n): return s if len(s) <= n else (s[:n-1] + "…" if n > 0 else "")
+
+# Ephemeral Task-tool subagents (review/verify agents spawned inside a real session).
+# c9watch lists them as top-level sessions and inflates counts; hide by default.
+SUBAGENT_PREFIXES = ("Review this change for security vulnerabilities",)
+SHOW_SUBAGENTS = bool(os.environ.get("CCTREE_SHOW_SUBAGENTS"))
+def is_subagent(s):
+    return (s.get("firstPrompt") or "").startswith(SUBAGENT_PREFIXES)
+
+def cccollab_membership():
+    name2ch, live = {}, set()
+    try:
+        data = json.loads(run(["curl", "-s", "-m", "2", f"{BROKER}/sessions"]))
+        for s in data.get("sessions", []):
+            chs = [c if isinstance(c, str) else c.get("name") for c in s.get("channels", [])]
+            name2ch[s["name"]] = [c for c in chs if c]; live.add(s["name"])
+    except Exception:
+        pass
+    topicname, topics_by = {}, {}
+    try:
+        with open(CCLOG, errors="ignore") as f:
+            for line in f:
+                m = re.search(r'TOPIC CREATED \S+: (\S+) "([^"]+)"', line)
+                if m: topicname[m.group(1)] = m.group(2); continue
+                m = re.search(r'SESSION REGISTERED: (.+?)(?: \(|$)', line)
+                if m: topics_by[m.group(1).strip()] = set(); continue
+                m = re.search(r'JOIN: (.+?) joined topic (\S+)', line)
+                if m: topics_by.setdefault(m.group(1).strip(), set()).add(m.group(2)); continue
+                m = re.search(r'LEAVE: (.+?) left topic (\S+)', line)
+                if m: topics_by.get(m.group(1).strip(), set()).discard(m.group(2)); continue
+    except Exception:
+        pass
+    return {name: {"channels": sorted(name2ch.get(name, [])),
+                   "topics": sorted(topicname.get(t, t[:8]) for t in topics_by.get(name, ()))}
+            for name in live}
+
+def match_cccollab(row_name, members):
+    if not row_name or not members: return None
+    rn = row_name.lower().strip()
+    for name in members:
+        if name.lower() == rn: return members[name]
+    if len(rn) < 5: return None
+    for name in members:
+        nl = name.lower()
+        if len(nl) >= 5 and (nl in rn or rn in nl): return members[name]
+    return None
+
+def gather():
+    """List of session dicts (untruncated fields); ordered grouped by company."""
+    try:
+        sessions = json.loads(run([C9, "list"]))["sessions"]
+    except Exception:
+        return None
+    pid2tty = {}
+    pids = [str(s["pid"]) for s in sessions if s.get("pid")]
+    if pids:
+        for line in run(["ps", "-o", "pid=,tty="] + sum([["-p", p] for p in pids], [])).splitlines():
+            p = line.split()
+            if len(p) == 2:
+                pid2tty[p[0]] = p[1] if p[1].startswith("/dev/") else "/dev/" + p[1]
+    members = cccollab_membership()
+    rows = []
+    for s in sessions:
+        if not SHOW_SUBAGENTS and is_subagent(s):
+            continue
+        cwd = s.get("projectPath", "")
+        full = s.get("customTitle") or s.get("sessionName") or "?"
+        cc = match_cccollab(full, members)
+        rows.append({
+            "id":       s.get("id", "") or str(s.get("pid", "")),
+            "company":  company_of(cwd),
+            "status":   s.get("status", "?"),
+            "worktree": f"{repo_of(cwd)}/{os.path.basename(cwd) if cwd else '?'}",
+            "name":     full,
+            "msg":      (s.get("latestMessage") or "").replace("\n", " ").strip(),
+            "channels": ",".join(cc["channels"]) if cc else "",
+            "topics":   ",".join(cc["topics"]) if cc else "",
+            "tty":      pid2tty.get(str(s.get("pid")), ""),
+        })
+    return rows
+
+def col_widths(maxx):
+    """Distribute width. STATUS fixed; message takes the remainder."""
+    SW = 13
+    rem = maxx - 2 - (SW + 2)
+    WW = min(28, max(12, int(rem * 0.15)))
+    NW = min(42, max(18, int(rem * 0.26)))
+    CW = min(30, max(12, int(rem * 0.16)))
+    TW = min(32, max(12, int(rem * 0.18)))
+    MW = max(10, rem - (WW + 2 + NW + 2 + CW + 2 + TW + 2))
+    return SW, WW, NW, CW, TW, MW
+
+def grouped(rows, collapsed=frozenset()):
+    """-> list of ('header', company, n) / ('row', dict). Collapsed companies show header only."""
+    g = collections.defaultdict(list)
+    for r in rows: g[r["company"]].append(r)
+    out = []
+    for comp, items in sorted(g.items(), key=lambda x: -len(x[1])):
+        out.append(("header", comp, len(items)))
+        if comp not in collapsed:
+            for r in sorted(items, key=lambda r: (STATUS.get(r["status"], ("", "", 9))[2], r["worktree"])):
+                out.append(("row", r))
+    return out
+
+# ---------- one-shot (plain ANSI) ----------
+def render_once():
+    rows = gather()
+    if rows is None:
+        return f"\033[1;31mcctree:\033[0m cannot read c9watch (~/.local/bin/c9watch)"
+    try: maxx = os.get_terminal_size().columns
+    except Exception: maxx = 200
+    SW, WW, NW, CW, TW, MW = col_widths(maxx)
+    needs = sum(1 for r in rows if r["status"] == "NeedsAttention")
+    work  = sum(1 for r in rows if r["status"] == "Working")
+    L = [f"\n{BOLD}Claude Code — live map{RESET}   {len(rows)} sessions · "
+         f"\033[1;31m{needs} need input{RESET} · \033[1;32m{work} working{RESET}   {DIM}{time.strftime('%H:%M:%S')}{RESET}",
+         f"  {DIM}{'STATUS'.ljust(SW)}  {'WORKTREE'.ljust(WW)}  {'SESSION'.ljust(NW)}  "
+         f"{'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING{RESET}"]
+    for kind, *rest in grouped(rows):
+        if kind == "header":
+            comp, n = rest; L.append(f"{CYAN}{comp}{RESET} {DIM}({n}){RESET}")
+        else:
+            r = rest[0]; label, color, _ = STATUS.get(r["status"], (r["status"], "", 9))
+            L.append(f"  {color}{label.ljust(SW)}{RESET}  {trunc(r['worktree'],WW).ljust(WW)}  "
+                     f"{BOLD}{trunc(r['name'],NW).ljust(NW)}{RESET}  {CYAN}{trunc(r['channels'],CW).ljust(CW)}{RESET}  "
+                     f"{DIM}{trunc(r['topics'],TW).ljust(TW)}{RESET}  {DIM}{trunc(r['msg'],MW)}{RESET}")
+    return "\n".join(L)
+
+# ---------- jump ----------
+def _iterm_focus_by(cond):
+    script = ('tell application "iTerm2"\n  repeat with w in windows\n    repeat with t in tabs of w\n'
+              '      repeat with s in sessions of t\n'
+              f'        if {cond} then\n          select s\n          select t\n'
+              '          select w\n          activate\n          return "ok"\n        end if\n'
+              '      end repeat\n    end repeat\n  end repeat\nend tell\nreturn "notfound"\n')
+    return "ok" in run(["osascript", "-e", script])
+
+def jump(name="", tty=""):
+    """Focus a session's pane. PRIMARY: match iTerm pane TITLE to the session name (ground truth,
+    robust to c9watch's pid mis-attribution for same-cwd sessions). FALLBACK: tty (tmux or iTerm)."""
+    if name and name not in ("?", "") and len(name) >= 4:
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        if _iterm_focus_by(f'(name of s) contains "{esc}"'):
+            return f"iterm:{name}"
+    if tty:
+        tty = tty if tty.startswith("/dev/") else "/dev/" + tty
+        tm = run(["tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}:#{window_index}.#{pane_index}"])
+        tmap = dict(l.split("\t", 1) for l in tm.splitlines() if "\t" in l)
+        if tty in tmap:
+            target = tmap[tty]; win = target.rsplit(".", 1)[0]; sess = target.split(":", 1)[0]
+            run(["tmux", "select-pane", "-t", target]); run(["tmux", "select-window", "-t", win])
+            run(["tmux", "switch-client", "-t", sess])
+            run(["osascript", "-e", 'tell application "iTerm2" to activate'])
+            return f"tmux:{target}"
+        if _iterm_focus_by(f'(tty of s) is "{tty}"'):
+            return f"iterm-tty:{tty}"
+    return "notfound"
+
+def _pane_tty_by_name(name):
+    esc = name.replace("\\", "\\\\").replace('"', '\\"')
+    script = ('tell application "iTerm2"\n  repeat with w in windows\n    repeat with t in tabs of w\n'
+              '      repeat with s in sessions of t\n'
+              f'        if (name of s) contains "{esc}" then return (tty of s)\n'
+              '      end repeat\n    end repeat\n  end repeat\nend tell\nreturn ""\n')
+    return run(["osascript", "-e", script]).strip()
+
+def kill_session(name="", tty=""):
+    """Kill a session's REAL claude process (resolved via its iTerm pane), not c9watch's
+    mis-attributed pid. Refuses if the pane can't be located (safer to no-op than mis-kill)."""
+    ptty = _pane_tty_by_name(name) if (name and len(name) >= 4) else ""
+    ptty = ptty or (tty if tty.startswith("/dev/") else "")
+    if not ptty.startswith("/dev/"):
+        return "no-pane (not killed)"
+    short = ptty.replace("/dev/", "")
+    pids = []
+    for l in run(["ps", "-t", short, "-o", "pid=,comm="]).splitlines():
+        parts = l.split(None, 1)
+        if len(parts) == 2 and parts[1].strip().endswith("claude"):
+            pids.append(parts[0])
+    if not pids:
+        return "no claude on pane (not killed)"
+    for p in pids:
+        try: subprocess.run(["kill", p], timeout=5)
+        except Exception: pass
+    return f"killed claude {','.join(pids)}"
+
+# ---------- interactive TUI ----------
+def run_tui(stdscr):
+    import curses, threading
+    curses.curs_set(0)
+    curses.use_default_colors()
+    for i, fg in enumerate([curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_CYAN], 1):
+        curses.init_pair(i, fg, -1)
+    RED = curses.color_pair(1) | curses.A_BOLD
+    GRN = curses.color_pair(2) | curses.A_BOLD
+    YEL = curses.color_pair(3)
+    CYN = curses.color_pair(4)
+    st_attr = {"NeedsAttention": ("● NEEDS INPUT", RED), "Working": ("▶ working", GRN),
+               "WaitingForInput": ("◦ waiting", YEL)}
+
+    shared = {"rows": gather() or []}
+    lock, stop = threading.Lock(), threading.Event()
+    def refresher():
+        while not stop.is_set():
+            g = gather() or []
+            with lock: shared["rows"] = g
+            stop.wait(2)
+    threading.Thread(target=refresher, daemon=True).start()
+
+    stdscr.timeout(100)
+    collapsed = set()
+    sel, sel_key, top = 0, None, 0
+    pending_kill, flash = None, ("", 0.0)
+
+    def keyof(d):  return ("h", d[1]) if d[0] == "header" else ("s", d[1].get("id"))
+    def comp_of(d): return d[1] if d[0] == "header" else d[1]["company"]
+
+    def put(y, x, text, attr, maxx):
+        if not (0 <= y < curses.LINES) or x >= maxx: return x
+        text = text[:max(0, maxx - x)]
+        try: stdscr.addstr(y, x, text, attr)
+        except curses.error: pass
+        return x + len(text)
+
+    def read_key():
+        c = stdscr.getch()
+        if c != 27:
+            return ("k", c)
+        stdscr.nodelay(True); seq = ""
+        for _ in range(6):
+            ch = stdscr.getch()
+            if ch == -1: break
+            seq += chr(ch)
+        stdscr.nodelay(False); stdscr.timeout(100)
+        return ("esc", seq)
+
+    try:
+        while True:
+            with lock: rows = shared["rows"]
+            disp = grouped(rows, collapsed)
+            if sel_key is not None:
+                found = next((i for i, d in enumerate(disp) if keyof(d) == sel_key), None)
+                if found is not None: sel = found
+            sel = max(0, min(sel, len(disp) - 1)) if disp else 0
+            if disp: sel_key = keyof(disp[sel])
+
+            maxy, maxx = stdscr.getmaxyx()
+            SW, WW, NW, CW, TW, MW = col_widths(maxx)
+            H = maxy - 2
+            if sel < top: top = sel
+            elif sel >= top + H: top = sel - H + 1
+            top = max(0, min(top, max(0, len(disp) - H)))
+
+            stdscr.erase()
+            needs = sum(1 for r in rows if r["status"] == "NeedsAttention")
+            work  = sum(1 for r in rows if r["status"] == "Working")
+            if pending_kill is not None:
+                put(0, 0, f"⚠ Kill '{str(pending_kill.get('name'))[:44]}' ?   y = confirm · any other key = cancel", RED, maxx)
+            elif flash[1] > time.time():
+                put(0, 0, flash[0], GRN, maxx)
+            else:
+                x = put(0, 0, f"Claude Code — {len(rows)} sessions   ", curses.A_BOLD, maxx)
+                x = put(0, x, f"{needs} need input", RED, maxx)
+                put(0, x + 2, f"{work} working", GRN, maxx)
+                put(0, max(0, maxx - 62), "↑↓ move · Shift+↑↓ project · ←/→ fold · ⏎ jump · x kill · q", curses.A_DIM, maxx)
+            put(1, 2, f"{'STATUS'.ljust(SW)}  {'WORKTREE'.ljust(WW)}  {'SESSION'.ljust(NW)}  "
+                      f"{'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING", curses.A_DIM, maxx)
+            y = 2
+            for di in range(top, len(disp)):
+                if y >= maxy: break
+                d = disp[di]; rev = curses.A_REVERSE if di == sel else 0
+                if d[0] == "header":
+                    marker = "▸ " if d[1] in collapsed else "▾ "
+                    xx = put(y, 0, marker + d[1], CYN | curses.A_BOLD | rev, maxx)
+                    put(y, xx + 1, f"({d[2]})", curses.A_DIM | rev, maxx)
+                else:
+                    r = d[1]
+                    label, at = st_attr.get(r["status"], (r["status"], 0))
+                    xx = 2
+                    xx = put(y, xx, label.ljust(SW), at | rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["worktree"], WW).ljust(WW), rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["name"], NW).ljust(NW), curses.A_BOLD | rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["channels"], CW).ljust(CW), CYN | rev, maxx); xx += 2
+                    xx = put(y, xx, trunc(r["topics"], TW).ljust(TW), curses.A_DIM | rev, maxx); xx += 2
+                    put(y, xx, trunc(r["msg"], MW), curses.A_DIM | rev, maxx)
+                y += 1
+            stdscr.refresh()
+
+            if not disp:
+                if read_key() == ("k", ord('q')): break
+                continue
+            typ, val = read_key()
+            if typ == "k" and val == -1:
+                continue
+            if pending_kill is not None:
+                if typ == "k" and val in (ord('y'), ord('Y')):
+                    res = kill_session(pending_kill.get("name"), pending_kill.get("tty"))
+                    flash = (f"killed {str(pending_kill.get('name'))[:26]} → {res}", time.time() + 3)
+                pending_kill = None
+                continue
+            headers = [i for i, d in enumerate(disp) if d[0] == "header"]
+            stay_comp = None   # when set, pin the cursor to this project's header after rebuild
+            if typ == "k":
+                c = val
+                if c in (curses.KEY_DOWN, ord('j')): sel += 1
+                elif c in (curses.KEY_UP, ord('k')): sel -= 1
+                elif c == curses.KEY_NPAGE: sel += 10
+                elif c == curses.KEY_PPAGE: sel -= 10
+                elif c == curses.KEY_LEFT:
+                    stay_comp = comp_of(disp[sel]); collapsed.add(stay_comp)
+                elif c == curses.KEY_RIGHT:
+                    stay_comp = comp_of(disp[sel]); collapsed.discard(stay_comp)
+                elif c in (curses.KEY_ENTER, 10, 13):
+                    d = disp[sel]
+                    if d[0] == "row":
+                        curses.flushinp(); jump(d[1].get("name"), d[1].get("tty"))
+                    else:
+                        stay_comp = d[1]
+                        (collapsed.discard if d[1] in collapsed else collapsed.add)(d[1])
+                elif c in (ord('x'), ord('X')):
+                    if disp[sel][0] == "row": pending_kill = disp[sel][1]
+                elif c == ord('q'): break
+            else:  # escape sequence (Ctrl/Shift/⌘ arrows: ESC [1;5x or [1;2x)
+                seq = val
+                if seq in ("[1;5A", "[1;2A"):      # previous project
+                    prev = [h for h in headers if h < sel]
+                    if prev: sel = prev[-1]
+                elif seq in ("[1;5B", "[1;2B"):    # next project
+                    nxt = [h for h in headers if h > sel]
+                    if nxt: sel = nxt[0]
+                elif seq in ("[1;5D", "[1;2D"):    # collapse
+                    stay_comp = comp_of(disp[sel]); collapsed.add(stay_comp)
+                elif seq in ("[1;5C", "[1;2C"):    # expand
+                    stay_comp = comp_of(disp[sel]); collapsed.discard(stay_comp)
+            if disp:
+                sel = max(0, min(sel, len(disp) - 1))
+                sel_key = ("h", stay_comp) if stay_comp is not None else keyof(disp[sel])
+    finally:
+        stop.set()
+
+def keys_debug(stdscr):
+    import curses
+    stdscr.timeout(-1)
+    stdscr.addstr(0, 0, "cctree key debug — press keys (try ⌘↑, Ctrl+↑, Shift+↑). q to quit.")
+    stdscr.refresh()
+    y = 2
+    while True:
+        c = stdscr.getch()
+        if c == 27:
+            stdscr.nodelay(True); seq = ""
+            for _ in range(8):
+                ch = stdscr.getch()
+                if ch == -1: break
+                seq += chr(ch)
+            stdscr.nodelay(False)
+            line = f"ESC + {seq!r}   (an escape sequence — bindable)"
+        elif c == ord('q'):
+            break
+        else:
+            try: nm = curses.keyname(c).decode()
+            except Exception: nm = "?"
+            line = f"code {c}  keyname {nm}"
+        row = 2 + (y - 2) % (curses.LINES - 3)
+        try: stdscr.addstr(row, 0, line.ljust(curses.COLS - 1)); stdscr.refresh()
+        except curses.error: pass
+        y += 1
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] == "keys":
+        import curses; curses.wrapper(keys_debug); return
+    if a and a[0] == "jump" and len(a) > 1:
+        arg = a[1]
+        print(jump(tty=arg) if arg.startswith(("/dev/", "ttys")) else jump(name=arg)); return
+    if a and a[0] == "once":
+        print(render_once()); return
+    if not sys.stdout.isatty():
+        print(render_once()); return
+    try:
+        import curses
+        curses.wrapper(run_tui)
+    except Exception as e:
+        sys.stderr.write(f"cctree TUI error: {e}\n")
+        print(render_once())
+
+if __name__ == "__main__":
+    main()
