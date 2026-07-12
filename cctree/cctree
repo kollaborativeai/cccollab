@@ -291,6 +291,24 @@ SHOW_SUBAGENTS = bool(os.environ.get("CCTREE_SHOW_SUBAGENTS"))
 def is_subagent(s):
     return (s.get("firstPrompt") or "").startswith(SUBAGENT_PREFIXES)
 
+# Dead sessions with an orphaned MCP leftover.
+# c9watch discovers a session from a live process sharing its cwd. When a Claude session exits,
+# most of its MCP subprocesses die with it — but some (notably `convex mcp` and `mongodb-mcp-server`)
+# linger, get reparented to launchd (ppid 1), and keep the dead session's cwd. c9watch then still
+# reports the session, backed only by that orphan, so it never leaves the map. A LIVE session always
+# has its own entry whose pid chains to a live `claude` (ppid != 1) — even when it reuses a worktree a
+# dead session also used — so hiding orphan-backed rows drops only the ghosts, never a live session.
+# (A `claude` reparented to launchd is a live session launched by launchd, not a leftover — hence the
+# comm guard.) A fully-gone pid is NOT hidden here: c9watch self-heals it on its next scan, whereas a
+# lingering MCP orphan persists indefinitely — that persistence is the bug this targets.
+SHOW_DEAD = bool(os.environ.get("CCTREE_SHOW_DEAD"))
+def is_dead_orphan(meta):
+    """meta = (ppid, comm) for the session's c9watch pid, or None if the pid is gone. Dead iff the
+    process is orphaned to launchd (ppid 1) AND is not itself a claude process."""
+    if not meta: return False
+    ppid, comm = meta
+    return ppid == "1" and not comm.rstrip().endswith("claude")
+
 def cccollab_membership():
     name2ch, live = {}, set()
     try:
@@ -335,17 +353,22 @@ def gather():
         sessions = json.loads(run([C9, "list"]))["sessions"]
     except Exception:
         return None
-    pid2tty = {}
+    pid2tty, pid_meta = {}, {}
     pids = [str(s["pid"]) for s in sessions if s.get("pid")]
     if pids:
-        for line in run(["ps", "-o", "pid=,tty="] + sum([["-p", p] for p in pids], [])).splitlines():
-            p = line.split()
-            if len(p) == 2:
-                pid2tty[p[0]] = p[1] if p[1].startswith("/dev/") else "/dev/" + p[1]
+        # comm can contain spaces (node procs set argv0 to a title), so it must come last; split(3).
+        for line in run(["ps", "-o", "pid=,ppid=,tty=,comm="] + sum([["-p", p] for p in pids], [])).splitlines():
+            p = line.split(None, 3)
+            if len(p) >= 4:
+                pid, ppid, tty, comm = p[0], p[1], p[2], p[3]
+                pid2tty[pid] = tty if tty.startswith("/dev/") else "/dev/" + tty
+                pid_meta[pid] = (ppid, comm)
     members = cccollab_membership()
     rows = []
     for s in sessions:
         if not SHOW_SUBAGENTS and is_subagent(s):
+            continue
+        if not SHOW_DEAD and is_dead_orphan(pid_meta.get(str(s.get("pid")))):
             continue
         cwd = s.get("projectPath", "")
         full = s.get("customTitle") or s.get("sessionName") or "?"
