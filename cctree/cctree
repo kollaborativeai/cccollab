@@ -103,12 +103,17 @@ _facts_cache = {}   # sid -> (transcript_mtime, armed_monitor, owes_output, bg_k
 def _transcript_facts(sid, path, mt):
     """(armed_monitor, owes_output, bg_kind) from the transcript tail; mtime-cached (content-derived).
     bg_kind ∈ '' | 'monitor' | 'subagent' — the strongest LIVE background task (launched, no end-event,
-    launch recent): a backgrounded watch/poll loop counts as 'monitor', real sub-work as 'subagent'."""
+    launch recent): a backgrounded watch/poll loop counts as 'monitor', real sub-work OR a running
+    Workflow / background Agent as 'subagent'. Those run in-process and write nothing to this transcript
+    while they run, so liveness comes from the pendingWorkflowCount / pendingBackgroundAgentCount that
+    each turn's system stat carries (the parent still looks idle otherwise: last entry is assistant
+    text, so owes=False)."""
     c = _facts_cache.get(sid)
     if c and c[0] == mt:
         return c[1], c[2], c[3]
     armed = owes = False
     bg_kind = ""
+    pending_bg = 0      # Workflow-tool + background-Agent tasks in-process (latest turn's summed counts)
     try:
         with open(path, "rb") as f:
             f.seek(0, 2); size = f.tell(); f.seek(max(0, size - TAIL_BYTES))
@@ -120,6 +125,13 @@ def _transcript_facts(sid, path, mt):
             m = re.search(r"Monitor started \(task (\w+)", line)
             if m: mon_started.add(m.group(1))
             ended.update(_ended_task_ids(line))
+            if '"turn_duration"' in line:            # per-turn system stat → current background-work counts
+                try:
+                    e = json.loads(line)
+                    wf = e.get("pendingWorkflowCount"); ba = e.get("pendingBackgroundAgentCount")
+                    pending_bg = (wf if isinstance(wf, int) else 0) + (ba if isinstance(ba, int) else 0)
+                except Exception:                    # absent → 0, so a completed turn clears it
+                    pass
             if '"tool_use"' in line and '"Bash"' in line:      # remember each Bash command by id
                 try:
                     e = json.loads(line)
@@ -152,8 +164,10 @@ def _transcript_facts(sid, path, mt):
             if ts and (now - ts) > LIVE_BG_MAX: continue       # ts==0 (unparseable) → don't cut off
             if _is_watcher_cmd(cmd or ""): live_watcher = True
             else: live_work = True
-        if live_work: bg_kind = "subagent"                     # active sub-work wins over a mere watch
-        elif live_watcher: bg_kind = "monitor"
+        if live_work or (pending_bg > 0 and (now - mt) < LIVE_BG_MAX):
+            bg_kind = "subagent"               # a running Workflow / background Agent beats a mere watch
+        elif live_watcher:
+            bg_kind = "monitor"
         # fallback: a live .output whose launch scrolled out of the tail (can't classify → subagent).
         # Excludes ended task-ids, so a just-finished task's still-fresh .output no longer reads live.
         if not bg_kind:
