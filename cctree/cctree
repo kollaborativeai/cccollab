@@ -114,6 +114,7 @@ def _transcript_facts(sid, path, mt):
     armed = owes = False
     bg_kind = ""
     pending_bg = 0      # Workflow-tool + background-Agent tasks in-process (latest turn's summed counts)
+    last_td_ts = last_spawn_ts = 0.0   # newest turn_duration ts, and newest background-teammate spawn ts
     try:
         with open(path, "rb") as f:
             f.seek(0, 2); size = f.tell(); f.seek(max(0, size - TAIL_BYTES))
@@ -130,7 +131,13 @@ def _transcript_facts(sid, path, mt):
                     e = json.loads(line)
                     wf = e.get("pendingWorkflowCount"); ba = e.get("pendingBackgroundAgentCount")
                     pending_bg = (wf if isinstance(wf, int) else 0) + (ba if isinstance(ba, int) else 0)
+                    last_td_ts = parse_ts(e.get("timestamp", "")) or last_td_ts
                 except Exception:                    # absent → 0, so a completed turn clears it
+                    pass
+            if "teammate_spawned" in line:           # background Agent teammate started (runs in-process)
+                try:
+                    last_spawn_ts = parse_ts(json.loads(line).get("timestamp", "")) or last_spawn_ts
+                except Exception:
                     pass
             if '"tool_use"' in line and '"Bash"' in line:      # remember each Bash command by id
                 try:
@@ -164,7 +171,12 @@ def _transcript_facts(sid, path, mt):
             if ts and (now - ts) > LIVE_BG_MAX: continue       # ts==0 (unparseable) → don't cut off
             if _is_watcher_cmd(cmd or ""): live_watcher = True
             else: live_work = True
-        if live_work or (pending_bg > 0 and (now - mt) < LIVE_BG_MAX):
+        # A background teammate spawned SINCE the last counted turn isn't in pending_bg yet: the parent
+        # suspends waiting on it and emits no fresh turn_duration, so the counter reads 0 (PC-41 waited
+        # on a builder but showed idle). Trust the spawn until a later turn_duration post-dates it (which
+        # a completed teammate produces → clears), self-healing after LIVE_BG_MAX if the parent dies.
+        spawn_pending = last_spawn_ts > last_td_ts and (now - last_spawn_ts) < LIVE_BG_MAX
+        if live_work or spawn_pending or (pending_bg > 0 and (now - mt) < LIVE_BG_MAX):
             bg_kind = "subagent"               # a running Workflow / background Agent beats a mere watch
         elif live_watcher:
             bg_kind = "monitor"
