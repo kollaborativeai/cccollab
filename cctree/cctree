@@ -335,6 +335,37 @@ def is_dead_orphan(meta):
     ppid, comm = meta
     return ppid == "1" and not comm.rstrip().endswith("claude")
 
+# c9watch is not authoritative about background agents, in two ways:
+#   1) it keeps emitting rows for background agents that already finished or failed, so their stale
+#      names linger in the tree forever (observed: a `failed` agent still listed as "Connecting");
+#   2) it mis-attributes pids to those rows — it welded an unrelated live claude's pid onto a dead
+#      agent's row, and mapped a live row to an MCP child of a *different* session. `pid` drives the
+#      tty lookup, `jump` and `kill_session`, so a bad pid means killing the wrong session: a safety bug.
+# `claude agents --json --all` is the native, authoritative view (a flat list; background entries carry
+# `state`, interactive ones carry `status` + a pid). Correlate on the 8-char sessionId prefix — c9watch's
+# `id` is the full sessionId, so both sides are sliced. Any failure degrades to {} = today's behaviour.
+AGENT_DEAD_STATES = ("done", "failed")
+def claude_agents():
+    """8-char sessionId prefix -> `claude agents --json --all` entry. {} on any failure (no binary,
+    bad JSON, ...), which leaves cctree behaving exactly as it does without this source."""
+    try:
+        return {e["sessionId"][:8]: e
+                for e in json.loads(run(["claude", "agents", "--json", "--all"])) if e.get("sessionId")}
+    except Exception:
+        return {}
+
+def agent_of(s, agents):
+    return agents.get((s.get("id") or "")[:8]) or {}
+
+def is_dead_agent(s, agents):
+    """Dead iff `claude agents` reports an explicitly terminal state for this row. Absence from the map
+    is NOT death — c9watch legitimately sees desktop-app sessions the CLI does not list."""
+    return agent_of(s, agents).get("state") in AGENT_DEAD_STATES
+
+def session_pid(s, agents):
+    """The row's authoritative pid: `claude agents` when it has one, else c9watch's (mis-attributed)."""
+    return agent_of(s, agents).get("pid") or s.get("pid")
+
 def cccollab_membership():
     name2ch, live = {}, set()
     try:
@@ -379,8 +410,10 @@ def gather():
         sessions = json.loads(run([C9, "list"]))["sessions"]
     except Exception:
         return None
+    agents = claude_agents()
     pid2tty, pid_meta = {}, {}
-    pids = [str(s["pid"]) for s in sessions if s.get("pid")]
+    # resolve authoritative pids first, so the ps batch below covers the pids the rows actually use
+    pids = list(dict.fromkeys(str(p) for p in (session_pid(s, agents) for s in sessions) if p))
     if pids:
         # comm can contain spaces (node procs set argv0 to a title), so it must come last; split(3).
         for line in run(["ps", "-o", "pid=,ppid=,tty=,comm="] + sum([["-p", p] for p in pids], [])).splitlines():
@@ -394,7 +427,10 @@ def gather():
     for s in sessions:
         if not SHOW_SUBAGENTS and is_subagent(s):
             continue
-        if not SHOW_DEAD and is_dead_orphan(pid_meta.get(str(s.get("pid")))):
+        pid = session_pid(s, agents)
+        if not SHOW_DEAD and is_dead_orphan(pid_meta.get(str(pid))):
+            continue
+        if not SHOW_DEAD and is_dead_agent(s, agents):
             continue
         cwd = s.get("projectPath", "")
         full = s.get("customTitle") or s.get("sessionName") or "?"
@@ -417,7 +453,7 @@ def gather():
         if st == "idle":                                  # refine via transcript: monitor / generating / idle
             st = refine_idle(s.get("id", ""))
         rows.append({
-            "id":       s.get("id", "") or str(s.get("pid", "")),
+            "id":       s.get("id", "") or str(pid or ""),
             "company":  company_of(cwd),
             "status":   st,
             "repo":     repo,
@@ -426,8 +462,8 @@ def gather():
             "msg":      (s.get("latestMessage") or "").replace("\n", " ").strip(),
             "channels": ",".join(cc["channels"]) if cc else "",
             "topics":   ",".join(cc["topics"]) if cc else "",
-            "pid":      s.get("pid"),
-            "tty":      pid2tty.get(str(s.get("pid")), ""),
+            "pid":      pid,
+            "tty":      pid2tty.get(str(pid), ""),
             "mtime":    parse_ts(s.get("modified", "")),
             "start":    session_start(s.get("id", "")),
         })
@@ -583,8 +619,10 @@ def kill_session(name="", tty="", pid=None):
     """Kill a session. Order:
     1) LIVE session — its iTerm pane (title 'NAME (node)') has a claude process → kill that claude.
        Pane match requires the ' (node)' suffix so 'tala' can't hit 'tala Assessment'.
-    2) STALE/no-pane/orphaned — fall back to the c9watch-reported pid + its descendants
-       (clears lingering MCP leftovers of an exited session). This is what makes stale kills work."""
+    2) STALE/no-pane/orphaned — fall back to the row's pid + its descendants
+       (clears lingering MCP leftovers of an exited session). This is what makes stale kills work.
+    The pid comes from the row, i.e. `claude agents` when it knows the session (see session_pid) —
+    c9watch's own pid is mis-attributed often enough that killing it could hit an unrelated session."""
     # 1) live pane by exact-ish name
     if name and len(name) >= 3:
         ptty = _pane_tty_by_name(f"{name} (node)") or _pane_tty_by_name(f"{name} (")
@@ -603,7 +641,7 @@ def kill_session(name="", tty="", pid=None):
                 try: subprocess.run(["kill", p], timeout=5)
                 except Exception: pass
             return f"killed claude {','.join(cp)} (tty)"
-    # 2) fallback: c9watch pid + its descendants (stale/orphaned/duplicate — per-row unique)
+    # 2) fallback: the row's authoritative pid + its descendants (stale/orphaned/duplicate — per-row unique)
     if pid:
         pid = str(pid)
         if not run(["ps", "-o", "pid=", "-p", pid]).strip():

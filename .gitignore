@@ -29,3 +29,6 @@ test/.claude/settings.local.json
 
 # Local git worktrees (never commit these — they're per-developer)
 .worktrees/
+
+# Python bytecode from the cctree tests
+cctree/__pycache__/
