@@ -74,40 +74,97 @@ def _user_text(e):
     return ""
 
 WORKING_MAX_AGE = 180   # a "still generating" session must have appended within this many seconds
-BG_TASK_MAX_AGE = 90    # a background task is live iff its .output was written within this many seconds
+LIVE_BG_MAX     = 7200  # a launched-but-not-ended background task counts as live for at most this
+                        # long — self-heals a task orphaned by a killed session that never wrote an
+                        # end-event (2h clears a stuck task without cutting off legit deploys/builds).
+BG_TASK_MAX_AGE = 90    # fallback only: a bg task whose launch scrolled out of the transcript tail
+                        # is live iff its .output was written within this many seconds.
+TAIL_BYTES      = 400000  # transcript tail we parse. The watcher case (Monitor says "keep working"
+                          # after arming) keeps generating output, so its launch can be far back —
+                          # a generous tail keeps the launch in view. Re-parsed only on mtime change.
 
-def _live_bg_task(sid):
-    """A background agent/workflow is running iff one of this session's task .output files was
-    written very recently (filesystem truth — not a transcript string match)."""
-    if not sid: return False
-    now = time.time()
-    for f in glob.glob(f"/private/tmp/claude-501/*/{sid}/tasks/*.output"):
-        try:
-            if now - os.stat(f).st_mtime < BG_TASK_MAX_AGE:
-                return True
-        except OSError:
-            pass
-    return False
+_WATCHER_RE = re.compile(r"\b(?:until|while)\b")
+def _is_watcher_cmd(cmd):
+    """A backgrounded poll/wait loop (watch a deploy/PR to completion, sleep, repeat) — a 'monitor'
+    in spirit, not sub-work. e.g. `until [ "$(gh run view … .status)" = completed ]; do sleep 20; done`."""
+    return bool(cmd) and bool(_WATCHER_RE.search(cmd)) and "sleep" in cmd
 
-_facts_cache = {}   # sid -> (transcript_mtime, armed_monitor, owes_output)
+def _ended_task_ids(line):
+    """Task-ids a genuine end-event reports as finished. Requires the structured <task-notification>
+    wrapper (or a legacy stream-end form) so we never match assistant prose that merely quotes a
+    <task-id>. Monitor ends land in queue-operation/attachment entries, bg-bash ends in user entries —
+    matching on the wrapper rather than the entry type catches both."""
+    if ("<task-notification>" not in line and "stream ended" not in line
+            and "<status>completed</status>" not in line and "<status>failed</status>" not in line):
+        return ()
+    return re.findall(r"<task-id>([\w-]+)</task-id>", line)
+
+_facts_cache = {}   # sid -> (transcript_mtime, armed_monitor, owes_output, bg_kind)
 def _transcript_facts(sid, path, mt):
-    """(armed_monitor, owes_output) from the transcript tail; mtime-cached (content-derived)."""
+    """(armed_monitor, owes_output, bg_kind) from the transcript tail; mtime-cached (content-derived).
+    bg_kind ∈ '' | 'monitor' | 'subagent' — the strongest LIVE background task (launched, no end-event,
+    launch recent): a backgrounded watch/poll loop counts as 'monitor', real sub-work as 'subagent'."""
     c = _facts_cache.get(sid)
     if c and c[0] == mt:
-        return c[1], c[2]
+        return c[1], c[2], c[3]
     armed = owes = False
+    bg_kind = ""
     try:
         with open(path, "rb") as f:
-            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - 200000))
+            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - TAIL_BYTES))
             lines = f.read().decode("utf-8", "ignore").splitlines()
-        started, ended = set(), set()
+        mon_started, ended = set(), set()
+        tool_cmd = {}       # bash tool_use_id -> command string (assistant precedes its launch result)
+        bg_launch = {}      # background task-id -> (launch_epoch, command|None)
         for line in lines:
             m = re.search(r"Monitor started \(task (\w+)", line)
-            if m: started.add(m.group(1))
-            if ("stream ended" in line or "<status>completed</status>" in line
-                    or "<status>failed</status>" in line or "finished</summary>" in line):
-                ended.update(re.findall(r"<task-id>([\w-]+)</task-id>", line))
-        armed = bool(started - ended)
+            if m: mon_started.add(m.group(1))
+            ended.update(_ended_task_ids(line))
+            if '"tool_use"' in line and '"Bash"' in line:      # remember each Bash command by id
+                try:
+                    e = json.loads(line)
+                    for x in (e.get("message", {}) or {}).get("content", []) or []:
+                        if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("name") == "Bash":
+                            tool_cmd[x.get("id")] = (x.get("input", {}) or {}).get("command", "")
+                except Exception:
+                    pass
+            if "Command running in background with ID:" in line:   # a bg-bash launch → link to its cmd
+                try:
+                    e = json.loads(line)
+                    ts = parse_ts(e.get("timestamp", ""))
+                    tuid = next((x.get("tool_use_id")
+                                 for x in (e.get("message", {}) or {}).get("content", []) or []
+                                 if isinstance(x, dict) and x.get("type") == "tool_result"), None)
+                    tid = (e.get("toolUseResult") or {}).get("backgroundTaskId")
+                    if not tid:
+                        mm = re.search(r"Command running in background with ID: (\w+)", line)
+                        tid = mm.group(1) if mm else None
+                    if tid:
+                        bg_launch[tid] = (ts, tool_cmd.get(tuid))
+                except Exception:
+                    pass
+        armed = bool(mon_started - ended)
+        # classify live background bash tasks (launched, not ended, launch recent enough)
+        now = time.time()
+        live_watcher = live_work = False
+        for tid, (ts, cmd) in bg_launch.items():
+            if tid in ended: continue
+            if ts and (now - ts) > LIVE_BG_MAX: continue       # ts==0 (unparseable) → don't cut off
+            if _is_watcher_cmd(cmd or ""): live_watcher = True
+            else: live_work = True
+        if live_work: bg_kind = "subagent"                     # active sub-work wins over a mere watch
+        elif live_watcher: bg_kind = "monitor"
+        # fallback: a live .output whose launch scrolled out of the tail (can't classify → subagent).
+        # Excludes ended task-ids, so a just-finished task's still-fresh .output no longer reads live.
+        if not bg_kind:
+            for fp in glob.glob(f"/private/tmp/claude-501/*/{sid}/tasks/*.output"):
+                tid = os.path.basename(fp)[:-len(".output")]
+                if tid in ended or tid in bg_launch: continue
+                try:
+                    if now - os.stat(fp).st_mtime < BG_TASK_MAX_AGE:
+                        bg_kind = "subagent"; break
+                except OSError:
+                    pass
         for line in reversed(lines):                        # last substantive message
             try: e = json.loads(line)
             except Exception: continue
@@ -127,29 +184,30 @@ def _transcript_facts(sid, path, mt):
                 owes = "Request interrupted" not in txt
                 break
     except Exception:
-        armed = owes = False
-    _facts_cache[sid] = (mt, armed, owes)
-    return armed, owes
+        armed = owes = False; bg_kind = ""
+    _facts_cache[sid] = (mt, armed, owes, bg_kind)
+    return armed, owes, bg_kind
 
 def refine_idle(sid):
-    """Refine an idle-classified session using recency as the primary signal:
-      'monitor'  — a live Monitor is armed (started task, no matching end).
-      'subagent' — a background task .output is being written right now.
-      'working'  — the transcript was appended within WORKING_MAX_AGE AND the assistant still owes
-                   output (mid-generation, e.g. a pending tool_result).
-      'idle'     — anything stale. A session idle for minutes/hours/days reads idle regardless of
-                   what its last transcript entry happens to be (e.g. an unacted cccollab message)."""
+    """Refine an idle-classified session. Liveness comes from the transcript lifecycle (a task is
+    launched until its end-event lands), NOT from .output mtime — so a sleeping watch-loop (0-byte,
+    frozen mtime) still reads live, and a just-ended task stops reading live:
+      'monitor'  — a live Monitor tool is armed, OR a backgrounded watch/poll loop is running.
+      'subagent' — a live background work task (real sub-work, or an out-of-tail .output being written).
+      'working'  — transcript appended within WORKING_MAX_AGE AND the assistant still owes output.
+      'idle'     — anything stale. Idle for minutes/hours/days reads idle regardless of what the last
+                   transcript entry happens to be (e.g. an unacted cccollab message)."""
     p = transcript_path(sid)
     if not p: return "idle"
     try:
         mt = os.stat(p).st_mtime
     except OSError:
         return "idle"
-    armed, owes = _transcript_facts(sid, p, mt)
+    armed, owes, bg_kind = _transcript_facts(sid, p, mt)
     if armed:
         return "monitor"
-    if _live_bg_task(sid):
-        return "subagent"
+    if bg_kind:
+        return bg_kind
     if owes and (time.time() - mt) < WORKING_MAX_AGE:
         return "working"
     return "idle"
