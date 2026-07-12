@@ -24,9 +24,12 @@ FRIENDLY = {"pitcrew": "Pit Crew", "kollaborativeai": "Kollaborative AI",
             "automation": "Automation", "cccollab": "cccollab",
             "flatoutsolutions": "FlatOut Solutions", "travel": "Travel"}
 # DERIVED status -> (label, ansi-color, group-priority). Groups: needs → working → idle.
+# working / subagent / monitor are all GREEN — the session is actively doing something and is
+# NOT blocked on you (executing a tool, running child agents, or watching for a background event).
 STATUS = {"needs":    ("● NEEDS INPUT", "\033[1;31m", 0),
-          "subagent": ("⚙ subagent",    "\033[1;36m", 1),
           "working":  ("▶ working",     "\033[1;32m", 1),
+          "subagent": ("⚙ subagent",    "\033[1;32m", 1),
+          "monitor":  ("◉ monitor",     "\033[1;32m", 1),
           "idle":     ("◦ idle",        "\033[33m",   2)}
 RESET, DIM, CYAN, BOLD = "\033[0m", "\033[2m", "\033[1;36m", "\033[1m"
 
@@ -38,20 +41,118 @@ def parse_ts(iso):
     except Exception:
         return 0.0
 
+_txpath_cache = {}
+def transcript_path(sid):
+    """Path to a session's ~/.claude/projects/*/<id>.jsonl transcript (glob cached per id)."""
+    if not sid: return ""
+    if sid in _txpath_cache: return _txpath_cache[sid]
+    m = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
+    p = m[0] if m else ""
+    _txpath_cache[sid] = p
+    return p
+
 _start_cache = {}
 def session_start(sid):
-    """Session start = birth time of its ~/.claude/projects/*/<id>.jsonl transcript (cached)."""
+    """Session start = birth time of its transcript (cached; birthtime never changes)."""
     if not sid: return 0.0
     if sid in _start_cache: return _start_cache[sid]
     t = 0.0
-    try:
-        m = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
-        if m:
-            st = os.stat(m[0]); t = getattr(st, "st_birthtime", st.st_mtime)
-    except Exception:
-        t = 0.0
+    p = transcript_path(sid)
+    if p:
+        try:
+            st = os.stat(p); t = getattr(st, "st_birthtime", st.st_mtime)
+        except OSError:
+            t = 0.0
     _start_cache[sid] = t
     return t
+
+def _user_text(e):
+    cont = (e.get("message", {}) or {}).get("content")
+    if isinstance(cont, str): return cont
+    if isinstance(cont, list):
+        return " ".join(c.get("text", "") for c in cont if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+WORKING_MAX_AGE = 180   # a "still generating" session must have appended within this many seconds
+BG_TASK_MAX_AGE = 90    # a background task is live iff its .output was written within this many seconds
+
+def _live_bg_task(sid):
+    """A background agent/workflow is running iff one of this session's task .output files was
+    written very recently (filesystem truth — not a transcript string match)."""
+    if not sid: return False
+    now = time.time()
+    for f in glob.glob(f"/private/tmp/claude-501/*/{sid}/tasks/*.output"):
+        try:
+            if now - os.stat(f).st_mtime < BG_TASK_MAX_AGE:
+                return True
+        except OSError:
+            pass
+    return False
+
+_facts_cache = {}   # sid -> (transcript_mtime, armed_monitor, owes_output)
+def _transcript_facts(sid, path, mt):
+    """(armed_monitor, owes_output) from the transcript tail; mtime-cached (content-derived)."""
+    c = _facts_cache.get(sid)
+    if c and c[0] == mt:
+        return c[1], c[2]
+    armed = owes = False
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - 200000))
+            lines = f.read().decode("utf-8", "ignore").splitlines()
+        started, ended = set(), set()
+        for line in lines:
+            m = re.search(r"Monitor started \(task (\w+)", line)
+            if m: started.add(m.group(1))
+            if ("stream ended" in line or "<status>completed</status>" in line
+                    or "<status>failed</status>" in line or "finished</summary>" in line):
+                ended.update(re.findall(r"<task-id>([\w-]+)</task-id>", line))
+        armed = bool(started - ended)
+        for line in reversed(lines):                        # last substantive message
+            try: e = json.loads(line)
+            except Exception: continue
+            t = e.get("type")
+            if t == "assistant":
+                content = (e.get("message", {}) or {}).get("content", []) or []
+                has_text = any(isinstance(x, dict) and x.get("type") == "text"
+                               and (x.get("text") or "").strip() for x in content)
+                has_use = any(isinstance(x, dict) and x.get("type") == "tool_use" for x in content)
+                owes = has_use and not has_text
+                break
+            if t == "user":
+                txt = _user_text(e)
+                if ("<local-command" in txt or "<command-name>" in txt
+                        or "<command-message>" in txt):
+                    continue                                # /model etc — not a real turn
+                owes = "Request interrupted" not in txt
+                break
+    except Exception:
+        armed = owes = False
+    _facts_cache[sid] = (mt, armed, owes)
+    return armed, owes
+
+def refine_idle(sid):
+    """Refine an idle-classified session using recency as the primary signal:
+      'monitor'  — a live Monitor is armed (started task, no matching end).
+      'subagent' — a background task .output is being written right now.
+      'working'  — the transcript was appended within WORKING_MAX_AGE AND the assistant still owes
+                   output (mid-generation, e.g. a pending tool_result).
+      'idle'     — anything stale. A session idle for minutes/hours/days reads idle regardless of
+                   what its last transcript entry happens to be (e.g. an unacted cccollab message)."""
+    p = transcript_path(sid)
+    if not p: return "idle"
+    try:
+        mt = os.stat(p).st_mtime
+    except OSError:
+        return "idle"
+    armed, owes = _transcript_facts(sid, p, mt)
+    if armed:
+        return "monitor"
+    if _live_bg_task(sid):
+        return "subagent"
+    if owes and (time.time() - mt) < WORKING_MAX_AGE:
+        return "working"
+    return "idle"
 
 def derive_status(s):
     """Turn c9watch's raw status into: needs (human action now) / subagent (working via a
@@ -205,10 +306,13 @@ def gather():
             loc = os.path.relpath(real, rtop)
         else:
             loc = ""
+        st = derive_status(s)
+        if st == "idle":                                  # refine via transcript: monitor / generating / idle
+            st = refine_idle(s.get("id", ""))
         rows.append({
             "id":       s.get("id", "") or str(s.get("pid", "")),
             "company":  company_of(cwd),
-            "status":   derive_status(s),
+            "status":   st,
             "repo":     repo,
             "worktree": loc,
             "name":     full,
@@ -242,7 +346,7 @@ def _sort_key(r):
     st = r["status"]; prio = STATUS.get(st, ("", "", 9))[2]
     if st == "idle":
         return (prio, -r.get("mtime", 0.0))
-    if st in ("working", "subagent"):
+    if st in ("working", "subagent", "monitor"):
         return (prio, r.get("start") or r.get("mtime", 0.0))
     return (prio, r.get("mtime", 0.0))            # needs: oldest first
 
@@ -267,7 +371,7 @@ def render_once():
     except Exception: maxx = 200
     SW, RE, WT, NW, CW, TW, MW = col_widths(maxx)
     needs = sum(1 for r in rows if r["status"] == "needs")
-    work  = sum(1 for r in rows if r["status"] in ("working", "subagent"))
+    work  = sum(1 for r in rows if r["status"] in ("working", "subagent", "monitor"))
     idle  = sum(1 for r in rows if r["status"] == "idle")
     L = [f"\n{BOLD}Claude Code — live map{RESET}   {len(rows)} sessions · "
          f"\033[1;31m{needs} need input{RESET} · \033[33m{idle} idle{RESET} · \033[1;32m{work} working{RESET}   {DIM}{time.strftime('%H:%M:%S')}{RESET}",
@@ -416,7 +520,8 @@ def run_tui(stdscr):
     YEL = curses.color_pair(3)
     CYN = curses.color_pair(4)
     st_attr = {"needs": ("● NEEDS INPUT", RED), "idle": ("◦ idle", YEL),
-               "subagent": ("⚙ subagent", CYN), "working": ("▶ working", GRN)}
+               "subagent": ("⚙ subagent", GRN), "working": ("▶ working", GRN),
+               "monitor": ("◉ monitor", GRN)}
 
     # Refresh cadence. `c9watch list` is ~1s of CPU per call, so poll gently (default 4s).
     # Override with CCTREE_INTERVAL=<seconds>.
@@ -478,7 +583,7 @@ def run_tui(stdscr):
 
             stdscr.erase()
             needs = sum(1 for r in rows if r["status"] == "needs")
-            work  = sum(1 for r in rows if r["status"] in ("working", "subagent"))
+            work  = sum(1 for r in rows if r["status"] in ("working", "subagent", "monitor"))
             idle  = sum(1 for r in rows if r["status"] == "idle")
             if pending_kill is not None:
                 put(0, 0, f"⚠ Kill '{str(pending_kill.get('name'))[:44]}' ?   y = confirm · any other key = cancel", RED, maxx)
