@@ -11,7 +11,8 @@ Columns: STATUS · WORKTREE · SESSION · CHANNELS · TOPICS · WHAT'S HAPPENING
 Data: c9watch (discovery+status) x git (worktree) x ~/projects (company)
       x cccollab broker/log (channels+topics, name-joined, best-effort).
 """
-import subprocess, json, os, sys, time, collections, re
+import subprocess, json, os, sys, time, collections, re, glob
+from datetime import datetime
 
 C9    = os.path.expanduser("~/.local/bin/c9watch")
 PROJ  = os.path.expanduser("~/projects")
@@ -22,11 +23,53 @@ FRIENDLY = {"pitcrew": "Pit Crew", "kollaborativeai": "Kollaborative AI",
             "tala": "tala", "tow123": "Tow123", "finance": "Finance",
             "automation": "Automation", "cccollab": "cccollab",
             "flatoutsolutions": "FlatOut Solutions", "travel": "Travel"}
-# status -> (label, ansi-color, sort-priority)
-STATUS = {"NeedsAttention":  ("● NEEDS INPUT", "\033[1;31m", 0),
-          "Working":         ("▶ working",     "\033[1;32m", 1),
-          "WaitingForInput": ("◦ waiting",     "\033[33m",   2)}
+# DERIVED status -> (label, ansi-color, group-priority). Groups: needs → working → idle.
+STATUS = {"needs":    ("● NEEDS INPUT", "\033[1;31m", 0),
+          "subagent": ("⚙ subagent",    "\033[1;36m", 1),
+          "working":  ("▶ working",     "\033[1;32m", 1),
+          "idle":     ("◦ idle",        "\033[33m",   2)}
 RESET, DIM, CYAN, BOLD = "\033[0m", "\033[2m", "\033[1;36m", "\033[1m"
+
+def parse_ts(iso):
+    """ISO8601 (incl. nanosecond precision) -> epoch float; 0.0 on failure."""
+    if not iso: return 0.0
+    try:
+        return datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', iso)).timestamp()
+    except Exception:
+        return 0.0
+
+_start_cache = {}
+def session_start(sid):
+    """Session start = birth time of its ~/.claude/projects/*/<id>.jsonl transcript (cached)."""
+    if not sid: return 0.0
+    if sid in _start_cache: return _start_cache[sid]
+    t = 0.0
+    try:
+        m = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
+        if m:
+            st = os.stat(m[0]); t = getattr(st, "st_birthtime", st.st_mtime)
+    except Exception:
+        t = 0.0
+    _start_cache[sid] = t
+    return t
+
+def derive_status(s):
+    """Turn c9watch's raw status into: needs (human action now) / subagent (working via a
+    Task/fan-out child) / working (actively executing a tool) / idle (waiting for you).
+    Only LIVE signals count as busy — a session mid-tool-call shows latestMessage 'Executing …'.
+    Leftover todos (taskProgress total>completed) are NOT activity: a finished session can sit
+    idle with todos still on its list, so taskProgress is deliberately ignored here."""
+    raw  = s.get("status") or ""
+    pend = s.get("pendingToolName") or ""
+    lm   = s.get("latestMessage") or ""
+    executing = lm.startswith("Executing ")
+    if raw == "NeedsAttention" or pend in ("Question", "AskUserQuestion"):
+        return "needs"
+    if executing and pend in ("Task", "Agent"):     # actively running a subagent/fan-out child
+        return "subagent"
+    if executing or raw == "Working":               # actively executing a tool right now
+        return "working"
+    return "idle"
 
 def run(cmd, inp=None):
     try:
@@ -36,15 +79,17 @@ def run(cmd, inp=None):
 
 _git_cache = {}
 def git_info(cwd):
-    """(repo_name, is_linked_worktree). repo_name = basename of the MAIN repo dir;
-    is_linked_worktree = True only for `git worktree` checkouts (git-dir != common-dir),
-    False for a plain clone / main working tree."""
-    if not cwd: return ("(no cwd)", False)
+    """(repo_name, is_linked_worktree, toplevel, repo_root).
+    repo_name = origin-remote repo name (fallback: repo dir basename);
+    is_linked_worktree = True only for `git worktree` checkouts (git-dir != common-dir);
+    toplevel  = this checkout's working-tree root (git --show-toplevel);
+    repo_root = the repo's main directory (main working tree, where .git lives)."""
+    if not cwd: return ("(no cwd)", False, "", "")
     if cwd in _git_cache: return _git_cache[cwd]
     common = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
     if common:
-        root = os.path.dirname(common) if os.path.basename(common) == ".git" \
-               else (run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).strip() or cwd)
+        top = run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).strip()
+        root = os.path.dirname(common) if os.path.basename(common) == ".git" else (top or cwd)
         # repo NAME from origin remote (the real repo), not the local clone folder
         url = run(["git", "-C", cwd, "remote", "get-url", "origin"]).strip().rstrip("/")
         if url.endswith(".git"): url = url[:-4]
@@ -52,8 +97,8 @@ def git_info(cwd):
         gd = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir"]).strip()
         linked = bool(gd and os.path.realpath(gd) != os.path.realpath(common))
     else:
-        repo, linked = os.path.basename(cwd), False
-    res = (repo, linked)
+        repo, linked, top, root = os.path.basename(cwd), False, "", ""
+    res = (repo, linked, top, root)
     _git_cache[cwd] = res
     return res
 
@@ -137,38 +182,59 @@ def gather():
         full = s.get("customTitle") or s.get("sessionName") or "?"
         cc = match_cccollab(full, members)
         real = os.path.realpath(cwd) if cwd else ""
-        repo, linked = git_info(cwd)
-        # For a linked worktree the worktree dir is NOT a folder level — use its container
-        # (the repo's folder) as the current folder, so pitcrew-1 → folder "projects/pitcrew".
-        fbase = os.path.dirname(real) if (real and linked) else real
+        repo, linked, top, root = git_info(cwd)
+        rtop = os.path.realpath(top) if top else ""
+        rroot = os.path.realpath(root) if root else ""
+        # Merged WORKTREE/FOLDER column:
+        #   linked worktree            → the worktree name (basename of its root)
+        #   non-worktree in a subfolder → the path within the repo (e.g. clients/amanda_george)
+        #   non-worktree at repo root   → empty
+        if linked:
+            loc = os.path.basename(rtop) if rtop else os.path.basename(real)
+        elif rtop and real and real != rtop:
+            loc = os.path.relpath(real, rtop)
+        else:
+            loc = ""
         rows.append({
             "id":       s.get("id", "") or str(s.get("pid", "")),
             "company":  company_of(cwd),
-            "status":   s.get("status", "?"),
+            "status":   derive_status(s),
             "repo":     repo,
-            "folder":   f"{os.path.basename(os.path.dirname(fbase))}/{os.path.basename(fbase)}" if fbase else "?",
-            "worktree": os.path.basename(real) if (real and linked) else "",
+            "worktree": loc,
             "name":     full,
             "msg":      (s.get("latestMessage") or "").replace("\n", " ").strip(),
             "channels": ",".join(cc["channels"]) if cc else "",
             "topics":   ",".join(cc["topics"]) if cc else "",
             "pid":      s.get("pid"),
             "tty":      pid2tty.get(str(s.get("pid")), ""),
+            "mtime":    parse_ts(s.get("modified", "")),
+            "start":    session_start(s.get("id", "")),
         })
     return rows
 
 def col_widths(maxx):
-    """Distribute width across STATUS·FOLDER·REPO·WORKTREE·SESSION·CHANNELS·TOPICS·MESSAGE."""
+    """Distribute width across STATUS·REPO·WORKTREE/FOLDER·SESSION·CHANNELS·TOPICS·MESSAGE."""
     SW = 13
     rem = maxx - 2 - (SW + 2)
-    FO = min(24, max(12, int(rem * 0.13)))
-    RE = min(16, max(8, int(rem * 0.09)))
-    WT = min(20, max(8, int(rem * 0.11)))
+    RE = min(16, max(8, int(rem * 0.10)))
+    WT = min(26, max(12, int(rem * 0.15)))
     NW = min(38, max(16, int(rem * 0.22)))
     CW = min(26, max(10, int(rem * 0.13)))
     TW = min(28, max(10, int(rem * 0.14)))
-    MW = max(10, rem - (FO + 2 + RE + 2 + WT + 2 + NW + 2 + CW + 2 + TW + 2))
-    return SW, FO, RE, WT, NW, CW, TW, MW
+    MW = max(10, rem - (RE + 2 + WT + 2 + NW + 2 + CW + 2 + TW + 2))
+    return SW, RE, WT, NW, CW, TW, MW
+
+def _sort_key(r):
+    """Within a company: needs → working → idle, then by time:
+    needs   → longest-waiting first (oldest last-activity at top)
+    working → longest-working first (earliest session start at top)
+    idle    → shortest-idle first  (newest last-activity at top, stalest at bottom)."""
+    st = r["status"]; prio = STATUS.get(st, ("", "", 9))[2]
+    if st == "idle":
+        return (prio, -r.get("mtime", 0.0))
+    if st in ("working", "subagent"):
+        return (prio, r.get("start") or r.get("mtime", 0.0))
+    return (prio, r.get("mtime", 0.0))            # needs: oldest first
 
 def grouped(rows, collapsed=frozenset()):
     """-> list of ('header', company, n) / ('row', dict). Collapsed companies show header only."""
@@ -178,7 +244,7 @@ def grouped(rows, collapsed=frozenset()):
     for comp, items in sorted(g.items(), key=lambda x: -len(x[1])):
         out.append(("header", comp, len(items)))
         if comp not in collapsed:
-            for r in sorted(items, key=lambda r: (STATUS.get(r["status"], ("", "", 9))[2], r["worktree"])):
+            for r in sorted(items, key=_sort_key):
                 out.append(("row", r))
     return out
 
@@ -189,19 +255,20 @@ def render_once():
         return f"\033[1;31mcctree:\033[0m cannot read c9watch (~/.local/bin/c9watch)"
     try: maxx = os.get_terminal_size().columns
     except Exception: maxx = 200
-    SW, FO, RE, WT, NW, CW, TW, MW = col_widths(maxx)
-    needs = sum(1 for r in rows if r["status"] == "NeedsAttention")
-    work  = sum(1 for r in rows if r["status"] == "Working")
+    SW, RE, WT, NW, CW, TW, MW = col_widths(maxx)
+    needs = sum(1 for r in rows if r["status"] == "needs")
+    work  = sum(1 for r in rows if r["status"] in ("working", "subagent"))
+    idle  = sum(1 for r in rows if r["status"] == "idle")
     L = [f"\n{BOLD}Claude Code — live map{RESET}   {len(rows)} sessions · "
-         f"\033[1;31m{needs} need input{RESET} · \033[1;32m{work} working{RESET}   {DIM}{time.strftime('%H:%M:%S')}{RESET}",
-         f"  {DIM}{'STATUS'.ljust(SW)}  {'FOLDER'.ljust(FO)}  {'REPO'.ljust(RE)}  {'WORKTREE'.ljust(WT)}  "
+         f"\033[1;31m{needs} need input{RESET} · \033[33m{idle} idle{RESET} · \033[1;32m{work} working{RESET}   {DIM}{time.strftime('%H:%M:%S')}{RESET}",
+         f"  {DIM}{'STATUS'.ljust(SW)}  {'REPO'.ljust(RE)}  {'WORKTREE/FOLDER'.ljust(WT)}  "
          f"{'SESSION'.ljust(NW)}  {'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING{RESET}"]
     for kind, *rest in grouped(rows):
         if kind == "header":
             comp, n = rest; L.append(f"{CYAN}{comp}{RESET} {DIM}({n}){RESET}")
         else:
             r = rest[0]; label, color, _ = STATUS.get(r["status"], (r["status"], "", 9))
-            L.append(f"  {color}{label.ljust(SW)}{RESET}  {trunc(r['folder'],FO).ljust(FO)}  {trunc(r['repo'],RE).ljust(RE)}  "
+            L.append(f"  {color}{label.ljust(SW)}{RESET}  {trunc(r['repo'],RE).ljust(RE)}  "
                      f"{trunc(r['worktree'],WT).ljust(WT)}  {BOLD}{trunc(r['name'],NW).ljust(NW)}{RESET}  "
                      f"{CYAN}{trunc(r['channels'],CW).ljust(CW)}{RESET}  {DIM}{trunc(r['topics'],TW).ljust(TW)}{RESET}  {DIM}{trunc(r['msg'],MW)}{RESET}")
     return "\n".join(L)
@@ -300,8 +367,8 @@ def run_tui(stdscr):
     GRN = curses.color_pair(2) | curses.A_BOLD
     YEL = curses.color_pair(3)
     CYN = curses.color_pair(4)
-    st_attr = {"NeedsAttention": ("● NEEDS INPUT", RED), "Working": ("▶ working", GRN),
-               "WaitingForInput": ("◦ waiting", YEL)}
+    st_attr = {"needs": ("● NEEDS INPUT", RED), "idle": ("◦ idle", YEL),
+               "subagent": ("⚙ subagent", CYN), "working": ("▶ working", GRN)}
 
     shared = {"rows": gather() or []}
     lock, stop = threading.Lock(), threading.Event()
@@ -331,13 +398,14 @@ def run_tui(stdscr):
         c = stdscr.getch()
         if c != 27:
             return ("k", c)
-        stdscr.nodelay(True); seq = ""
+        seq = ""
+        stdscr.timeout(30)            # brief window to catch the rest of an ESC sequence (no race)
         for _ in range(6):
             ch = stdscr.getch()
             if ch == -1: break
             seq += chr(ch)
-        stdscr.nodelay(False); stdscr.timeout(100)
-        return ("esc", seq)
+        stdscr.timeout(100)
+        return ("esc", seq) if seq else ("k", 27)
 
     try:
         while True:
@@ -350,15 +418,16 @@ def run_tui(stdscr):
             if disp: sel_key = keyof(disp[sel])
 
             maxy, maxx = stdscr.getmaxyx()
-            SW, FO, RE, WT, NW, CW, TW, MW = col_widths(maxx)
+            SW, RE, WT, NW, CW, TW, MW = col_widths(maxx)
             H = maxy - 2
             if sel < top: top = sel
             elif sel >= top + H: top = sel - H + 1
             top = max(0, min(top, max(0, len(disp) - H)))
 
             stdscr.erase()
-            needs = sum(1 for r in rows if r["status"] == "NeedsAttention")
-            work  = sum(1 for r in rows if r["status"] == "Working")
+            needs = sum(1 for r in rows if r["status"] == "needs")
+            work  = sum(1 for r in rows if r["status"] in ("working", "subagent"))
+            idle  = sum(1 for r in rows if r["status"] == "idle")
             if pending_kill is not None:
                 put(0, 0, f"⚠ Kill '{str(pending_kill.get('name'))[:44]}' ?   y = confirm · any other key = cancel", RED, maxx)
             elif flash[1] > time.time():
@@ -366,9 +435,10 @@ def run_tui(stdscr):
             else:
                 x = put(0, 0, f"Claude Code — {len(rows)} sessions   ", curses.A_BOLD, maxx)
                 x = put(0, x, f"{needs} need input", RED, maxx)
+                x = put(0, x + 2, f"{idle} idle", YEL, maxx)
                 put(0, x + 2, f"{work} working", GRN, maxx)
-                put(0, max(0, maxx - 62), "↑↓ move · Shift+↑↓ project · ←/→ fold · ⏎ jump · x kill · q", curses.A_DIM, maxx)
-            put(1, 2, f"{'STATUS'.ljust(SW)}  {'FOLDER'.ljust(FO)}  {'REPO'.ljust(RE)}  {'WORKTREE'.ljust(WT)}  "
+                put(0, max(0, maxx - 62), "↑↓ move · Tab/⇧Tab project · ←/→ fold · ⏎ jump · x kill · q", curses.A_DIM, maxx)
+            put(1, 2, f"{'STATUS'.ljust(SW)}  {'REPO'.ljust(RE)}  {'WORKTREE/FOLDER'.ljust(WT)}  "
                       f"{'SESSION'.ljust(NW)}  {'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING", curses.A_DIM, maxx)
             y = 2
             for di in range(top, len(disp)):
@@ -383,7 +453,6 @@ def run_tui(stdscr):
                     label, at = st_attr.get(r["status"], (r["status"], 0))
                     xx = 2
                     xx = put(y, xx, label.ljust(SW), at | rev, maxx); xx += 2
-                    xx = put(y, xx, trunc(r["folder"], FO).ljust(FO), rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["repo"], RE).ljust(RE), rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["worktree"], WT).ljust(WT), rev, maxx); xx += 2
                     xx = put(y, xx, trunc(r["name"], NW).ljust(NW), curses.A_BOLD | rev, maxx); xx += 2
@@ -411,6 +480,12 @@ def run_tui(stdscr):
                 c = val
                 if c in (curses.KEY_DOWN, ord('j')): sel += 1
                 elif c in (curses.KEY_UP, ord('k')): sel -= 1
+                elif c == 9:                       # Tab → next project (reliable, no modifier)
+                    nxt = [h for h in headers if h > sel]
+                    if nxt: sel = nxt[0]
+                elif c == curses.KEY_BTAB:         # Shift+Tab → previous project
+                    prev = [h for h in headers if h < sel]
+                    if prev: sel = prev[-1]
                 elif c == curses.KEY_NPAGE: sel += 10
                 elif c == curses.KEY_PPAGE: sel -= 10
                 elif c == curses.KEY_LEFT:
