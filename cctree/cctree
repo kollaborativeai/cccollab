@@ -63,11 +63,21 @@ def derive_status(s):
     pend = s.get("pendingToolName") or ""
     lm   = s.get("latestMessage") or ""
     executing = lm.startswith("Executing ")
-    if raw == "NeedsAttention" or pend in ("Question", "AskUserQuestion"):
+    # 1) explicit human-input tools always mean "needs you"
+    if pend in ("Question", "AskUserQuestion"):
         return "needs"
-    if executing and pend in ("Task", "Agent"):     # actively running a subagent/fan-out child
+    # 2) actively executing a tool RIGHT NOW → working, even if c9watch says NeedsAttention
+    #    (a session mid-tool-call is not blocked on you; "Executing …" is the ground truth)
+    if executing:
+        return "subagent" if pend in ("Task", "Agent") else "working"
+    # 2b) launched a background workflow/agents that run OUT of this process — parent looks idle
+    #     (0% CPU, no pending tool) but is really working via background agents until it notifies.
+    if lm.startswith("Workflow launched") or lm.startswith("Async agent launched"):
         return "subagent"
-    if executing or raw == "Working":               # actively executing a tool right now
+    # 3) not executing but flagged → genuinely waiting for the human (permission / idle prompt)
+    if raw == "NeedsAttention":
+        return "needs"
+    if raw == "Working":
         return "working"
     return "idle"
 
@@ -275,10 +285,19 @@ def render_once():
 
 # ---------- jump ----------
 def _iterm_focus_by(cond):
-    script = ('tell application "iTerm2"\n  repeat with w in windows\n    repeat with t in tabs of w\n'
+    # Focus the matching pane AND switch to its macOS Space. select s/t/w reveals the pane;
+    # `set index of w to 1` makes it the frontmost iTerm window; AXRaise via System Events is
+    # what actually pulls macOS to that window's Space (a plain `activate` alone won't unless
+    # "switch to a Space with open windows" is enabled in Mission Control settings).
+    script = ('tell application "iTerm2"\n  activate\n'
+              '  repeat with w in windows\n    repeat with t in tabs of w\n'
               '      repeat with s in sessions of t\n'
-              f'        if {cond} then\n          select s\n          select t\n'
-              '          select w\n          activate\n          return "ok"\n        end if\n'
+              f'        if {cond} then\n          select s\n          select t\n          select w\n'
+              '          set index of w to 1\n          set winName to name of w\n'
+              '          tell application "System Events" to tell process "iTerm2"\n'
+              '            set frontmost to true\n'
+              '            try\n              perform action "AXRaise" of (first window whose title is winName)\n            end try\n'
+              '          end tell\n          return "ok"\n        end if\n'
               '      end repeat\n    end repeat\n  end repeat\nend tell\nreturn "notfound"\n')
     return "ok" in run(["osascript", "-e", script])
 
@@ -302,6 +321,35 @@ def jump(name="", tty=""):
         if _iterm_focus_by(f'(tty of s) is "{tty}"'):
             return f"iterm-tty:{tty}"
     return "notfound"
+
+def chrome_jump(name):
+    """Switch to the first Chrome tab whose title CONTAINS the full session name, and switch
+    to its Space. Graceful no-op if Chrome isn't running or no tab matches (never launches
+    Chrome, never navigates/creates tabs — activate-existing-tab only)."""
+    if not name or len(name) < 3 or name == "?":
+        return "no match"
+    esc = name.replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        'tell application "System Events"\n'
+        '  if not (exists process "Google Chrome") then return "no-chrome"\n'
+        'end tell\n'
+        'tell application "Google Chrome"\n'
+        '  repeat with w in windows\n    set i to 0\n'
+        '    repeat with t in tabs of w\n      set i to i + 1\n'
+        f'      if (title of t) contains "{esc}" then\n'
+        '        set active tab index of w to i\n        set index of w to 1\n        activate\n'
+        '        return "ok"\n      end if\n'
+        '    end repeat\n  end repeat\nend tell\nreturn "notfound"\n')
+    out = run(["osascript", "-e", script]).strip()
+    if out == "ok":
+        # pull macOS to the tab's Space (best-effort; needs Accessibility permission)
+        raise_ = ('tell application "System Events" to tell process "Google Chrome"\n'
+                  '  set frontmost to true\n'
+                  f'  try\n    perform action "AXRaise" of (first window whose title contains "{esc}")\n  end try\n'
+                  'end tell\n')
+        run(["osascript", "-e", raise_])
+        return "chrome:ok"
+    return {"no-chrome": "chrome-not-running", "notfound": "no-tab"}.get(out, "no-tab")
 
 def _pane_tty_by_name(name):
     esc = name.replace("\\", "\\\\").replace('"', '\\"')
@@ -370,13 +418,17 @@ def run_tui(stdscr):
     st_attr = {"needs": ("● NEEDS INPUT", RED), "idle": ("◦ idle", YEL),
                "subagent": ("⚙ subagent", CYN), "working": ("▶ working", GRN)}
 
+    # Refresh cadence. `c9watch list` is ~1s of CPU per call, so poll gently (default 4s).
+    # Override with CCTREE_INTERVAL=<seconds>.
+    try: interval = max(1.0, float(os.environ.get("CCTREE_INTERVAL", "4")))
+    except Exception: interval = 4.0
     shared = {"rows": gather() or []}
     lock, stop = threading.Lock(), threading.Event()
     def refresher():
         while not stop.is_set():
             g = gather() or []
             with lock: shared["rows"] = g
-            stop.wait(2)
+            stop.wait(interval)
     threading.Thread(target=refresher, daemon=True).start()
 
     stdscr.timeout(100)
@@ -437,7 +489,7 @@ def run_tui(stdscr):
                 x = put(0, x, f"{needs} need input", RED, maxx)
                 x = put(0, x + 2, f"{idle} idle", YEL, maxx)
                 put(0, x + 2, f"{work} working", GRN, maxx)
-                put(0, max(0, maxx - 62), "↑↓ move · Tab/⇧Tab project · ←/→ fold · ⏎ jump · x kill · q", curses.A_DIM, maxx)
+                put(0, max(0, maxx - 62), "↑↓ move · Tab/⇧Tab project · ←/→ fold · ⏎ chrome+pane · c chrome · x kill · q", curses.A_DIM, maxx)
             put(1, 2, f"{'STATUS'.ljust(SW)}  {'REPO'.ljust(RE)}  {'WORKTREE/FOLDER'.ljust(WT)}  "
                       f"{'SESSION'.ljust(NW)}  {'CHANNELS'.ljust(CW)}  {'TOPICS'.ljust(TW)}  WHAT'S HAPPENING", curses.A_DIM, maxx)
             y = 2
@@ -495,12 +547,19 @@ def run_tui(stdscr):
                 elif c in (curses.KEY_ENTER, 10, 13):
                     d = disp[sel]
                     if d[0] == "row":
-                        curses.flushinp(); jump(d[1].get("name"), d[1].get("tty"))
+                        curses.flushinp()
+                        chrome_jump(d[1].get("name"))                 # Chrome tab first (best-effort)
+                        jump(d[1].get("name"), d[1].get("tty"))       # then the CC session pane (ends frontmost)
                     else:
                         stay_comp = d[1]
                         (collapsed.discard if d[1] in collapsed else collapsed.add)(d[1])
                 elif c in (ord('x'), ord('X')):
                     if disp[sel][0] == "row": pending_kill = disp[sel][1]
+                elif c in (ord('c'), ord('C')):
+                    if disp[sel][0] == "row":
+                        res = chrome_jump(disp[sel][1].get("name"))
+                        if res != "chrome:ok":       # only flash on non-open (no tab / no chrome)
+                            flash = (f"Chrome: {res}", time.time() + 2)
                 elif c == ord('q'): break
             else:  # escape sequence (Ctrl/Shift/⌘ arrows: ESC [1;5x or [1;2x)
                 seq = val
