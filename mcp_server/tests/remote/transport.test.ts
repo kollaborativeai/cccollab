@@ -7,14 +7,17 @@ import { RemoteTransport } from '../../src/transport/remote.js'
  * Self-disable transition test.
  *
  * The `RemoteTransport` graceful-degradation policy trips `enabled = false`
- * on the first `FunctionNotFoundError` (schema drift) or after three
- * generic failures within a 60s window. Subsequent calls short-circuit and
- * return empty results without hitting the ConvexClient again, while local
- * tools keep working.
+ * after three failures within a 60s window, or immediately on a structured
+ * auth failure. A single `FunctionNotFoundError` from a one-shot op (query/
+ * mutation) does NOT disable the transport — it fails just that op and counts
+ * toward the rolling window, so one stale tool bound to a removed backend
+ * function can no longer brick the whole remote transport (KAI-333). A missing
+ * function on a long-lived subscription is still treated as structural drift
+ * and trips immediately (see `registerSubscriptionFailure`).
  *
  * We construct a minimal ConvexClient stub whose `query` method rejects
- * with the relevant error the first time it's called. That's enough to
- * exercise the transition inside `listChannels()`.
+ * with the relevant error. That's enough to exercise the transition inside
+ * `listChannels()`.
  */
 
 class SchemaDriftError extends Error {
@@ -51,7 +54,7 @@ function makeStubClient(
 }
 
 describe('RemoteTransport graceful degradation', () => {
-  it('flips enabled=false on the first schema-drift error and subsequent calls short-circuit', async () => {
+  it('does NOT disable on a single function-not-found from a one-shot op; only that op returns empty', async () => {
     const { client, queryMock } = makeStubClient(async () => {
       throw new SchemaDriftError('Could not find function channels:listAll on deployment')
     })
@@ -61,19 +64,34 @@ describe('RemoteTransport graceful degradation', () => {
     expect(transport.enabled).toBe(true)
     expect(transport.degradation).toBeNull()
 
-    // First call trips the switch - listChannels returns an empty array
-    // rather than propagating the error, because the transport's
-    // `registerFailure` swallows it.
+    // A single missing function fails just this op (empty result). The
+    // transport stays enabled so every other op keeps working — one stale
+    // tool bound to a removed backend function no longer bricks the whole
+    // remote transport (KAI-333).
     const first = await transport.listChannels({})
     expect(first).toEqual([])
-    expect(transport.enabled).toBe(false)
-    expect(transport.degradation).toMatch(/function not found/i)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
 
-    // Second call short-circuits - it never hits the stub's `query`.
-    const callsBeforeSecond = queryMock.mock.calls.length
-    const second = await transport.listChannels({})
-    expect(second).toEqual([])
-    expect(queryMock.mock.calls.length).toBe(callsBeforeSecond)
+    // Not short-circuited: a subsequent call still reaches the client.
+    const callsBefore = queryMock.mock.calls.length
+    await transport.listChannels({})
+    expect(queryMock.mock.calls.length).toBe(callsBefore + 1)
+  })
+
+  it('still trips after three function-not-found errors within the window (real schema-drift backstop)', async () => {
+    const { client } = makeStubClient(async () => {
+      throw new SchemaDriftError('Could not find function channels:listAll on deployment')
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(true)
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(true)
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/3 failures/)
   })
 
   it('trips after three generic failures within the rolling window', async () => {
@@ -139,6 +157,38 @@ describe('RemoteTransport graceful degradation', () => {
     await transport.listChannels({})
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/authentication failed/i)
+  })
+
+  it('a function-not-found on a long-lived subscription DOES disable (structural drift stays strict)', () => {
+    // Counterpart to the one-shot-op case above: a missing CORE feed function
+    // (listByTopic/listByChannel) on a reactive subscription is genuine schema
+    // drift, not a stray tool. It must still trip the breaker so the user gets
+    // the "restart your session" signal instead of silent partial sync.
+    let onError: ((err: unknown) => void) | undefined
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(
+        (
+          _query: unknown,
+          _args: Record<string, unknown>,
+          _onNext: (rows: unknown) => void,
+          onErr: (err: unknown) => void,
+        ) => {
+          onError = onErr
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(transport.enabled).toBe(true)
+
+    onError!(new SchemaDriftError('Could not find function messages:listByTopic on deployment'))
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
   })
 })
 

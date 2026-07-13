@@ -239,11 +239,16 @@ class BoundedIdSet {
  * ids are Convex `Id<'topics'>` strings (base32-ish). `hasTopic` uses
  * that shape distinction to dispatch topic-addressed tools.
  *
- * Graceful degradation: on a `FunctionNotFoundError` or 3+ failed
- * operations within `DEGRADATION_WINDOW_MS` we set `enabled = false`
- * and record the reason. Callers in `server.ts` check `enabled`
- * before dispatching. The transport does NOT auto-recover; a session
- * restart or successful `authenticate` is required.
+ * Graceful degradation: we set `enabled = false` and record the reason on
+ * a structured auth failure, on a `FunctionNotFoundError` from a long-lived
+ * subscription (structural schema drift), or after 3+ failed operations
+ * within `DEGRADATION_WINDOW_MS`. A single `FunctionNotFoundError` from a
+ * one-shot op (query/mutation) does NOT disable the transport — it fails
+ * just that op and counts toward the window, so one stale tool bound to a
+ * removed backend function can't brick the whole transport (KAI-333).
+ * Callers in `server.ts` check `enabled` before dispatching. The transport
+ * does NOT auto-recover; a session restart or successful `authenticate` is
+ * required.
  */
 export class RemoteTransport implements Transport {
   readonly source: string
@@ -1134,12 +1139,14 @@ export class RemoteTransport implements Transport {
     const msg = err instanceof Error ? err.message : String(err)
     this.log(`op ${op} failed: ${msg}`)
 
-    if (isFunctionNotFoundError(err)) {
-      this.enabled = false
-      this.degradationReason = `Remote sync disabled: function not found on deployment (${msg})`
-      this.log(this.degradationReason)
-      return
-    }
+    // A single missing function on a one-shot op (query/mutation) must NOT
+    // disable the whole transport — it fails just that op and counts toward
+    // the rolling window like any other failure. This keeps one stale tool
+    // bound to a removed backend function from bricking the entire remote
+    // transport (KAI-333). Genuine schema drift still trips the breaker: the
+    // core reactive subscriptions fail structurally (see
+    // `registerSubscriptionFailure`, which stays strict), and 3+ such op
+    // failures within the window trip the count path below.
 
     if (isAuthError(err)) {
       this.enabled = false
