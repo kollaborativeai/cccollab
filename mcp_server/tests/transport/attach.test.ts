@@ -12,6 +12,7 @@ import {
   type AttachResolved,
   type LazyAttachCtx,
 } from '../../src/transport/attach.js'
+import { AttachDiagnostics } from '../../src/transport/diagnostics.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { ParsedMessage } from '../../src/types.js'
@@ -262,6 +263,52 @@ describe('attachLocation', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain('backend rejected introduce')
     expect(ctx.router.has('flatout')).toBe(false)
+  })
+
+  it('shuts down the orphaned transport when introduce throws, so its ConvexClient websocket does not leak', async () => {
+    // Regression guard for KAI-368: a constructed-but-never-registered
+    // transport (introduce failed) must be torn down. Otherwise its
+    // ConvexClient websocket + auth fetcher keep running with no owner,
+    // and a subsequent background "Server Error" rejection can crash the
+    // whole process — bricking the local broker for every session.
+    const ctx = makeCtx(location)
+    const failing = new FakeRemoteTransport('flatout')
+    failing.shouldFailIntroduce = true
+    failing.introduceError = new Error('Server Error')
+    ctx.transportFactory = () => failing
+
+    const result = await attachLocation('flatout', ctx)
+
+    expect(result.ok).toBe(false)
+    expect(failing.shutdown).toHaveBeenCalledTimes(1)
+    expect(failing.shutdownCalled).toBe(true)
+  })
+
+  it('records the failure in diagnostics when introduce throws', async () => {
+    // KAI-368: the failed remote is not registered in the router, so the
+    // separate diagnostics registry is how whoami surfaces "✗ personal".
+    const diagnostics = new AttachDiagnostics()
+    const ctx = makeCtx(location, { diagnostics })
+    const failing = new FakeRemoteTransport('flatout')
+    failing.shouldFailIntroduce = true
+    failing.introduceError = new Error('Server Error')
+    ctx.transportFactory = () => failing
+
+    const result = await attachLocation('flatout', ctx)
+
+    expect(result.ok).toBe(false)
+    expect(diagnostics.get('flatout')?.reason).toContain('Server Error')
+  })
+
+  it('clears a prior diagnostics failure once the location attaches successfully', async () => {
+    const diagnostics = new AttachDiagnostics()
+    diagnostics.recordFailure('flatout', 'earlier introduce() failure')
+    const ctx = makeCtx(location, { diagnostics })
+
+    const result = await attachLocation('flatout', ctx)
+
+    expect(result.ok).toBe(true)
+    expect(diagnostics.get('flatout')).toBeUndefined()
   })
 
   it('replaces an existing transport in place when one is already registered for the same name', async () => {

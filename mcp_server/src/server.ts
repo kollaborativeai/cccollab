@@ -19,6 +19,8 @@ import { LocalTransport } from './transport/local.js'
 import { LOCAL_LOCATION, type Transport } from './transport/index.js'
 import { TransportRouter } from './transport/router.js'
 import { attachLocation, ensureLazyAttach, planStartupAttachments } from './transport/attach.js'
+import { AttachDiagnostics } from './transport/diagnostics.js'
+import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
 import { handleTopicTool } from './tools/topics.js'
@@ -66,6 +68,12 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   const localTransport: Transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([localTransport])
   const context = new ActiveContext()
+
+  // Records non-local locations whose attach FAILED (KAI-368). The router
+  // holds only healthy transports; a bad remote is surfaced from here via
+  // whoami/list_locations instead of ever entering the router — so one
+  // erroring remote can't brick the plugin for local or other transports.
+  const diagnostics = new AttachDiagnostics()
 
   // Compose instructions BEFORE calling introduce() so the user-facing
   // block that quotes the active channel list is up to date. Keep the
@@ -156,6 +164,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
         activeChannel: resolved.active.activeChannel,
         activeTopic: resolved.active.activeTopic,
       },
+      diagnostics,
     })
     if (result.ok) {
       console.error(`[cccollab] Transport "${location.name}" active (url: ${location.url})`)
@@ -264,6 +273,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
         remoteChannelUnsubscribes,
         inflight: lazyInflight,
         candidates: lazyCandidates,
+        diagnostics,
         resolve: () => {
           const fresh = resolveConfig(cwd, env)
           return {
@@ -289,6 +299,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     cwd,
     env,
     ensureAttached,
+    diagnostics,
   })
 
   let shutdownInFlight: Promise<void> | null = null
@@ -388,6 +399,10 @@ interface ToolDeps {
    *  name gate for pre-introduce discovery. Cheap and idempotent after the
    *  first attach — see `ensureLazyAttach`. */
   ensureAttached: (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => Promise<void>
+  /** Registry of failed non-local attaches (KAI-368). Passed through to
+   *  the identity tools so `whoami` can surface a location that failed to
+   *  attach and is therefore absent from the router. */
+  diagnostics: AttachDiagnostics
 }
 
 function buildInstructions(session: SessionManager, resolved: ResolvedConfig, router: TransportRouter): string {
@@ -981,6 +996,12 @@ async function ensureBroker(): Promise<number> {
 }
 
 async function main() {
+  // Install the process-level safety net FIRST, before any transport work
+  // starts. A remote location whose ConvexClient websocket/auth rejects in
+  // the background must never crash the process and take this session's
+  // in-process local transport down with it (KAI-368).
+  installProcessSafetyNet((msg) => console.error(`[cccollab] ${msg}`))
+
   const config = loadConfig()
   const resolved = resolveConfig(process.cwd())
   const brokerPort = await ensureBroker()

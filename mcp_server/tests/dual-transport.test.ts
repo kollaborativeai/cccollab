@@ -6,6 +6,9 @@ import { TransportRouter } from '../src/transport/router.js'
 import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
 import { handleIdentityTool, type IdentityToolDeps } from '../src/tools/identity.js'
+import { attachLocation } from '../src/transport/attach.js'
+import { AttachDiagnostics } from '../src/transport/diagnostics.js'
+import type { MessageBus } from '../src/message-bus.js'
 import type { ResolvedLocation } from '../src/config/resolve.js'
 import {
   type Transport,
@@ -841,6 +844,80 @@ describe('Dual transport: config-driven startup', () => {
 
     // The last joined topic becomes active.
     expect(context.hasTopic()).toBe(true)
+  })
+})
+
+/**
+ * KAI-368: a remote location whose `introduce` errors at startup must NOT
+ * brick the plugin. The failed transport is never registered in the
+ * router (so local + other transports keep working), it is torn down (no
+ * leaked ConvexClient websocket), and the failure is recorded in the
+ * diagnostics registry so `whoami` still surfaces it as ✗ degraded.
+ */
+describe('KAI-368: a failing remote attach does not brick local', () => {
+  it('keeps local healthy, tears down the bad remote, and surfaces it as degraded in whoami', async () => {
+    const local = new FakeTransport('local')
+    const context = new ActiveContext()
+    const session = new SessionManager({ username: 'tester', cwd: '/tmp/proj' })
+    session.setName('architect')
+    // The router starts with ONLY the local transport — exactly as
+    // server.ts builds it before attaching non-local locations.
+    const router = new TransportRouter([local])
+    const diagnostics = new AttachDiagnostics()
+
+    const busPushes: unknown[] = []
+    const bus = { push: vi.fn(async (m: unknown) => void busPushes.push(m)) } as unknown as MessageBus
+
+    // A remote whose introduce throws a prod-style "Server Error", and
+    // whose shutdown we can observe was called (leak guard).
+    const shutdown = vi.fn(async () => {})
+    const failingRemote = {
+      source: 'personal',
+      enabled: true,
+      introduce: vi.fn(async () => {
+        throw new Error('Server Error')
+      }),
+      shutdown,
+      joinChannel: vi.fn(async () => ({ subscriberCount: 0 })),
+      deregisterSession: vi.fn(async () => {}),
+      hasTopic: () => false,
+    } as unknown as import('../src/transport/index.js').Transport
+
+    const personal: ResolvedLocation = {
+      name: 'personal',
+      isLocal: false,
+      url: 'https://personal.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      channels: [],
+    }
+
+    const result = await attachLocation('personal', {
+      session,
+      context,
+      router,
+      messageBus: bus,
+      remoteTopicUnsubscribes: new Map(),
+      remoteChannelUnsubscribes: new Map(),
+      resolved: { locations: [personal], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
+      transportFactory: () => failingRemote,
+      diagnostics,
+    })
+
+    // 1. The attach failed but did NOT throw — startup continues.
+    expect(result.ok).toBe(false)
+    // 2. The bad remote never entered the router; local is untouched.
+    expect(router.has('personal')).toBe(false)
+    expect(router.get('local').enabled).toBe(true)
+    // 3. The orphaned transport was torn down (no leaked websocket).
+    expect(shutdown).toHaveBeenCalledTimes(1)
+    // 4. whoami surfaces local as healthy and personal as ✗ degraded,
+    //    sourced from the diagnostics registry.
+    const deps: IdentityToolDeps = { session, context, router, diagnostics }
+    const who = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+    expect(who.locations.local).toEqual({ enabled: true, organization: 'local' })
+    expect(who.locations.personal.enabled).toBe(false)
+    expect(who.locations.personal.degradation).toContain('Server Error')
   })
 })
 
