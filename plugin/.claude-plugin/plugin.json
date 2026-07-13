@@ -1,7 +1,7 @@
 {
   "name": "cccollab",
   "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "author": {
     "name": "FlatOut Solutions",
     "email": "stefan@flatout.solutions"
