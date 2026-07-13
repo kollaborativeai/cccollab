@@ -127,7 +127,9 @@ export class LocalTransport implements Transport {
   }
 
   async unarchiveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
-    await this.brokerPost(`/topics/${encodeURIComponent(args.topicId)}/unarchive`, {})
+    await this.brokerPost(`/topics/${encodeURIComponent(args.topicId)}/unarchive`, {
+      unarchivedBy: args.sessionName,
+    })
   }
 
   async sendTopicMessage(args: { sessionName: string; topicId: string; text: string }): Promise<void> {
