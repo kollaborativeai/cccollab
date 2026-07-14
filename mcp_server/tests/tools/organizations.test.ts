@@ -34,6 +34,32 @@ describe('list_organizations tool', () => {
     expect(result.organizations).toEqual([{ id: 'org_a', name: 'Acme', location: 'remote' }])
   })
 
+  it('surfaces the organization slug so the caller can introduce with it', async () => {
+    // KAI-407: the slug is the human-readable handle (it is what the org's
+    // web URL uses); the caller passes it straight back to `introduce`.
+    const fakeRemote = {
+      source: 'remote',
+      enabled: true,
+      listOrganizations: async () => [{ id: 'org_a', name: 'Acme', slug: 'acme' }],
+    }
+    const deps = makeDepsWithTransports([fakeRemote])
+    const result = JSON.parse(await handleListOrganizations(deps))
+    expect(result.organizations).toEqual([{ id: 'org_a', name: 'Acme', slug: 'acme', location: 'remote' }])
+  })
+
+  it('omits the slug for an organization that has none', async () => {
+    // Orgs predating slugs are addressable by id only — the row must not
+    // carry an empty/undefined `slug` key that a caller might echo back.
+    const fakeRemote = {
+      source: 'remote',
+      enabled: true,
+      listOrganizations: async () => [{ id: 'org_a', name: 'Acme' }],
+    }
+    const deps = makeDepsWithTransports([fakeRemote])
+    const result = JSON.parse(await handleListOrganizations(deps))
+    expect(result.organizations).toEqual([{ id: 'org_a', name: 'Acme', location: 'remote' }])
+  })
+
   it('returns an empty list when only the local transport is present', async () => {
     const deps = makeDepsWithTransports([]) // local-only router
     const result = JSON.parse(await handleListOrganizations(deps))

@@ -51,11 +51,13 @@ function createMockDeps(): IdentityToolDeps {
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
  * Optional `remoteOverrides` can be used to add extra methods to the fake
- * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ * remote transport (e.g. `getBoundOrganization` for the whoami tests).
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganization: () => Promise<{ name: string; slug?: string } | null>
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -274,16 +276,30 @@ describe('Identity Tools', () => {
 
       it('reports the bound organization name for a remote location', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => 'Acme',
+          getBoundOrganization: async () => ({ name: 'Acme' }),
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
+        expect('organizationSlug' in result.locations.remote).toBe(false)
+      })
+
+      it('reports the bound organization slug as its own field, not packed into the name', async () => {
+        // KAI-407: the slug is what `introduce` accepts, so it must be readable
+        // without parsing it back out of a display string — an org name may
+        // itself contain parentheses (`Acme (EU)`).
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganization: async () => ({ name: 'Acme (EU)', slug: 'acme_eu' }),
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme_eu' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme (EU)')
+        expect(result.locations.remote.organizationSlug).toBe('acme_eu')
       })
 
       it('omits organization when the remote location has no bound org yet', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => null,
+          getBoundOrganization: async () => null,
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))

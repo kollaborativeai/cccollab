@@ -351,7 +351,28 @@ describe('RemoteTransport — organizations', () => {
     )
   })
 
-  it('getBoundOrganizationName returns the org name from getSessionContext', async () => {
+  it('listOrganizations passes the org slug through from the listForUser query', async () => {
+    const { client } = makeStubClient(async () => [{ id: 'org_a', name: 'Acme', slug: 'acme' }])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    expect(await transport.listOrganizations()).toEqual([{ id: 'org_a', name: 'Acme', slug: 'acme' }])
+  })
+
+  it('getBoundOrganization returns the slug as its own field so whoami can hand it to introduce', async () => {
+    let queryCallCount = 0
+    const { client } = makeStubClient(
+      async () => {
+        queryCallCount++
+        if (queryCallCount === 1) return [] // introduce's listJoinedForUser preload
+        return { sessionName: 'reviewer', organizationName: 'Acme', organizationSlug: 'acme' }
+      },
+      async () => 'session_1',
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })
+    expect(await transport.getBoundOrganization()).toEqual({ name: 'Acme', slug: 'acme' })
+  })
+
+  it('getBoundOrganization returns the org name from getSessionContext, with no slug when it has none', async () => {
     let queryCallCount = 0
     const { client } = makeStubClient(
       async () => {
@@ -363,7 +384,7 @@ describe('RemoteTransport — organizations', () => {
     )
     const transport = new RemoteTransport({ client, log: () => {} })
     await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
-    expect(await transport.getBoundOrganizationName()).toBe('Acme')
+    expect(await transport.getBoundOrganization()).toEqual({ name: 'Acme' })
   })
 })
 

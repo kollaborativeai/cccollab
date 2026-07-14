@@ -457,14 +457,16 @@ export class RemoteTransport implements Transport {
 
   /**
    * Lists the authenticated user's organizations on KAI's deployment.
-   * Backs the `list_organizations` tool.
+   * Backs the `list_organizations` tool. `slug` (KAI-407) is absent on orgs
+   * that never got one; those remain addressable by `id`.
    */
-  async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+  async listOrganizations(): Promise<Array<{ id: string; name: string; slug?: string }>> {
     if (!this.enabled) return []
     try {
       return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
+        slug?: string
       }>
     } catch (err) {
       this.registerFailure('listOrganizations', err)
@@ -473,22 +475,32 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Returns the name of the organization this transport's session is bound
-   * to, or null when no session has been introduced or the lookup fails.
-   * Backs the `organization` field of `whoami`.
+   * Returns the organization this transport's session is bound to — its
+   * display `name`, plus its `slug` (KAI-407) when it has one. Backs the
+   * `organization` / `organizationSlug` fields of `whoami`. Null when no
+   * session has been introduced or the lookup fails.
+   *
+   * The slug is reported as its own field rather than folded into the name
+   * (`"Acme (acme)"`), because the point of surfacing it is that a caller can
+   * hand it straight back to `introduce` — and a name may itself contain
+   * parentheses (`Acme (EU)`), which would make the packed form ambiguous to
+   * pick apart.
    *
    * Errors are intentionally swallowed without `registerFailure` — this
    * method backs an informational status surface (`whoami`) that is polled
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  async getBoundOrganizationName(): Promise<string | null> {
+  async getBoundOrganization(): Promise<{ name: string; slug?: string } | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
       const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
         sessionId: this.sessionId,
-      })) as { organizationName: string }
-      return ctx.organizationName
+      })) as { organizationName: string; organizationSlug?: string }
+      return {
+        name: ctx.organizationName,
+        ...(ctx.organizationSlug ? { slug: ctx.organizationSlug } : {}),
+      }
     } catch {
       return null
     }
