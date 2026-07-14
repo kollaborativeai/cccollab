@@ -134,8 +134,30 @@ export async function handleIdentityTool(
       }
       const rebinds = (location: ChannelLocation): boolean => renamed || orgChangedLocations.has(location)
       const migrating = renamed || orgChangedLocations.size > 0
-      const subs = migrating ? remoteSubscriptionDeps(deps) : undefined
 
+      // The third trigger: a location that still holds membership but has NO
+      // live subscription. That is the fingerprint of an EARLIER migration that
+      // failed half-way (its feeds were torn down, its introduce then threw, so
+      // it was excluded from the restore). Without this, the natural fix — the
+      // agent retrying under the SAME name — leaves `renamed` false and nothing
+      // marks the location as needing work: the ungated channel re-join
+      // recreates backend membership while no subscription is ever
+      // re-registered, and the tool reports a clean success. The session would
+      // be permanently deaf and told it was fine.
+      //
+      // Computed BEFORE the teardown below, so it sees the breakage left by the
+      // EARLIER attempt rather than the one we are about to create.
+      const availableSubs = remoteSubscriptionDeps(deps)
+      const staleLocations = staleSubscriptionLocations(deps, availableSubs)
+
+      // A location needs its feeds restored if it rebinds (rename / org change)
+      // or if it is stale from a previous failure.
+      const restoresAt = (location: ChannelLocation): boolean => rebinds(location) || staleLocations.has(location)
+      const restoring = migrating || staleLocations.size > 0
+      const subs = restoring ? availableSubs : undefined
+
+      // Teardown and the old-identity leave are gated on `migrating` ALONE: a
+      // heal has nothing to tear down and no previous identity to leave.
       if (migrating) {
         // Drop the remote reactive subscriptions BEFORE the membership
         // rows they are gated on disappear. A live Convex `onUpdate` keeps
@@ -233,11 +255,11 @@ export async function handleIdentityTool(
       // transport). So a foreign-org topic is DROPPED - and reported, never
       // silently discarded.
       const droppedTopics: Array<{ topic: string; channel: string; location: ChannelLocation }> = []
-      if (migrating) {
+      if (restoring) {
         for (const topic of deps.context.getJoinedTopics()) {
           if (!introduced.has(topic.location)) continue
-          // A location that did not rebind was never torn down: nothing to redo.
-          if (!rebinds(topic.location)) continue
+          // Untouched and still subscribed ⇒ nothing to redo.
+          if (!restoresAt(topic.location)) continue
 
           if (orgChangedLocations.has(topic.location)) {
             droppedTopics.push({ topic: topic.topicName, channel: topic.channel, location: topic.location })
@@ -248,11 +270,12 @@ export async function handleIdentityTool(
             continue
           }
 
-          // Renamed, same org: re-join what the teardown dropped, or the rename
-          // silently evicts the session from its own topics. Strictly after the
-          // channel loop - the broker rejects a topic join from a session that
-          // isn't in the topic's channel. The returned history is discarded
-          // rather than re-emitted as fresh messages: we already have it.
+          // Same org — either renamed, or healing a torn-down feed. Re-join what
+          // was dropped, or the session stays evicted from its own topics.
+          // Strictly after the channel loop - the broker rejects a topic join
+          // from a session that isn't in the topic's channel. The returned
+          // history is discarded rather than re-emitted as fresh messages: we
+          // already have it.
           try {
             const transport = deps.router.get(topic.location)
             await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
@@ -268,6 +291,14 @@ export async function handleIdentityTool(
         // org-changed location the channel subscription re-registers against
         // the NEW channelId that the joinChannel above just cached.
         if (subs) resubscribeRemote(deps, subs, introduced)
+      }
+
+      // Truthfulness: re-check the same invariant AFTER the restore attempt. A
+      // non-local location that still holds membership with no live
+      // subscription is still deaf — we must never again hand back a clean
+      // success while the session cannot hear.
+      for (const location of staleSubscriptionLocations(deps, availableSubs)) {
+        if (!failed.includes(location)) failed.push(location)
       }
 
       return JSON.stringify({
@@ -335,6 +366,42 @@ function membershipLocations(deps: IdentityToolDeps): Set<string> {
   for (const ch of deps.context.getSubscribedChannels()) locations.add(ch.location)
   for (const topic of deps.context.getJoinedTopics()) locations.add(topic.location)
   return locations
+}
+
+/**
+ * Locations that hold a membership with NO live reactive subscription behind
+ * it — i.e. the session is deaf there. That is the fingerprint of a migration
+ * that failed half-way: the feeds were torn down, the introduce then threw, and
+ * the restore was skipped. Detecting it is what lets a plain same-name retry
+ * HEAL the session instead of silently confirming the deafness.
+ *
+ * The expected keys mirror `attach.ts`: `${location}::${channelName}` and
+ * `${location}::${topicId}`.
+ *
+ * LOCAL is NEVER stale. The broker delivers over one shared SSE stream and
+ * holds no per-channel/per-topic subscription entries at all, so every local
+ * location would look permanently "missing" and we would churn a pointless
+ * re-join on every single introduce.
+ *
+ * Returns empty when the caller has no subscription maps (legacy deps that
+ * never wired the hot-attach plumbing): with nothing to inspect we cannot
+ * conclude anything is stale.
+ */
+function staleSubscriptionLocations(
+  deps: IdentityToolDeps,
+  subs: RemoteSubscriptionDeps | undefined,
+): Set<ChannelLocation> {
+  const stale = new Set<ChannelLocation>()
+  if (subs === undefined) return stale
+  for (const ch of deps.context.getSubscribedChannels()) {
+    if (ch.location === LOCAL_LOCATION) continue
+    if (!subs.channelMap.has(`${ch.location}::${ch.name}`)) stale.add(ch.location)
+  }
+  for (const topic of deps.context.getJoinedTopics()) {
+    if (topic.location === LOCAL_LOCATION) continue
+    if (!subs.topicMap.has(`${topic.location}::${topic.threadTs}`)) stale.add(topic.location)
+  }
+  return stale
 }
 
 /** The subset of deps needed to move the remote reactive subscriptions
