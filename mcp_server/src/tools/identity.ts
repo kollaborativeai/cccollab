@@ -122,8 +122,11 @@ export async function handleIdentityTool(
       // arg string, we fail SAFE: reject rather than half-migrate. Precise
       // handling that treats id and slug of the same org as unchanged is
       // deferred to a follow-up on the backend's resolved org id.
-      const previousOrg = deps.session.getOrganization()
-      const orgChanged = previousOrg !== undefined && organization !== undefined && previousOrg !== organization
+      const orgChanged = [...membershipLocations(deps)].some((location) => {
+        if (location === LOCAL_LOCATION) return false
+        const previousOrg = deps.session.getOrganizationFor(location)
+        return previousOrg !== undefined && organization !== undefined && previousOrg !== organization
+      })
       if (deps.session.hasName() && !renamed && orgChanged) {
         return JSON.stringify({
           error:
@@ -158,8 +161,6 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
-      // Record the org so the NEXT re-introduce can detect a change against it.
-      deps.session.setOrganization(organization)
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Track
@@ -177,6 +178,15 @@ export async function handleIdentityTool(
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
           introduced.add(transport.source)
+          // Record the org binding ONLY where the row actually rebound, and
+          // only off-broker: the local broker is single-tenant and ignores
+          // organizationId, so an org is meaningless there — and tracking one
+          // would let an org switch mark LOCAL as changed and drop the user's
+          // local topics. A location whose introduce threw keeps its previous
+          // binding, so the next introduce still sees the change and migrates it.
+          if (organization !== undefined && transport.source !== LOCAL_LOCATION) {
+            deps.session.setOrganizationFor(transport.source, organization)
+          }
         } catch {
           failed.push(transport.source)
         }

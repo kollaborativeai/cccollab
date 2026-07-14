@@ -111,27 +111,30 @@ describe('SessionManager', () => {
   })
 
   describe('organization', () => {
-    it('is undefined until set', () => {
+    it('is undefined for a location until one is recorded', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      expect(sm.getOrganization()).toBeUndefined()
+      expect(sm.getOrganizationFor('remote')).toBeUndefined()
     })
 
-    it('records the introduced organization', () => {
+    it('records the organization per location', () => {
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      sm.setOrganization('org_1')
-      expect(sm.getOrganization()).toBe('org_1')
+      sm.setOrganizationFor('remote', 'org_1')
+      expect(sm.getOrganizationFor('remote')).toBe('org_1')
     })
 
-    it('does not clobber a tracked organization with undefined', () => {
-      // The org binding is monotonic for the session's lifetime: an org-less
-      // re-introduce must never erase a tracked org (that would disarm the
-      // org-change rejection). It may still be UPDATED to another concrete org.
+    it('tracks each location independently, so one location moving does not move another', () => {
+      // A location's row only rebinds when ITS OWN introduce succeeds. If
+      // introduce succeeds at one location and fails at another, the failed
+      // one must keep its previous binding — otherwise the next re-introduce
+      // sees "no change" there, skips the migration, and strands a ghost.
       const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
-      sm.setOrganization('org_1')
-      sm.setOrganization(undefined)
-      expect(sm.getOrganization()).toBe('org_1')
-      sm.setOrganization('org_2')
-      expect(sm.getOrganization()).toBe('org_2')
+      sm.setOrganizationFor('remoteA', 'org_1')
+      sm.setOrganizationFor('remoteB', 'org_1')
+
+      sm.setOrganizationFor('remoteA', 'org_2')
+
+      expect(sm.getOrganizationFor('remoteA')).toBe('org_2')
+      expect(sm.getOrganizationFor('remoteB')).toBe('org_1')
     })
   })
 })

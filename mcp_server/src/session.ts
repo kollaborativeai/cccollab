@@ -13,7 +13,7 @@ export class SessionManager {
   private projectName: string
   private name: string | undefined
   private objective: string | undefined
-  private organization: string | undefined
+  private readonly organizations = new Map<string, string>()
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -44,24 +44,25 @@ export class SessionManager {
     return this.objective
   }
 
-  /** The organization this session most recently introduced into. The
-   *  backend keys CLI sessions by (user, org, sessionName), so this is
-   *  tracked to detect an org change on a same-name re-introduce, which
-   *  would rebind the backend row and orphan the old memberships.
+  /** The organization each LOCATION is currently bound to.
    *
-   *  An `undefined` org NEVER clobbers a tracked one. Unlike `objective`,
-   *  this binding is monotonic for the session's lifetime: an org-less
-   *  re-introduce (reachable once every remote has self-disabled, since the
-   *  `hasRemote` gate then stops requiring an `organization`) must not ERASE
-   *  the tracked org — doing so would disarm the org-change rejection for the
-   *  rest of the session. There is no case where clearing it is meaningful. */
-  setOrganization(organization: string | undefined): void {
-    if (organization === undefined) return
-    this.organization = organization
+   *  Per-location, not per-session: the backend keys CLI sessions by
+   *  (user, org, sessionName), and a location's row only actually rebinds to a
+   *  new org once ITS introduce succeeds. If introduce succeeds at one location
+   *  and fails at another, recording the org globally would leave the failed
+   *  one still on the OLD org on its backend while we believe it moved — so the
+   *  next re-introduce would see "no change" there, skip its migration, and
+   *  strand a ghost.
+   *
+   *  The setter takes a DEFINED string, so an org-less introduce structurally
+   *  cannot clobber a tracked binding (callers only record on success, with a
+   *  defined org). Nothing ever clears a binding. */
+  setOrganizationFor(location: string, organization: string): void {
+    this.organizations.set(location, organization)
   }
 
-  getOrganization(): string | undefined {
-    return this.organization
+  getOrganizationFor(location: string): string | undefined {
+    return this.organizations.get(location)
   }
 
   /** Format a thread message with short display name */

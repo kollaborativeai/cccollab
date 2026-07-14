@@ -812,7 +812,7 @@ describe('Identity Tools', () => {
           // the reject path leaked the new org onto the session, the very next
           // (identical) call would see orgChanged === false and sail through
           // with no teardown — the defect, resurrected by a plain retry.
-          expect(deps.session.getOrganization()).toBe('org_1')
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
           expect(deps.session.displayName).toBe('a')
         })
 
@@ -833,15 +833,16 @@ describe('Identity Tools', () => {
 
           expect(JSON.parse(first).error).toMatch(/different organization/i)
           expect(JSON.parse(second).error).toMatch(/different organization/i)
-          expect(deps.session.getOrganization()).toBe('org_1')
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
           expect(calls).toEqual([])
         })
 
-        it('keeps the guard armed when an org-less re-introduce omits the organization', async () => {
-          // Once every remote has self-disabled, the `hasRemote` gate no
-          // longer requires an `organization`, so an org-less re-introduce is
-          // reachable. It must not ERASE the tracked org — that would disarm
-          // the reject above for the rest of the session.
+        it('an org-less re-introduce does not erase a location’s tracked org', async () => {
+          // Once every remote has self-disabled, the `hasRemote` gate no longer
+          // requires an `organization`, so an org-less re-introduce is
+          // reachable. It must not ERASE the tracked binding — the location is
+          // still on org_1 on its backend, and forgetting that would make the
+          // next introduce believe there is nothing to migrate.
           const calls: RecordedCall[] = []
           const transport = makeRecordingRemoteTransport('remote', calls)
           const deps: IdentityToolDeps = {
@@ -855,14 +856,55 @@ describe('Identity Tools', () => {
           // The remote self-disables; an org-less re-introduce now passes the gate.
           transport.enabled = false
           await handleIdentityTool('introduce', { name: 'a' }, deps)
-          expect(deps.session.getOrganization()).toBe('org_1')
 
-          calls.length = 0
-          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
+        })
 
-          expect(JSON.parse(result).error).toMatch(/different organization/i)
-          expect(deps.session.getOrganization()).toBe('org_1')
-          expect(calls).toEqual([])
+        it('does not record the new org for a location whose introduce FAILED', async () => {
+          // The org binding is per-location and is only true once that
+          // location's backend row actually rebound. Recording it globally and
+          // unconditionally means a location whose introduce threw is still on
+          // the OLD org on its backend while we believe it is on the new one —
+          // so the NEXT re-introduce sees "no change" there, skips its
+          // migration, and leaves the ghost behind.
+          const calls: RecordedCall[] = []
+          const remote = makeRecordingRemoteTransport('remote', calls, { introduceThrowsAfter: 1 })
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([remote]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
+
+          // Name AND org change, but this location's introduce throws.
+          await handleIdentityTool('introduce', { name: 'b', organization: 'org_2' }, deps)
+
+          // Its row never rebound ⇒ it is still on org_1. Recording org_2 here
+          // would silently disarm the next migration for this location.
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
+        })
+
+        it('records the org per-location, and never for the single-tenant local broker', async () => {
+          const localCalls: RecordedCall[] = []
+          const remoteCalls: RecordedCall[] = []
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([
+              makeRecordingTransport('local', localCalls),
+              makeRecordingRemoteTransport('remote', remoteCalls),
+            ]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'local')
+
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
+          // The local broker is single-tenant and ignores organizationId, so an
+          // org is meaningless there — and must never make local look "changed".
+          expect(deps.session.getOrganizationFor('local')).toBeUndefined()
         })
 
         it('allows a simultaneous name-and-org change (migration proceeds)', async () => {
