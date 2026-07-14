@@ -35,7 +35,7 @@ interface HarnessDeps {
   context: ActiveContext
   router: TransportRouter
   locations: ResolvedLocation[]
-  localEventsConnected: () => boolean
+  localEventStream: () => { connected: boolean; mayHaveMissedMessages: boolean }
 }
 
 interface SessionHarness {
@@ -76,7 +76,10 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
     context,
     router,
     locations: [{ name: 'local', isLocal: true, channels: [] }],
-    localEventsConnected: () => listener.isConnected(),
+    localEventStream: () => ({
+      connected: listener.isConnected(),
+      mayHaveMissedMessages: listener.mayHaveMissedEvents(),
+    }),
   }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
@@ -355,6 +358,48 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
    * tests gate on a synthetic event; this proves the whole chain
    * (broker fan-out -> SSE -> listener -> MessageBus) actually delivers.
    */
+  /**
+   * The reconnect hole, end to end, against a REAL broker and a REAL SSE stream.
+   * This is the test that the previous suite could not fail: it published inside
+   * one unbroken stream, so the gap never existed. Here the stream is dropped
+   * mid-flight, a worker publishes into the hole, and the watcher must STILL
+   * receive it once the stream comes back — from its cursor, not from luck.
+   */
+  it('a watching orchestrator misses NOTHING published while its event stream was down', async () => {
+    const ORCH = await makeSession('gap-orchestrator', brokerPort)
+    const WORKER = await makeSession('gap-worker', brokerPort)
+    try {
+      await handleChannelTool('join_channel', { name: 'gap-ch', watch: true }, ORCH.channelDeps)
+      await handleChannelTool('join_channel', { name: 'gap-ch' }, WORKER.channelDeps)
+      await handleTopicTool('start_topic', { topic: 'KAI-GAP', channel: 'gap-ch' }, WORKER.topicDeps)
+      ORCH.received.length = 0
+
+      // The stream goes down. In production this is a broker restart, a laptop
+      // sleeping, a transient socket error — and it used to swallow everything
+      // published until the listener came back, silently.
+      ORCH.listener.dropStream()
+      await waitUntil(() => (ORCH.listener.isConnected() ? null : true), 3000)
+      expect(ORCH.listener.isConnected()).toBe(false)
+
+      await handleTopicTool('send_message_to_topic', { text: 'published INTO the gap' }, WORKER.topicDeps)
+
+      // The listener reconnects on its own and resumes from its cursor.
+      await waitUntil(() => (ORCH.listener.isConnected() ? true : null), 10_000)
+      await waitUntil(() => (ORCH.received.some((m) => m.text === 'published INTO the gap') ? true : null), 10_000)
+
+      const recovered = ORCH.received.find((m) => m.text === 'published INTO the gap')
+      expect(recovered).toBeDefined()
+      expect(recovered?.topicName).toBe('KAI-GAP')
+      // Nothing was lost, so the session must NOT claim it may have missed anything.
+      expect(ORCH.listener.mayHaveMissedEvents()).toBe(false)
+      const who = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(who.eventStream).toEqual({ connected: true, mayHaveMissedMessages: false })
+    } finally {
+      ORCH.listener.stop()
+      WORKER.listener.stop()
+    }
+  }, 30_000)
+
   it('a watching orchestrator sees a topic it never joined; an ordinary session does not', async () => {
     const ORCH = await makeSession('watch-orchestrator', brokerPort)
     const WORKER = await makeSession('watch-worker', brokerPort)

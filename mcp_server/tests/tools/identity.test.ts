@@ -177,7 +177,13 @@ describe('Identity Tools', () => {
         deps.context.joinChannel('quiet', 'manual', 'local')
         await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
 
-        const result = JSON.parse(await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => true }))
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
         expect(result.subscribedChannels).toEqual([
           { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: true },
           { name: 'quiet', location: 'local', source: 'manual', watching: false, watchingActive: false },
@@ -197,7 +203,11 @@ describe('Identity Tools', () => {
         await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
 
         const result = JSON.parse(
-          await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => false }),
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }) },
+          ),
         )
         expect(result.subscribedChannels).toEqual([
           { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: false },
@@ -214,10 +224,57 @@ describe('Identity Tools', () => {
         deps.context.joinChannel('kai', 'manual', 'flatout', true)
         await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
 
-        const result = JSON.parse(await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => true }))
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
         expect(result.subscribedChannels).toEqual([
           { name: 'kai', location: 'flatout', source: 'manual', watching: true, watchingActive: false },
         ])
+      })
+
+      // The lesson of KAI-408/KAI-418, applied here: `watching` reports the
+      // REQUEST, `watchingActive` reports "a socket is open NOW". Neither can
+      // say "I MAY HAVE MISSED MESSAGES" — and a health signal that cannot say
+      // that is an unsound oracle. whoami must be able to say it.
+      it('admits it may have missed messages when the event stream reported an unfillable gap (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: true }) },
+          ),
+        )
+        // The socket is open, so the watch IS live — but the session has a hole
+        // in its history and must not pretend otherwise.
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: true },
+        ])
+        expect(result.eventStream).toEqual({ connected: true, mayHaveMissedMessages: true })
+      })
+
+      it('reports a clean event stream as having missed nothing (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
+        expect(result.eventStream).toEqual({ connected: true, mayHaveMissedMessages: false })
       })
 
       it('omits activeTopic when none set', async () => {

@@ -36,11 +36,14 @@ export interface IdentityToolDeps {
    *  (channel messages not delivered to other remote subscribers) is
    *  covered by the same hot-attach wiring. */
   remoteChannelUnsubscribes?: Map<string, () => void>
-  /** Is the local broker's SSE stream currently connected? The only carrier of
-   *  local topic traffic, so `whoami` needs it to say whether a channel watch
-   *  is actually in effect rather than merely requested. Optional: absent means
-   *  unknown, which reports as NOT active. */
-  localEventsConnected?: () => boolean
+  /** Health of the local broker's SSE stream — the only carrier of local topic
+   *  traffic. `connected` answers "is a watch in effect RIGHT NOW";
+   *  `mayHaveMissedMessages` answers the question a socket cannot: "is there a
+   *  hole in what I heard?". Both are needed: an open socket says nothing about
+   *  what was published while it was closed. Optional: absent means unknown,
+   *  which reports as not-active (under-claiming is recoverable; over-claiming
+   *  is the bug). */
+  localEventStream?: () => { connected: boolean; mayHaveMissedMessages: boolean }
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -137,7 +140,8 @@ export async function handleIdentityTool(
       // `watching: true` that ignores that is exactly the confidently-blind
       // report KAI-414 exists to eliminate. Unknown liveness reads as NOT
       // active: under-claiming is recoverable, over-claiming is the bug.
-      const localEventsLive = deps.localEventsConnected?.() === true
+      const stream = deps.localEventStream?.() ?? { connected: false, mayHaveMissedMessages: false }
+      const localEventsLive = stream.connected
       const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
         name: c.name,
         location: c.location,
@@ -168,6 +172,11 @@ export async function handleIdentityTool(
             }
           : {}),
         subscribedChannels,
+        // Stream health, separate from any one channel: `connected` is "am I
+        // hearing things now", `mayHaveMissedMessages` is "did I lose any while
+        // I wasn't". A watch that can only answer the first is an unsound
+        // oracle — see KAI-414.
+        eventStream: { connected: stream.connected, mayHaveMissedMessages: stream.mayHaveMissedMessages },
         locations: locationStates,
       })
     }

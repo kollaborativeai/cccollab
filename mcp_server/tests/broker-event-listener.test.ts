@@ -455,9 +455,10 @@ describe('BrokerEventListener connection state (KAI-414)', () => {
 
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
     session.setName('orchestrator')
+    const bus = createMockMessageBus()
     const listener = new BrokerEventListener({
       brokerUrl: `http://127.0.0.1:${port}`,
-      messageBus: createMockMessageBus() as never,
+      messageBus: bus as never,
       sessionManager: session,
       context: new ActiveContext(),
     })
@@ -493,4 +494,129 @@ describe('BrokerEventListener connection state (KAI-414)', () => {
       listener.stop()
     }
   })
+})
+
+/**
+ * The listener half of the reconnect fix (KAI-414). A dropped SSE stream must
+ * resume FROM A CURSOR (`Last-Event-ID`), so messages published during the gap
+ * still arrive. And when the server says it cannot fill the gap, the listener
+ * must remember that it may have missed messages — a health signal that cannot
+ * say "I may have missed something" is an unsound oracle.
+ */
+describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
+  it('resumes from its cursor after a drop, so messages published during the gap still arrive', async () => {
+    const delivered: string[] = []
+    let connections = 0
+    let resumedFrom: string | undefined
+
+    // A stand-in broker: it drops the first connection, and on the reconnect it
+    // honours Last-Event-ID by replaying what was published during the outage.
+    const server = http.createServer((req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      if (connections === 1) {
+        res.write(
+          'id: b1:1\ndata: ' +
+            JSON.stringify({
+              source: 'local',
+              type: 'message',
+              channel: 'default',
+              topicId: 't1',
+              topicName: 'KAI-1',
+              sender: 'worker',
+              text: 'before the drop',
+            }) +
+            '\n\n',
+        )
+        setTimeout(() => res.destroy(), 30)
+        return
+      }
+      resumedFrom = req.headers['last-event-id'] as string | undefined
+      res.write(
+        'id: b1:2\ndata: ' +
+          JSON.stringify({
+            source: 'local',
+            type: 'message',
+            channel: 'default',
+            topicId: 't1',
+            topicName: 'KAI-1',
+            sender: 'worker',
+            text: 'DURING the gap',
+          }) +
+          '\n\n',
+      )
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const context = new ActiveContext()
+    context.joinChannel('default', 'manual', 'local', true)
+    const bus = {
+      push: vi.fn(async (m: { text: string }) => {
+        delivered.push(m.text)
+      }),
+    }
+
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: bus as never,
+      sessionManager: session,
+      context,
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(delivered).toContain('DURING the gap'), { timeout: 10_000 })
+      expect(resumedFrom).toBe('b1:1')
+      expect(listener.mayHaveMissedEvents()).toBe(false)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
+
+  it('admits it may have missed messages when the broker reports a gap it cannot fill', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            source: 'local',
+            type: 'stream_gap',
+            reason: 'cursor is from a previous broker instance',
+          }) +
+          '\n\n',
+      )
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const bus = createMockMessageBus()
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: bus as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      expect(listener.mayHaveMissedEvents()).toBe(false)
+      await listener.start()
+      await vi.waitFor(() => expect(listener.mayHaveMissedEvents()).toBe(true))
+      // ...and it must TELL the session, not just remember it. An orchestrator
+      // that has to run whoami to discover it went deaf is still blind.
+      await vi.waitFor(() =>
+        expect(bus.push).toHaveBeenCalledWith(
+          expect.objectContaining({ sender: 'cccollab', text: expect.stringContaining('WARNING') }),
+        ),
+      )
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 10_000)
 })
