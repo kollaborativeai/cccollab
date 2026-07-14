@@ -159,3 +159,74 @@ describe('integration: rename over the real tool + real RemoteTransport', () => 
     expect(liveFeed(feeds, 'messages:listByChannel')).toHaveLength(0)
   })
 })
+
+/**
+ * The invariant this whole area exists to protect:
+ *
+ *   For every (location, channel|topic) membership in ActiveContext at an
+ *   ENABLED non-local location, there MUST be a LIVE feed on that location's
+ *   CURRENT transport. Anything else is a deaf session, and a deaf session must
+ *   NEVER be reported as a clean success.
+ *
+ * `authenticate` -> `attachLocation` swaps a transport in place: the prior one is
+ * shut down (its whole feed registry dies with it) and the new one auto-subscribes
+ * ONLY the channels/topics named in cccollab.json. Anything joined at RUNTIME
+ * (join_channel / join_topic / start_topic) therefore lives on in ActiveContext
+ * with no feed at all on the new transport — a membership with NO registry entry,
+ * which a registry-driven "is anything suspended?" oracle cannot see, and which a
+ * restore path that only un-suspends EXISTING entries cannot repair.
+ */
+describe('integration: a transport swapped in place must not leave the session deaf', () => {
+  it('re-creates feeds for RUNTIME-joined memberships on the new transport', async () => {
+    const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+    const context = new ActiveContext()
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+
+    // The ORIGINAL transport, with a runtime-joined channel and topic.
+    const first = makeConvexStub(['session_first'])
+    const original = new RemoteTransport({ client: first.client, source: 'remote', log: () => {} })
+    const deps: IdentityToolDeps = {
+      session,
+      context,
+      router: new TransportRouter([original]),
+      messageBus,
+    }
+    await handleIdentityTool('introduce', { name: 'agent', organization: 'org_a' }, deps)
+
+    // Joined at RUNTIME — NOT from cccollab.json, so the auto-subscribe on a
+    // future attach will not know about either of these.
+    context.joinChannel('dev', 'manual', 'remote')
+    await original.joinChannel({ sessionName: 'agent', channel: 'dev' })
+    await original.joinTopic({ sessionName: 'agent', topicId: 'topic_1' })
+    context.joinTopic('topic_1', 'KAI-418', 'dev', 'remote')
+    ensureChannelSubscription({ transport: original, channelName: 'dev', messageBus })
+    ensureTopicSubscription({ transport: original, topicId: 'topic_1', channelName: 'dev', messageBus })
+    expect(liveFeed(first.feeds, 'messages:listByTopic')).toHaveLength(1)
+    expect(liveFeed(first.feeds, 'messages:listByChannel')).toHaveLength(1)
+
+    // THE SWAP (what authenticate/attachLocation does): the prior transport is
+    // shut down and a brand-new one takes its place under the same name. The new
+    // transport's feed registry is EMPTY — the memberships still stand in
+    // ActiveContext, but nothing is listening for them.
+    const second = makeConvexStub(['session_second'])
+    const replacement = new RemoteTransport({ client: second.client, source: 'remote', log: () => {} })
+    await original.shutdown!()
+    deps.router.register(replacement, { replace: true })
+    expect(liveFeed(first.feeds, 'messages:listByTopic')).toHaveLength(0)
+    expect(liveFeed(second.feeds, 'messages:listByChannel')).toHaveLength(0)
+
+    // Now the agent re-introduces (same name — the natural thing to do).
+    const result = JSON.parse(await handleIdentityTool('introduce', { name: 'agent', organization: 'org_a' }, deps))
+
+    // The session must end up ABLE TO HEAR on the new transport...
+    const topicFeeds = liveFeed(second.feeds, 'messages:listByTopic')
+    const channelFeeds = liveFeed(second.feeds, 'messages:listByChannel')
+    expect(topicFeeds).toHaveLength(1)
+    expect(channelFeeds).toHaveLength(1)
+    expect(topicFeeds[0]!.args).toMatchObject({ sessionId: 'session_second', topicId: 'topic_1' })
+    expect(channelFeeds[0]!.args).toMatchObject({ sessionId: 'session_second' })
+
+    // ...and it must not be reported as a clean success if it cannot.
+    expect(result.degraded).toBeUndefined()
+  })
+})

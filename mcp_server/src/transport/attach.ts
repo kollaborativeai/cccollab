@@ -200,7 +200,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
       // reads the channel name back out of the context — so a raw key like
       // "Dev" would key the subscription map under `remote::Dev` while every
       // later lookup asks for `remote::dev`. That mismatch silently defeats
-      // `teardownChannelSubscription` and `forgetChannelCursor` on leave, and —
+      // `forgetChannelFeed` on leave, and —
       // because the identity tool's stale-subscription check reads the context
       // name — makes the location look permanently un-subscribed, so EVERY
       // re-introduce registers another live feed for the same channel and each
@@ -274,6 +274,17 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
         }
       }
     }
+  }
+
+  // Step 7: reconcile. Auto-subscribe above only recreates what `cccollab.json`
+  // names. A replace-in-place swap killed the PRIOR transport's whole feed
+  // registry, so every membership the session joined at RUNTIME (join_channel /
+  // join_topic / start_topic) is still in the context with nothing listening for
+  // it on the new transport. Without this the session goes silently deaf on
+  // exactly the channels and topics the user chose by hand. Idempotent, so it
+  // does not double-register what step 6 just created.
+  if (displayName !== undefined) {
+    reconcileFeeds({ transport, location: name, context: ctx.context, messageBus: ctx.messageBus })
   }
 
   // Step 8: cascade active state iff no channel is currently active.
@@ -570,22 +581,20 @@ export function hasChannelSubscription(transport: Transport): transport is Trans
 /** Type guard: does this transport carry a per-channel delivery cursor that a
  *  deliberate `leave_channel` should forget? Only remote transports do; the
  *  local broker replays nothing on re-join. */
-export function hasChannelCursor(transport: Transport): transport is Transport & {
-  forgetChannelCursor: RemoteTransport['forgetChannelCursor']
-} {
-  return typeof (transport as { forgetChannelCursor?: unknown }).forgetChannelCursor === 'function'
-}
-
 /** Type guard: can this transport be asked to forget a feed outright — i.e.
  *  does it own a feed registry (KAI-418)? Only remote transports do. */
 export function hasFeedRegistry(transport: Transport): transport is Transport & {
   forgetTopicFeed: RemoteTransport['forgetTopicFeed']
   forgetChannelFeed: RemoteTransport['forgetChannelFeed']
   suspendedFeeds: RemoteTransport['suspendedFeeds']
+  hasLiveTopicFeed: RemoteTransport['hasLiveTopicFeed']
+  hasLiveChannelFeed: RemoteTransport['hasLiveChannelFeed']
 } {
   return (
     typeof (transport as { forgetTopicFeed?: unknown }).forgetTopicFeed === 'function' &&
     typeof (transport as { forgetChannelFeed?: unknown }).forgetChannelFeed === 'function' &&
+    typeof (transport as { hasLiveTopicFeed?: unknown }).hasLiveTopicFeed === 'function' &&
+    typeof (transport as { hasLiveChannelFeed?: unknown }).hasLiveChannelFeed === 'function' &&
     typeof (transport as { suspendedFeeds?: unknown }).suspendedFeeds === 'function'
   )
 }
@@ -618,17 +627,6 @@ export function ensureChannelSubscription(args: {
 }
 
 /**
- * Drop a channel's feed for good, along with the feeds of every topic inside
- * it. This is the DELIBERATE leave (`leave_channel`) — intent the transport
- * cannot infer, since the identity migration issues the very same
- * `leaveChannel` call and there the feed must merely SUSPEND so a later
- * re-join restores it. Same reasoning as `forgetChannelCursor`.
- */
-export function teardownChannelSubscription(args: { transport: Transport; channelName: string }): void {
-  if (!hasFeedRegistry(args.transport)) return
-  args.transport.forgetChannelFeed(args.channelName)
-}
-
 /**
  * CREATE a topic-message feed on a remote transport. See
  * `ensureChannelSubscription` — creation here, lifecycle in the transport.
@@ -657,11 +655,72 @@ export function ensureTopicSubscription(args: {
   )
 }
 
-/** Drop a topic's feed for good — the DELIBERATE `leave_topic` / `archive_topic`.
- *  See `teardownChannelSubscription`. */
-export function teardownTopicSubscription(args: { transport: Transport; topicId: string }): void {
-  if (!hasFeedRegistry(args.transport)) return
-  args.transport.forgetTopicFeed(args.topicId)
+/**
+ * THE invariant, in one place:
+ *
+ *   for every (channel|topic) membership ActiveContext holds at this location,
+ *   the location's CURRENT transport must have a LIVE feed.
+ *
+ * Deafness has three shapes and only one of them is "a feed exists but is
+ * suspended". A feed can also be MISSING outright — `attachLocation` swaps a
+ * transport in place and the replacement starts with an empty registry, while
+ * auto-subscribe only recreates what `cccollab.json` names, so anything joined
+ * at RUNTIME survives in the context with nothing listening for it. And a
+ * channel feed can exist, hold a non-null handle, and still never have attached
+ * (its async id lookup threw or matched nothing).
+ *
+ * So the check is MEMBERSHIP-driven, never registry-driven: walk the context and
+ * ask the transport whether it can actually hear. Missing counts as deaf exactly
+ * like suspended.
+ *
+ * `ensure*Subscription` is idempotent against the registry, so reconciling is
+ * safe to call on every introduce and on every attach: an existing live feed is
+ * left alone, a missing one is CREATED. Creation has to stay here rather than in
+ * the transport because only this layer holds the MessageBus callback, and a
+ * brand-new transport has no callback to recreate a feed from.
+ */
+export function reconcileFeeds(args: {
+  transport: Transport
+  location: string
+  context: ActiveContext
+  messageBus: MessageBus
+}): void {
+  if (args.location === LOCAL_LOCATION) return
+  for (const ch of args.context.getSubscribedChannels()) {
+    if (ch.location !== args.location) continue
+    ensureChannelSubscription({ transport: args.transport, channelName: ch.name, messageBus: args.messageBus })
+  }
+  for (const topic of args.context.getJoinedTopics()) {
+    if (topic.location !== args.location) continue
+    ensureTopicSubscription({
+      transport: args.transport,
+      topicId: topic.threadTs,
+      channelName: topic.channel,
+      messageBus: args.messageBus,
+    })
+  }
+}
+
+/**
+ * Memberships this location holds with NO live feed behind them — i.e. exactly
+ * where the session is deaf. See `reconcileFeeds` for why this is driven off the
+ * context's memberships rather than off the transport's registry.
+ *
+ * LOCAL is never deaf: the broker delivers over one shared SSE stream and holds
+ * no per-feed entries at all, so it would look permanently missing.
+ */
+export function isLocationDeaf(args: { transport: Transport; location: string; context: ActiveContext }): boolean {
+  if (args.location === LOCAL_LOCATION) return false
+  if (!hasFeedRegistry(args.transport)) return false
+  for (const ch of args.context.getSubscribedChannels()) {
+    if (ch.location !== args.location) continue
+    if (!args.transport.hasLiveChannelFeed(ch.name)) return true
+  }
+  for (const topic of args.context.getJoinedTopics()) {
+    if (topic.location !== args.location) continue
+    if (!args.transport.hasLiveTopicFeed(topic.threadTs)) return true
+  }
+  return false
 }
 
 /** Highest history message ts as epoch ms, or undefined when the array

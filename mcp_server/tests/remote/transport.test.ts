@@ -170,7 +170,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const delivered: Array<{ ts: string; text: string }> = []
     const onEvent = (msg: { ts: string; text: string }) => delivered.push(msg)
 
-    const unsub1 = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
     // Simulate Convex delivering two messages.
     callbacks[0]!([
       { _id: 'msg_1', fromSessionId: 'alice', text: 'first', ts: 1_700_000_100_000 },
@@ -179,7 +179,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     expect(delivered).toHaveLength(2)
     expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1' })
 
-    unsub1()
+    transport.forgetTopicFeed('t1')
 
     // Resubscribe: sinceTs must be the highest ts seen so far.
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
@@ -785,14 +785,14 @@ describe('RemoteTransport re-subscription after a re-introduce', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     await transport.introduce({ sessionName: 'bootstrap' })
-    const unsubscribe = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
     expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1', sessionId: 'session_bootstrap' })
 
     // Deliver a message so the transport's own high-water mark advances.
     callbacks[0]!([{ _id: 'm1', fromSessionId: 'session_alice', text: 'hi', ts: 1_700_000_200_000 }])
 
     // The rename: tear the old subscription down, re-introduce, re-subscribe.
-    unsubscribe()
+    transport.forgetTopicFeed('t1')
     await transport.introduce({ sessionName: 'kai-408' })
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
 
@@ -863,13 +863,12 @@ describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
 
     await transport.introduce({ sessionName: 'me' })
     await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
-    const unsub = transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
     // Deliver a broadcast so the delivered cursor advances to 300.
     callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
 
-    // Deliberate leave_channel: drop the subscription AND forget the cursor.
-    unsub()
-    transport.forgetChannelCursor('dev')
+    // Deliberate leave_channel: drops the feed AND forgets the cursor (one call).
+    transport.forgetChannelFeed('dev')
 
     // A large backlog accrues while the session is away.
     joinLatestTs = 99_999

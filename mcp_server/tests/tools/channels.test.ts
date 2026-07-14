@@ -144,7 +144,8 @@ describe('Channel Tools', () => {
      * would replay everything since the last delivered message as fresh inbound
      * notifications. Only the tool layer knows which leave this is, so the
      * forget lives here — and this test drives the real `leave_channel` tool to
-     * pin that WIRING, not just the transport method it calls.
+     * pin that WIRING, not just the transport method it calls. The cursor is
+     * dropped by `forgetChannelFeed` itself, so the wiring is a single call.
      */
     it('forgets the remote channel cursor, so a later re-join skips the backlog', async () => {
       const forgotten: string[] = []
@@ -156,11 +157,19 @@ describe('Channel Tools', () => {
         joinChannel: vi.fn(async () => ({ subscriberCount: 1 })),
         leaveChannel: vi.fn(async () => {}),
         listChannels: vi.fn(async () => []),
-        // The capability that makes this a remote transport for our purposes.
-        subscribeChannelMessages: vi.fn(() => () => {}),
-        forgetChannelCursor: vi.fn((channel: string) => {
+        // The capabilities that make this a remote transport for our purposes.
+        subscribeChannelMessages: vi.fn(() => {}),
+        // A deliberate leave forgets the channel's FEED and its delivery cursor
+        // in one call — they are two halves of one intent, and keeping them as
+        // two calls the tool had to remember to pair was how either could be
+        // forgotten.
+        forgetChannelFeed: vi.fn((channel: string) => {
           forgotten.push(channel)
         }),
+        forgetTopicFeed: vi.fn(() => {}),
+        suspendedFeeds: vi.fn(() => ({ topics: [], channels: [] })),
+        hasLiveTopicFeed: vi.fn(() => true),
+        hasLiveChannelFeed: vi.fn(() => true),
       } as unknown as Transport
       const context = new ActiveContext()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })

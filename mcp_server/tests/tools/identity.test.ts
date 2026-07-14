@@ -344,6 +344,11 @@ function makeRecordingRemoteTransport(
       topics: [...topicFeeds].filter(([, f]) => !f.live).map(([id]) => id),
       channels: [...channelFeeds].filter(([, f]) => !f.live).map(([n]) => n),
     }),
+    // Liveness is MEMBERSHIP-driven in the tool layer: a feed that does not
+    // exist is just as deaf as one that is suspended. Modelling only
+    // `suspendedFeeds` is what let a missing feed pass for a healthy one.
+    hasLiveTopicFeed: (topicId: string): boolean => topicFeeds.get(topicId)?.live === true,
+    hasLiveChannelFeed: (name: string): boolean => channelFeeds.get(name)?.live === true,
   }
   return remote as unknown as Transport
 }
@@ -594,9 +599,13 @@ describe('Identity Tools', () => {
           expect(calls.filter((c) => c.method === 'primeTopicCursor')).toEqual([])
         })
 
-        it('skips re-subscription cleanly when the message bus and maps are absent', async () => {
-          // Legacy deps (and unit tests) construct IdentityToolDeps without
-          // the hot-attach plumbing. That must not crash the rename.
+        it('without a message bus it cannot create feeds — so it says so, rather than lying', async () => {
+          // Legacy deps construct IdentityToolDeps without the hot-attach
+          // plumbing. That must not crash the rename — but it must not report a
+          // clean success either: with no MessageBus there is no callback to
+          // build a feed from, so the session genuinely cannot hear, and saying
+          // otherwise is exactly the silent-deafness lie this area exists to
+          // kill. It still performs the membership migration itself.
           const calls: RecordedCall[] = []
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
@@ -610,7 +619,7 @@ describe('Identity Tools', () => {
 
           const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
 
-          expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
+          expect(JSON.parse(result)).toEqual({ name: 'kai-408', degraded: ['remote'] })
           expect(calls.some((c) => c.method.startsWith('subscribe'))).toBe(false)
           expect(calls.map((c) => c.method)).toEqual([
             'leaveTopic',
@@ -631,9 +640,12 @@ describe('Identity Tools', () => {
           // unchanged — after a rename, can the session still hear? — but the
           // mechanism it asserts is the new one.
           const calls: RecordedCall[] = []
-          const topicMsgs: string[] = []
-          const channelMsgs: string[] = []
-          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const pushed: Array<{ text: string; source: string }> = []
+          const messageBus = {
+            push: vi.fn(async (msg: { text: string }, source: string) => {
+              pushed.push({ text: msg.text, source })
+            }),
+          } as unknown as MessageBus
           const transport = makeRecordingRemoteTransport('remote', calls)
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
@@ -641,22 +653,14 @@ describe('Identity Tools', () => {
             router: new TransportRouter([transport]),
             messageBus,
           }
+          // Both memberships exist before the rename, and the TOOL owns creating
+          // their feeds (it holds the MessageBus callback — the real production
+          // wiring). We deliberately do NOT hand-subscribe with a private
+          // callback here: that would test a callback nothing in production uses,
+          // and would silently shadow the feed the tool creates.
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
-          await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          // Subscribe with callbacks we can observe directly, so "does it still
-          // deliver" is answered end-to-end and not by proxy.
-          const feeds = transport as unknown as {
-            subscribeChannelMessages: (a: { channelName: string }, cb: (m: Record<string, unknown>) => void) => void
-            subscribeTopicMessages: (
-              a: { topicId: string; channelName: string },
-              cb: (m: Record<string, unknown>) => void,
-            ) => void
-          }
-          feeds.subscribeChannelMessages({ channelName: 'kai' }, (m) => channelMsgs.push(String(m.text)))
-          feeds.subscribeTopicMessages({ topicId: 'topic_1', channelName: 'kai' }, (m) =>
-            topicMsgs.push(String(m.text)),
-          )
+          await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           calls.length = 0
 
           await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
@@ -668,12 +672,16 @@ describe('Identity Tools', () => {
           expect(topicSub).toHaveLength(1)
           expect(channelSub).toHaveLength(1)
           expect(topicSub[0]!.args.boundSessionId).toBe('session_kai-408@org_a')
+          expect(channelSub[0]!.args.boundSessionId).toBe('session_kai-408@org_a')
 
-          // And it really delivers, through the ORIGINAL callbacks.
+          // And it really delivers, all the way to the MessageBus, tagged with
+          // the location — which is the only delivery that means anything.
           topicSub[0]!.deliver!({ text: 'topic-after-rename' })
           channelSub[0]!.deliver!({ text: 'chan-after-rename' })
-          expect(topicMsgs).toEqual(['topic-after-rename'])
-          expect(channelMsgs).toEqual(['chan-after-rename'])
+          expect(pushed).toEqual([
+            { text: 'topic-after-rename', source: 'remote' },
+            { text: 'chan-after-rename', source: 'remote' },
+          ])
         })
       })
 

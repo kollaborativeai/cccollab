@@ -6,7 +6,7 @@ import { LOCAL_LOCATION, type ChannelLocation, type Transport } from '../transpo
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
-import { attachLocation, hasFeedRegistry, type AttachCtx } from '../transport/attach.js'
+import { attachLocation, isLocationDeaf, reconcileFeeds, type AttachCtx } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -117,29 +117,6 @@ export async function handleIdentityTool(
       const rebinds = (location: ChannelLocation): boolean => renamed || orgChangedLocations.has(location)
       const migrating = renamed || orgChangedLocations.size > 0
 
-      // The third trigger: a location where the transport is holding a SUSPENDED
-      // feed — it has membership but cannot deliver on it. That is the
-      // fingerprint of an EARLIER migration that failed half-way (its feeds were
-      // suspended, its introduce then threw, so it was never re-joined). Without
-      // this, the natural fix — the agent retrying under the SAME name — leaves
-      // `renamed` false and nothing marks the location as needing work: the
-      // ungated channel re-join recreates membership while the TOPIC feeds stay
-      // suspended, and the tool reports a clean success while the session is
-      // deaf.
-      //
-      // We ask the TRANSPORT, which owns its feeds, rather than peeking at
-      // bookkeeping the tool used to keep in parallel — the parallel copy is
-      // precisely where the key-case bug bit us.
-      //
-      // Snapshotted BEFORE the leaves below, so it reflects the breakage left by
-      // the EARLIER attempt, not the suspension we are about to cause.
-      const deafBefore = deafLocations(deps)
-
-      // A location needs its topics re-joined if it rebinds (rename / org
-      // change) or if it is deaf from a previous failure.
-      const restoresAt = (location: ChannelLocation): boolean => rebinds(location) || deafBefore.has(location)
-      const restoring = migrating || deafBefore.size > 0
-
       // The old-identity leave is gated on `migrating` ALONE: a heal has no
       // previous identity to leave.
       if (migrating) {
@@ -228,11 +205,23 @@ export async function handleIdentityTool(
       // `registerSubscriptionFailure` counts - three of them disable the whole
       // transport). So a foreign-org topic is DROPPED - and reported, never
       // silently discarded.
+      //
+      // The restore set is computed HERE, after the fan-out — never before it.
+      // `introduce` is what suspends the feeds (it rebinds the session row out
+      // from under them), so a snapshot taken earlier structurally cannot see the
+      // breakage this very call just caused. It also catches deafness NO rebind
+      // explains: a transport swapped in place (authenticate) starts with an
+      // empty registry, so the memberships the user joined at runtime have no
+      // feed at all — invisible to `renamed`/`orgChanged`, and invisible to any
+      // check that only looks for SUSPENDED entries.
+      const deafNow = deafLocations(deps)
+      const restoresAt = (location: ChannelLocation): boolean => rebinds(location) || deafNow.has(location)
+
       const droppedTopics: Array<{ topic: string; channel: string; location: ChannelLocation }> = []
-      if (restoring) {
+      {
         for (const topic of deps.context.getJoinedTopics()) {
           if (!introduced.has(topic.location)) continue
-          // Untouched and still subscribed ⇒ nothing to redo.
+          // Untouched and still hearing ⇒ nothing to redo.
           if (!restoresAt(topic.location)) continue
 
           if (orgChangedLocations.has(topic.location)) {
@@ -260,9 +249,26 @@ export async function handleIdentityTool(
         }
       }
 
-      // Truthfulness: ask the transports AGAIN, after the re-joins. Any location
-      // still holding a suspended feed is still deaf — we must never hand back a
-      // clean success while the session cannot hear.
+      // Re-join alone only RESTORES feeds the transport still has an entry for.
+      // A membership with no entry at all (the swapped-transport case) needs the
+      // feed CREATED — and only this layer can, because only it holds the
+      // MessageBus callback. Idempotent, so a live feed is left untouched.
+      if (deps.messageBus !== undefined) {
+        const bus = deps.messageBus
+        for (const location of introduced) {
+          if (location === LOCAL_LOCATION) continue
+          try {
+            reconcileFeeds({ transport: deps.router.get(location), location, context: deps.context, messageBus: bus })
+          } catch {
+            // Non-fatal: the deafness re-check below still reports it.
+          }
+        }
+      }
+
+      // Truthfulness: ask the transports AGAIN, after the re-joins and the
+      // reconcile. Any location still holding a membership it cannot hear on is
+      // still deaf — we must never hand back a clean success while the session
+      // cannot hear.
       for (const location of deafLocations(deps)) {
         if (!failed.includes(location)) failed.push(location)
       }
@@ -344,10 +350,16 @@ function membershipLocations(deps: IdentityToolDeps): Set<string> {
  * plain same-name retry HEAL the session instead of silently confirming the
  * deafness.
  *
- * We ASK THE TRANSPORT, which owns its feeds. The tool used to keep a parallel
- * copy of this in a pair of `${location}::${key}` maps and peek at those — and
- * a case mismatch in exactly that key is what made a channel look permanently
- * un-subscribed (KAI-418). There is no parallel copy to drift any more.
+ * We ASK THE TRANSPORT, which owns its feeds, driven off the MEMBERSHIPS the
+ * context holds — never off the transport's registry. A registry-driven "is
+ * anything suspended?" question only sees deafness that has an ENTRY; it is
+ * blind to a membership with no feed at all, which is exactly what a
+ * replace-in-place transport swap leaves behind. See `isLocationDeaf`.
+ *
+ * The tool used to keep a parallel copy of this in a pair of `${location}::${key}`
+ * maps and peek at those — and a case mismatch in exactly that key is what made a
+ * channel look permanently un-subscribed (KAI-418). There is no parallel copy to
+ * drift any more.
  *
  * The local broker has no per-feed subscriptions (it delivers over one shared
  * SSE stream), so it exposes no registry and the type guard skips it — it can
@@ -364,9 +376,7 @@ function deafLocations(deps: IdentityToolDeps): Set<ChannelLocation> {
       // accounting in `introduce`, not here.
       continue
     }
-    if (!hasFeedRegistry(transport)) continue
-    const suspended = transport.suspendedFeeds()
-    if (suspended.topics.length > 0 || suspended.channels.length > 0) deaf.add(location)
+    if (isLocationDeaf({ transport, location, context: deps.context })) deaf.add(location)
   }
   return deaf
 }

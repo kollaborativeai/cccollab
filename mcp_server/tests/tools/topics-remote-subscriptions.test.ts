@@ -158,6 +158,18 @@ class FakeRemoteTransport implements Transport {
     }
   }
 
+  // Liveness is MEMBERSHIP-driven: a feed that was never created is just as deaf
+  // as one that was torn down. Both cases must answer false.
+  hasLiveTopicFeed(topicId: string): boolean {
+    const entry = this.subscribedTopics.get(topicId)
+    return entry !== undefined && !entry.unsubscribeCalled
+  }
+
+  hasLiveChannelFeed(name: string): boolean {
+    const entry = this.subscribedChannels.get(name)
+    return entry !== undefined && !entry.unsubscribeCalled
+  }
+
   suspendedFeeds(): { topics: string[]; channels: string[] } {
     const topics = [...this.subscribedTopics.entries()].filter(([, t]) => t.unsubscribeCalled).map(([id]) => id)
     const channels = [...this.subscribedChannels.entries()].filter(([, c]) => c.unsubscribeCalled).map(([n]) => n)

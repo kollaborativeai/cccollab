@@ -10,7 +10,7 @@ import {
   type TransportTopicMessage,
 } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
-import { ensureTopicSubscription, teardownTopicSubscription } from '../transport/attach.js'
+import { ensureTopicSubscription, hasFeedRegistry } from '../transport/attach.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface TopicToolDeps {
@@ -149,7 +149,8 @@ export async function handleTopicTool(
       // restores it), but here the user is done with the topic, so it must not
       // linger as "suspended" and make the location look deaf.
       if (leavingTransportSource !== undefined) {
-        teardownTopicSubscription({ transport: deps.router.get(leavingTransportSource), topicId: threadTs })
+        const leaving = deps.router.get(leavingTransportSource)
+        if (hasFeedRegistry(leaving)) leaving.forgetTopicFeed(threadTs)
       }
       return JSON.stringify({ id: threadTs, name: topicName })
     }

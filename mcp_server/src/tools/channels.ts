@@ -3,7 +3,7 @@ import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { ChannelLocation } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
-import { ensureChannelSubscription, hasChannelCursor, teardownChannelSubscription } from '../transport/attach.js'
+import { ensureChannelSubscription, hasFeedRegistry } from '../transport/attach.js'
 import { normalizeChannelName } from '../context.js'
 
 export interface ChannelToolDeps {
@@ -220,16 +220,11 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, locati
   await transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
   const { removed, newActive } = deps.context.leaveChannel(normalized, location)
   // A DELIBERATE leave: forget the channel's feed (and the feeds of the topics
-  // inside it) outright, rather than leaving them suspended as the transport
-  // does for the migration's transient leave.
-  teardownChannelSubscription({ transport, channelName: normalized })
-  // Deliberately leaving a channel forgets its delivery cursor, so a later
-  // re-join re-seeds from the channel's latestTs and skips the backlog that
-  // accrued while away. The identity migration's transient leave/re-join must
-  // NOT do this - it keeps its place in the stream so no broadcast that lands
-  // mid-rename is dropped - which is why this lives here and not in
-  // `RemoteTransport.leaveChannel`, which both paths share.
-  if (hasChannelCursor(transport)) transport.forgetChannelCursor(normalized)
+  // inside it) AND its delivery cursor, rather than leaving them suspended as
+  // the transport does for the migration's transient leave. This lives here and
+  // not in `RemoteTransport.leaveChannel`, which BOTH leaves share and which
+  // therefore cannot tell the two intents apart.
+  if (hasFeedRegistry(transport)) transport.forgetChannelFeed(normalized)
   return JSON.stringify({
     channel: normalized,
     location,
