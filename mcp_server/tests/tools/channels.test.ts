@@ -169,7 +169,6 @@ describe('Channel Tools', () => {
         session,
         context,
         router: new TransportRouter([remote]),
-        remoteChannelUnsubscribes: new Map<string, () => void>(),
       }
       remoteDeps.context.joinChannel('kai', 'manual', 'remote')
 
@@ -432,8 +431,6 @@ describe('Channel Tools', () => {
             context,
             router,
             messageBus: bus,
-            remoteTopicUnsubscribes: new Map(),
-            remoteChannelUnsubscribes: new Map(),
             inflight: new Map<string, Promise<void>>(),
             candidates: ['remote'],
             resolve: () => ({

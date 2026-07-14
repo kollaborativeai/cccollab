@@ -90,8 +90,6 @@ describe('list_organizations tool', () => {
         context,
         router,
         messageBus: bus,
-        remoteTopicUnsubscribes: new Map<string, () => void>(),
-        remoteChannelUnsubscribes: new Map<string, () => void>(),
         inflight: new Map<string, Promise<void>>(),
         candidates: ['remote'],
         resolve: () => ({

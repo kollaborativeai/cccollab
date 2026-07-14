@@ -28,20 +28,6 @@ export interface AttachCtx {
   context: ActiveContext
   router: TransportRouter
   messageBus: MessageBus
-  /** Mutable map of topic-message subscription unsubscribe callbacks,
-   *  keyed by `${location}::${topicId}`. Populated when a remote
-   *  transport establishes a `subscribeTopicMessages` reactive feed
-   *  during the auto-subscribe loop, and mirrored in the tool layer's
-   *  join/start paths so a user-triggered `join_topic` or `start_topic`
-   *  also wires an inbound stream. Drained on shutdown and on the
-   *  replace-in-place path (filtered by the location-name prefix). */
-  remoteTopicUnsubscribes: Map<string, () => void>
-  /** Mutable map of channel-message subscription unsubscribe callbacks,
-   *  keyed by `${location}::${channelName}`. Populated on channel join
-   *  (auto-subscribe at attach time, or runtime via `join_channel`);
-   *  drained on `leave_channel`, shutdown, and replace-in-place. Mirrors
-   *  the shape of `remoteTopicUnsubscribes`. */
-  remoteChannelUnsubscribes: Map<string, () => void>
   /** Snapshot view of the resolved config at the time the context was
    *  built. `server.ts` passes this from its `resolveConfig` result;
    *  the hot-attach path re-resolves before calling. */
@@ -183,34 +169,11 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   // transport survive this function."
   const prior = ctx.router.unregister(name)
   if (prior) {
-    // Tear down every topic subscription owned by the prior transport
-    // before the swap. Keys are `${location}::${topicId}`; we filter by
-    // the location prefix so other locations' subscriptions are
-    // preserved. Each unsubscribe is best-effort; an error in one must
-    // not block the rest.
-    const prefix = `${name}::`
-    for (const [key, unsub] of [...ctx.remoteTopicUnsubscribes.entries()]) {
-      if (!key.startsWith(prefix)) continue
-      ctx.remoteTopicUnsubscribes.delete(key)
-      try {
-        unsub()
-      } catch (err) {
-        logError(
-          `Prior transport topic unsubscribe failed for "${key}": ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
-    for (const [key, unsub] of [...ctx.remoteChannelUnsubscribes.entries()]) {
-      if (!key.startsWith(prefix)) continue
-      ctx.remoteChannelUnsubscribes.delete(key)
-      try {
-        unsub()
-      } catch (err) {
-        logError(
-          `Prior transport channel unsubscribe failed for "${key}": ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
+    // The prior transport's feeds are the prior transport's own business: its
+    // `shutdown()` below detaches every one of them and drops its registry.
+    // (Before KAI-418 this had to be done here, by sweeping shared unsubscribe
+    // maps under a `${location}::` key prefix — the same key-shape whose case
+    // sensitivity was itself a bug.)
     if (ctx.session.hasName()) {
       try {
         await prior.deregisterSession({ sessionName: ctx.session.displayName })
@@ -250,13 +213,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
           `Auto-join channel "${channelName}" at "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
-      ensureChannelSubscription({
-        transport,
-        locationName: name,
-        channelName,
-        messageBus: ctx.messageBus,
-        map: ctx.remoteChannelUnsubscribes,
-      })
+      ensureChannelSubscription({ transport, channelName, messageBus: ctx.messageBus })
       try {
         ctx.context.joinChannel(channelName, 'cccollab.json', name)
       } catch (err) {
@@ -305,12 +262,10 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
           }
           ensureTopicSubscription({
             transport,
-            locationName: name,
             topicId,
             channelName,
             sinceTs: historyHighestTs,
             messageBus: ctx.messageBus,
-            map: ctx.remoteTopicUnsubscribes,
           })
         } catch (err) {
           logError(
@@ -354,8 +309,6 @@ export interface LazyAttachCtx {
   context: ActiveContext
   router: TransportRouter
   messageBus: MessageBus
-  remoteTopicUnsubscribes: Map<string, () => void>
-  remoteChannelUnsubscribes: Map<string, () => void>
   /** In-flight (and completed) lazy-attach attempts, keyed by location name.
    *  The first caller for a name stores its attach promise here; concurrent
    *  and later callers await that same promise instead of starting a second
@@ -424,8 +377,6 @@ function lazyAttachOne(name: string, ctx: LazyAttachCtx, resolved: AttachResolve
       context: ctx.context,
       router: ctx.router,
       messageBus: ctx.messageBus,
-      remoteTopicUnsubscribes: ctx.remoteTopicUnsubscribes,
-      remoteChannelUnsubscribes: ctx.remoteChannelUnsubscribes,
       resolved,
       transportFactory: ctx.transportFactory,
       diagnostics: ctx.diagnostics,
@@ -625,115 +576,92 @@ export function hasChannelCursor(transport: Transport): transport is Transport &
   return typeof (transport as { forgetChannelCursor?: unknown }).forgetChannelCursor === 'function'
 }
 
+/** Type guard: can this transport be asked to forget a feed outright — i.e.
+ *  does it own a feed registry (KAI-418)? Only remote transports do. */
+export function hasFeedRegistry(transport: Transport): transport is Transport & {
+  forgetTopicFeed: RemoteTransport['forgetTopicFeed']
+  forgetChannelFeed: RemoteTransport['forgetChannelFeed']
+  suspendedFeeds: RemoteTransport['suspendedFeeds']
+} {
+  return (
+    typeof (transport as { forgetTopicFeed?: unknown }).forgetTopicFeed === 'function' &&
+    typeof (transport as { forgetChannelFeed?: unknown }).forgetChannelFeed === 'function' &&
+    typeof (transport as { suspendedFeeds?: unknown }).suspendedFeeds === 'function'
+  )
+}
+
 /**
- * Establish a channel-broadcast subscription on a remote transport if one
- * isn't already in place. Idempotent; keyed by
- * `${locationName}::${channelName}`.
+ * CREATE a channel-broadcast feed on a remote transport. Only the tool layer
+ * knows the `MessageBus` callback, so creation stays here — but nothing else
+ * about the feed's life does: the transport keeps it registered, suspends it
+ * when the identity or membership behind it goes away, and re-attaches it on
+ * the join that makes it valid again (KAI-418).
+ *
+ * Idempotent, because the transport's registry is keyed by normalized channel
+ * name. Callers may call this freely without coordinating — which is what
+ * removed the shared unsubscribe Maps and the case-sensitivity bug with them.
  *
  * Channel broadcasts are the fanout path for `send_message_to_channel` at
- * the broker level on local and at the Convex level on remote. Without
- * this wiring a remote broadcast lands in the backend table but never
- * reaches other subscribers - see the original bug report for symptoms.
+ * the broker level on local and at the Convex level on remote. Local
+ * transports don't participate (their messages flow via the broker's shared
+ * SSE stream); the type guard makes that a no-op.
  */
 export function ensureChannelSubscription(args: {
   transport: Transport
-  locationName: string
   channelName: string
   messageBus: MessageBus
-  map: Map<string, () => void>
 }): void {
-  const key = `${args.locationName}::${args.channelName}`
-  if (args.map.has(key)) return
   if (!hasChannelSubscription(args.transport)) return
-  const unsub = args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) => {
+  args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) => {
     void args.messageBus.push(msg, args.transport.source)
   })
-  args.map.set(key, unsub)
 }
 
 /**
- * Tear down one channel subscription. Safe to call when none exists
- * (returns without error). Used by `leave_channel` and the
- * replace-in-place path in `attachLocation`.
+ * Drop a channel's feed for good, along with the feeds of every topic inside
+ * it. This is the DELIBERATE leave (`leave_channel`) — intent the transport
+ * cannot infer, since the identity migration issues the very same
+ * `leaveChannel` call and there the feed must merely SUSPEND so a later
+ * re-join restores it. Same reasoning as `forgetChannelCursor`.
  */
-export function teardownChannelSubscription(args: {
-  locationName: string
-  channelName: string
-  map: Map<string, () => void>
-}): void {
-  const key = `${args.locationName}::${args.channelName}`
-  const unsub = args.map.get(key)
-  if (unsub === undefined) return
-  args.map.delete(key)
-  try {
-    unsub()
-  } catch (err) {
-    logError(`Channel unsubscribe failed for "${key}": ${err instanceof Error ? err.message : String(err)}`)
-  }
+export function teardownChannelSubscription(args: { transport: Transport; channelName: string }): void {
+  if (!hasFeedRegistry(args.transport)) return
+  args.transport.forgetChannelFeed(args.channelName)
 }
 
 /**
- * Establish a topic-message subscription on a remote transport if one
- * isn't already in place. Idempotent: re-entry with the same
- * `${location}::${topicId}` key is a no-op, so auto-subscribe at startup
- * plus a later user-triggered `join_topic` on the same topic don't
- * double-wire.
+ * CREATE a topic-message feed on a remote transport. See
+ * `ensureChannelSubscription` — creation here, lifecycle in the transport.
  *
- * Local transports don't participate here (their topic messages flow via
- * the broker's shared SSE stream, handled by `BrokerEventListener`);
- * `hasTopicSubscription` type-guards that case so the call degrades to
- * a no-op without a runtime check at every call site.
- *
- * Priming: `sinceTs`, if provided, is passed to `primeTopicCursor` so
- * the initial `onUpdate` batch is narrowed server-side and a freshly
- * joined topic's history (already returned via `joinTopic`) does not
- * get replayed to the user as inbound notifications.
+ * Priming: `sinceTs`, if provided, is passed to `primeTopicCursor` so the
+ * initial `onUpdate` batch is narrowed server-side and a freshly joined
+ * topic's history (already returned via `joinTopic`) is not replayed to the
+ * user as inbound notifications.
  */
 export function ensureTopicSubscription(args: {
   transport: Transport
-  locationName: string
   topicId: string
   channelName: string
   sinceTs?: number
   messageBus: MessageBus
-  map: Map<string, () => void>
 }): void {
-  const key = `${args.locationName}::${args.topicId}`
-  if (args.map.has(key)) return
   if (!hasTopicSubscription(args.transport)) return
   if (args.sinceTs !== undefined) {
     args.transport.primeTopicCursor(args.topicId, args.sinceTs)
   }
-  const unsub = args.transport.subscribeTopicMessages(
+  args.transport.subscribeTopicMessages(
     { topicId: args.topicId, channelName: args.channelName },
     (msg: ParsedMessage) => {
       void args.messageBus.push(msg, args.transport.source)
     },
   )
-  args.map.set(key, unsub)
 }
 
-/**
- * Tear down one topic subscription. Safe to call when none exists
- * (returns without error). Used by `leave_topic`, `archive_topic`, and
- * the replace-in-place path in `attachLocation` when the prior
- * transport's per-location subscriptions need to be drained before the
- * swap.
- */
-export function teardownTopicSubscription(args: {
-  locationName: string
-  topicId: string
-  map: Map<string, () => void>
-}): void {
-  const key = `${args.locationName}::${args.topicId}`
-  const unsub = args.map.get(key)
-  if (unsub === undefined) return
-  args.map.delete(key)
-  try {
-    unsub()
-  } catch (err) {
-    logError(`Topic unsubscribe failed for "${key}": ${err instanceof Error ? err.message : String(err)}`)
-  }
+/** Drop a topic's feed for good — the DELIBERATE `leave_topic` / `archive_topic`.
+ *  See `teardownChannelSubscription`. */
+export function teardownTopicSubscription(args: { transport: Transport; topicId: string }): void {
+  if (!hasFeedRegistry(args.transport)) return
+  args.transport.forgetTopicFeed(args.topicId)
 }
 
 /** Highest history message ts as epoch ms, or undefined when the array

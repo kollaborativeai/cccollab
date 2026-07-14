@@ -14,11 +14,6 @@ export interface ChannelToolDeps {
    *  exercise remote broadcast subscriptions can keep constructing deps
    *  without one; wiring degrades to a no-op when absent. */
   messageBus?: MessageBus
-  /** Shared map of channel-broadcast subscription unsubscribe callbacks,
-   *  keyed by `${location}::${channelName}`. Populated on join_channel,
-   *  drained on leave_channel. Shutdown + replace-in-place drain is
-   *  handled by `server.ts` and `attachLocation` respectively. */
-  remoteChannelUnsubscribes?: Map<string, () => void>
   /** Bring a dormant token-bearing location online before routing to it,
    *  so a remote in config works without a fresh `authenticate`. `target`
    *  names a location; omit for "every non-local". No-op for 'local' and
@@ -202,14 +197,8 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
     channel: normalized,
   })
   const { becameActive } = deps.context.joinChannel(normalized, 'manual', location)
-  if (deps.messageBus && deps.remoteChannelUnsubscribes) {
-    ensureChannelSubscription({
-      transport,
-      locationName: location,
-      channelName: normalized,
-      messageBus: deps.messageBus,
-      map: deps.remoteChannelUnsubscribes,
-    })
+  if (deps.messageBus) {
+    ensureChannelSubscription({ transport, channelName: normalized, messageBus: deps.messageBus })
   }
   return JSON.stringify({ channel: normalized, location, becameActive, subscriberCount })
 }
@@ -230,13 +219,10 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, locati
 
   await transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
   const { removed, newActive } = deps.context.leaveChannel(normalized, location)
-  if (deps.remoteChannelUnsubscribes) {
-    teardownChannelSubscription({
-      locationName: location,
-      channelName: normalized,
-      map: deps.remoteChannelUnsubscribes,
-    })
-  }
+  // A DELIBERATE leave: forget the channel's feed (and the feeds of the topics
+  // inside it) outright, rather than leaving them suspended as the transport
+  // does for the migration's transient leave.
+  teardownChannelSubscription({ transport, channelName: normalized })
   // Deliberately leaving a channel forgets its delivery cursor, so a later
   // re-join re-seeds from the channel's latestTs and skips the backlog that
   // accrued while away. The identity migration's transient leave/re-join must

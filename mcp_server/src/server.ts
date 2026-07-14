@@ -98,19 +98,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
   })
 
-  // Topic-message subscriptions are keyed by `${location}::${topicId}`
-  // because a single remote location can hold many concurrent topic
-  // subscriptions. Populated by `attachLocation` during auto-subscribe
-  // and by `tools/topics.ts` on runtime join/start; drained on shutdown
-  // and on replace-in-place.
-  const remoteTopicUnsubscribes = new Map<string, () => void>()
-
-  // Channel-broadcast subscriptions, keyed by `${location}::${channel}`.
-  // Populated by `attachLocation` auto-subscribe and by
-  // `tools/channels.ts` on runtime join; drained on leave_channel,
-  // shutdown, and replace-in-place.
-  const remoteChannelUnsubscribes = new Map<string, () => void>()
-
   // Introduce on the local transport up front so the session row
   // exists when list_sessions queries it. Non-local locations run
   // introduce inside their own attachLocation call.
@@ -156,8 +143,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       context,
       router,
       messageBus,
-      remoteTopicUnsubscribes,
-      remoteChannelUnsubscribes,
       resolved: {
         locations: resolved.locations,
         activeLocation: resolved.active.activeLocation,
@@ -269,8 +254,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
         context,
         router,
         messageBus,
-        remoteTopicUnsubscribes,
-        remoteChannelUnsubscribes,
         inflight: lazyInflight,
         candidates: lazyCandidates,
         diagnostics,
@@ -294,8 +277,6 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     router,
     locations: resolved.locations,
     messageBus,
-    remoteTopicUnsubscribes,
-    remoteChannelUnsubscribes,
     cwd,
     env,
     ensureAttached,
@@ -317,22 +298,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       resolveShutdown = resolve
     })
     console.error(`[cccollab] Shutting down (${reason})...`)
-    for (const unsubscribe of remoteTopicUnsubscribes.values()) {
-      try {
-        unsubscribe()
-      } catch {
-        /* ignore */
-      }
-    }
-    remoteTopicUnsubscribes.clear()
-    for (const unsubscribe of remoteChannelUnsubscribes.values()) {
-      try {
-        unsubscribe()
-      } catch {
-        /* ignore */
-      }
-    }
-    remoteChannelUnsubscribes.clear()
+    // Each transport's own `shutdown()` (below) detaches every feed it owns —
+    // no shared unsubscribe maps to drain here any more (KAI-418).
     if (session.hasName()) {
       for (const transport of router.all()) {
         try {
@@ -387,8 +354,6 @@ interface ToolDeps {
   router: TransportRouter
   locations: ResolvedLocation[]
   messageBus: MessageBus
-  remoteTopicUnsubscribes: Map<string, () => void>
-  remoteChannelUnsubscribes: Map<string, () => void>
   cwd: string
   env: NodeJS.ProcessEnv
   /** Bring a token-bearing non-local location online on first tool use.

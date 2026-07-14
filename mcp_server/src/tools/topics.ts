@@ -23,11 +23,6 @@ export interface TopicToolDeps {
    *  don't exercise remote subscriptions) can keep constructing deps
    *  without one; the wiring degrades to a no-op when absent. */
   messageBus?: MessageBus
-  /** Shared map of topic-message subscription unsubscribe callbacks,
-   *  keyed by `${location}::${topicId}`. Populated on start/join and
-   *  drained on leave/archive; shutdown and replace-in-place are
-   *  handled by `server.ts` / `attachLocation` respectively. */
-  remoteTopicUnsubscribes?: Map<string, () => void>
   /** Bring a dormant token-bearing location online before routing to it,
    *  so a remote in config works without a fresh `authenticate`. `target`
    *  names a location; omit for "every non-local". No-op for 'local' and
@@ -149,12 +144,12 @@ export async function handleTopicTool(
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
       deps.context.leaveTopic(threadTs)
-      if (deps.remoteTopicUnsubscribes && leavingTransportSource !== undefined) {
-        teardownTopicSubscription({
-          locationName: leavingTransportSource,
-          topicId: threadTs,
-          map: deps.remoteTopicUnsubscribes,
-        })
+      // A DELIBERATE leave: forget the feed outright. The transport suspends it
+      // on any leaveTopic (so the identity migration's transient leave/re-join
+      // restores it), but here the user is done with the topic, so it must not
+      // linger as "suspended" and make the location look deaf.
+      if (leavingTransportSource !== undefined) {
+        teardownTopicSubscription({ transport: deps.router.get(leavingTransportSource), topicId: threadTs })
       }
       return JSON.stringify({ id: threadTs, name: topicName })
     }
@@ -330,18 +325,16 @@ async function handleStartTopic(
       topic,
     })
     deps.context.joinTopic(data.id, topic, data.channel ?? channel, location)
-    if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+    if (deps.messageBus) {
       // Brand-new topic: no history to prime past, so seed the cursor
       // to `now` to avoid replaying anything another producer may have
       // inserted between createTopic and subscribe.
       ensureTopicSubscription({
         transport,
-        locationName: location,
         topicId: data.id,
         channelName: data.channel ?? channel,
         sinceTs: Date.now(),
         messageBus: deps.messageBus,
-        map: deps.remoteTopicUnsubscribes,
       })
     }
     return JSON.stringify({ id: data.id, name: topic, channel: data.channel ?? channel, location })
@@ -425,7 +418,7 @@ async function registerTopicMembership(
     topicId: topic.id,
   })
   deps.context.joinTopic(topic.id, topic.topic, topic.channel, location)
-  if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+  if (deps.messageBus) {
     // Prime the reactive cursor past whatever history we just returned
     // to the tool caller so the first `onUpdate` batch doesn't replay
     // those same messages as inbound notifications.
@@ -437,12 +430,10 @@ async function registerTopicMembership(
     }
     ensureTopicSubscription({
       transport,
-      locationName: location,
       topicId: topic.id,
       channelName: topic.channel,
       sinceTs,
       messageBus: deps.messageBus,
-      map: deps.remoteTopicUnsubscribes,
     })
   }
   return { location, history }

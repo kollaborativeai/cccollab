@@ -61,6 +61,10 @@ class FakeRemoteTransport implements Transport {
   shutdown = vi.fn(async (): Promise<void> => {
     this.shutdownCalled = true
     this.enabled = false
+    // A transport owns the lifecycle of its own feeds (KAI-418), so shutting it
+    // down detaches them. attachLocation no longer sweeps shared maps for this.
+    for (const sub of this.subscribedTopics.values()) sub.unsubscribeCalled = true
+    for (const sub of this.subscribedChannels.values()) sub.unsubscribeCalled = true
   })
   private readonly topicIds = new Set<string>()
   private readonly topics = new Map<string, TransportTopic>()
@@ -181,8 +185,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
   session.setName('architect')
   const context = new ActiveContext()
   const router = new TransportRouter([])
-  const remoteTopicUnsubscribes = new Map<string, () => void>()
-  const remoteChannelUnsubscribes = new Map<string, () => void>()
   const busPushes: ParsedMessage[] = []
   // Minimal MessageBus stand-in. attachLocation only calls `push`.
   const bus = {
@@ -197,8 +199,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
     context,
     router,
     messageBus: bus,
-    remoteTopicUnsubscribes,
-    remoteChannelUnsubscribes,
     resolved: { locations: [location], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
     transportFactory: (loc) => new FakeRemoteTransport(loc.name),
     bus,
@@ -273,9 +273,11 @@ describe('attachLocation', () => {
 
     const transport = ctx.router.get('flatout') as FakeRemoteTransport
     expect(transport.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
-    // The subscription map key must match what the context (and therefore every
-    // later lookup: leave_channel, the stale check) will ask for.
-    expect([...ctx.remoteChannelUnsubscribes.keys()]).toEqual(['flatout::dev'])
+    // The feed must be registered under the NORMALIZED channel name — the same
+    // one the context (and therefore leave_channel, the deaf check, ...) will
+    // later ask for. A raw config key like "Dev" used to key the shared map
+    // under `flatout::Dev` while every later lookup asked for `flatout::dev`.
+    expect([...transport.subscribedChannels.keys()]).toEqual(['dev'])
     expect(ctx.context.isChannelSubscribed('dev', 'flatout')).toBe(true)
   })
 
@@ -425,10 +427,9 @@ describe('attachLocation', () => {
     const [topicId, sub] = [...transport.subscribedTopics.entries()][0]!
     expect(sub.channelName).toBe('dev')
 
-    // The per-topic subscription key is stored in remoteTopicUnsubscribes
-    // so the shutdown / teardown paths can find it.
-    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
-    expect(ctx.remoteTopicUnsubscribes.has(`flatout::${topicId}`)).toBe(true)
+    // The feed is registered on the TRANSPORT, which owns its lifecycle.
+    expect(transport.subscribedTopics.size).toBe(1)
+    expect(transport.subscribedTopics.has(topicId)).toBe(true)
 
     // Fire a fake topic message through the subscription callback. It
     // must reach MessageBus.push with the location as the source tag.
@@ -492,8 +493,8 @@ describe('attachLocation', () => {
     const transport = ctx.router.get('flatout') as FakeRemoteTransport
     expect(transport.subscribedChannels.size).toBe(1)
     const sub = transport.subscribedChannels.get('dev')!
-    expect(ctx.remoteChannelUnsubscribes.size).toBe(1)
-    expect(ctx.remoteChannelUnsubscribes.has('flatout::dev')).toBe(true)
+    expect(transport.subscribedChannels.size).toBe(1)
+    expect(transport.subscribedChannels.has('dev')).toBe(true)
 
     sub.onEvent({
       sender: 'peer',
@@ -517,8 +518,7 @@ describe('attachLocation', () => {
     expect(first.ok).toBe(true)
 
     const originalTransport = ctx.router.get('flatout') as FakeRemoteTransport
-    const topicKey = [...ctx.remoteTopicUnsubscribes.keys()][0]!
-    const topicId = topicKey.slice('flatout::'.length)
+    const topicId = [...originalTransport.subscribedTopics.keys()][0]!
     const priorSub = originalTransport.subscribedTopics.get(topicId)!
 
     // Replace-in-place attach (what `authenticate({force:true})` does).
@@ -527,11 +527,10 @@ describe('attachLocation', () => {
     const second = await attachLocation('flatout', ctx)
     expect(second.ok).toBe(true)
 
-    // Prior topic subscription was torn down, the map no longer points at
-    // it, and the replacement has its own.
+    // The prior transport's feed went down with the prior transport (its own
+    // shutdown detaches it), and the replacement has its own.
     expect(priorSub.unsubscribeCalled).toBe(true)
-    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
-    expect([...ctx.remoteTopicUnsubscribes.keys()][0]!.startsWith('flatout::')).toBe(true)
+    expect(originalTransport.shutdownCalled).toBe(true)
     expect(replacement.subscribedTopics.size).toBe(1)
   })
 })
@@ -688,8 +687,6 @@ describe('ensureLazyAttach', () => {
       context,
       router,
       messageBus: bus,
-      remoteTopicUnsubscribes: new Map<string, () => void>(),
-      remoteChannelUnsubscribes: new Map<string, () => void>(),
       inflight: new Map<string, Promise<void>>(),
       candidates: locations.filter((l) => !l.isLocal).map((l) => l.name),
       resolve,

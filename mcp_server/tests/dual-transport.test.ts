@@ -897,8 +897,6 @@ describe('KAI-368: a failing remote attach does not brick local', () => {
       context,
       router,
       messageBus: bus,
-      remoteTopicUnsubscribes: new Map(),
-      remoteChannelUnsubscribes: new Map(),
       resolved: { locations: [personal], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
       transportFactory: () => failingRemote,
       diagnostics,
