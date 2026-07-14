@@ -309,7 +309,6 @@ export class RemoteTransport implements Transport {
    *  flight when the websocket disappears. Unsubscribes handed out to
    *  `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
    *  call is sufficient even if the caller forgets the external list. */
-  private readonly trackedUnsubscribes = new Set<() => void>()
 
   /** Topic ids we've seen from the remote backend (via listJoinedForUser
    *  at startup, plus any we subsequently joined/created). Used by
@@ -589,6 +588,14 @@ export class RemoteTransport implements Transport {
     }
   }
 
+  /** The org id this transport's session row is bound to, as far as we can
+   *  actually know it: the one the last successful `introduce` carried.
+   *  (The backend's `getSessionContext` returns only the org NAME, so there is
+   *  no way to ask it for the id.) */
+  getBoundOrganizationId(): string | undefined {
+    return this.boundOrganizationId
+  }
+
   /**
    * Returns the name of the organization this transport's session is bound
    * to, or null when no session has been introduced or the lookup fails.
@@ -599,14 +606,6 @@ export class RemoteTransport implements Transport {
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  /** The org id this transport's session row is bound to, as far as we can
-   *  actually know it: the one the last successful `introduce` carried.
-   *  (The backend's `getSessionContext` returns only the org NAME, so there is
-   *  no way to ask it for the id.) */
-  getBoundOrganizationId(): string | undefined {
-    return this.boundOrganizationId
-  }
-
   async getBoundOrganizationName(): Promise<string | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
@@ -1062,9 +1061,9 @@ export class RemoteTransport implements Transport {
    * via the `joinChannel` mutation's returned `channelId`, with a
    * `channels.queries.listAll` fallback when the id isn't cached).
    *
-   * Callers are responsible for invoking the returned unsubscribe fn on
-   * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
-   * so a `shutdown()` still sweeps it if the caller drops the reference.
+   * Idempotent, and the feed's LIFECYCLE is the transport's own: suspend on
+   * rebind, restore on re-join, forget on a deliberate leave. Callers get no
+   * handle back — they name the feed (`forgetChannelFeed`) rather than hold it.
    */
   subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
     if (!this.enabled || this.shutdownStarted) return
@@ -1255,22 +1254,43 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  /** Re-attach a suspended topic feed under the current sessionId + cursor. */
+  /**
+   * Re-attach a suspended topic feed under the current sessionId + cursor.
+   *
+   * `!attached` alone does NOT mean "safe to attach" — see `restoreChannelFeed`.
+   * A non-null `inner` here means a previous attach is still outstanding, and
+   * attaching over it would strand an unreachable subscription, so cancel it
+   * first. `attachTopicFeed` sets `inner` and `attached` together (no async id
+   * lookup), so this is defence in depth on this path rather than a live bug.
+   */
   private restoreTopicFeed(topicId: string): void {
     if (!this.enabled || this.shutdownStarted) return
     const feed = this.topicFeeds.get(topicId)
     if (feed === undefined || feed.attached) return
+    if (feed.inner !== null) this.detach(feed)
     this.attachTopicFeed(topicId, feed)
   }
 
   /** Re-attach a suspended channel feed under the current sessionId + cursor.
    *  Deliberately does NOT restore the channel's topic feeds: their topic
-   *  membership may not be back yet. `joinTopic` restores those. */
+   *  membership may not be back yet. `joinTopic` restores those.
+   *
+   *  `attached === false` conflates two states, and only one of them is safe to
+   *  attach over: properly SUSPENDED (`inner === null`, the old closure already
+   *  cancelled) versus REGISTERED-BUT-NEVER-ATTACHED (`inner` is the outer
+   *  closure and its async channel-id lookup is STILL IN FLIGHT). Attaching over
+   *  the latter overwrites `feed.inner` without ever invoking the old closure,
+   *  so when the lookup lands its `register()` still fires and stacks a SECOND
+   *  onUpdate on the channel — every broadcast delivered twice, and the orphan
+   *  unreachable by detach/suspend/rebind/shutdown because `inner` no longer
+   *  points at it. `detach()` invokes the old closure, which flips its
+   *  `unsubscribed` flag and so cancels the pending `register()`. */
   private restoreChannelFeed(name: string): void {
     if (!this.enabled || this.shutdownStarted) return
     const key = channelKey(name)
     const feed = this.channelFeeds.get(key)
     if (feed === undefined || feed.attached) return
+    if (feed.inner !== null) this.detach(feed)
     this.attachChannelFeed(key, feed)
   }
 
@@ -1323,6 +1343,18 @@ export class RemoteTransport implements Transport {
     }
   }
 
+  /** Is this topic's feed actually delivering right now? Liveness is read from
+   *  `attached` — the flag the `onUpdate` registration itself sets — never from
+   *  the mere presence of a handle. */
+  hasLiveTopicFeed(topicId: string): boolean {
+    return this.topicFeeds.get(topicId)?.attached === true
+  }
+
+  /** Is this channel's feed actually delivering right now? See `hasLiveTopicFeed`. */
+  hasLiveChannelFeed(name: string): boolean {
+    return this.channelFeeds.get(channelKey(name))?.attached === true
+  }
+
   /**
    * The feeds this transport holds but cannot currently deliver on — i.e.
    * exactly where the session is deaf. A feed is suspended when the identity or
@@ -1330,14 +1362,6 @@ export class RemoteTransport implements Transport {
    * happened (or failed). The tool layer reports these as `degraded` instead of
    * peeking at bookkeeping it no longer owns.
    */
-  hasLiveTopicFeed(topicId: string): boolean {
-    return this.topicFeeds.get(topicId)?.attached === true
-  }
-
-  hasLiveChannelFeed(name: string): boolean {
-    return this.channelFeeds.get(channelKey(name))?.attached === true
-  }
-
   suspendedFeeds(): { topics: string[]; channels: string[] } {
     const topics: string[] = []
     const channels: string[] = []
@@ -1363,17 +1387,19 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Tear down the transport: invoke every outstanding subscribe-returned
-   * unsubscribe (DMs, topics, anything else future code adds via
-   * `trackUnsubscribe`), then close the underlying ConvexClient so its
-   * websocket shuts down. Safe to call multiple times; subsequent calls
-   * are no-ops.
+   * Tear down the transport: detach every live feed and close the underlying
+   * ConvexClient so its websocket shuts down. Safe to call multiple times;
+   * subsequent calls are no-ops.
+   *
+   * Feed teardown goes through the two registries — they are the single source
+   * of truth for what is live, now that the transport owns feed lifecycle and
+   * hands callers no unsubscribe handles at all.
    *
    * Used by `attachLocation`'s replace-in-place path (e.g. a force
    * re-authenticate of an already-live location) and by the process-wide
-   * shutdown hook in `server.ts`. Never throws; errors from inner
-   * `.close()` or individual unsubscribe fns are swallowed after being
-   * logged so a cleanup failure cannot cascade into a stuck shutdown.
+   * shutdown hook in `server.ts`. Never throws; errors from `.close()` or an
+   * individual detach are swallowed after being logged so a cleanup failure
+   * cannot cascade into a stuck shutdown.
    */
   async shutdown(): Promise<void> {
     if (this.shutdownStarted) return
@@ -1386,42 +1412,11 @@ export class RemoteTransport implements Transport {
     for (const feed of this.channelFeeds.values()) this.detach(feed)
     this.topicFeeds.clear()
     this.channelFeeds.clear()
-    for (const unsub of this.trackedUnsubscribes) {
-      try {
-        unsub()
-      } catch (err) {
-        this.log(`shutdown: unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-    this.trackedUnsubscribes.clear()
     try {
       await this.client.close()
     } catch (err) {
       this.log(`shutdown: client.close() failed: ${err instanceof Error ? err.message : String(err)}`)
     }
-  }
-
-  /**
-   * Wrap an unsubscribe callback so (a) it only runs once, (b) calling
-   * it removes the entry from `trackedUnsubscribes`. Callers hand the
-   * returned fn out - e.g. to `server.ts`'s `remoteTopicUnsubscribes` /
-   * `remoteChannelUnsubscribes` maps - and `shutdown()` still catches it
-   * via the internal set.
-   */
-  private trackUnsubscribe(fn: () => void): () => void {
-    let invoked = false
-    const wrapped = (): void => {
-      if (invoked) return
-      invoked = true
-      this.trackedUnsubscribes.delete(wrapped)
-      try {
-        fn()
-      } catch (err) {
-        this.log(`unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-    this.trackedUnsubscribes.add(wrapped)
-    return wrapped
   }
 
   // ─── internals ────────────────────────────────────────────────────────

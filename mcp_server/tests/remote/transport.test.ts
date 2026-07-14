@@ -919,3 +919,198 @@ describe('RemoteTransport.introduce failure preserves the previously bound sessi
     expect((transport as unknown as { sessionId: string | null }).sessionId).toBe('session_1')
   })
 })
+
+/**
+ * A restore must never re-attach OVER a feed that is still mid-attach.
+ *
+ * Liveness tracks ATTACHMENT (`attached`), not the handle, so `attached === false`
+ * conflates two states: properly SUSPENDED (`inner === null`, old closure already
+ * cancelled — safe to re-attach) and REGISTERED-BUT-NEVER-ATTACHED (`inner` is the
+ * outer closure and its async channel-id lookup is still IN FLIGHT — not safe).
+ *
+ * In the second case `attachChannelFeed` overwrites `feed.inner` with a fresh
+ * closure and never invokes the old one, so the old closure's `unsubscribed` stays
+ * false. When the in-flight lookup lands, its `register()` fires and creates a
+ * SECOND onUpdate on the same channel: every broadcast is delivered twice, and the
+ * orphan is unreachable — `feed.inner` points at the new closure, so no detach,
+ * suspend, rebind or shutdown can ever kill it.
+ *
+ * Ordinary, not exotic: `reconcileFeeds` runs against a swapped-in transport whose
+ * `channelIdsByName` is EMPTY, so every runtime-joined channel takes the async
+ * lookup — and a `joinChannel` landing while that lookup is in flight is just two
+ * overlapping round-trips.
+ */
+describe('RemoteTransport channel-feed restore during a pending attach', () => {
+  it('does not leave a second, unreachable onUpdate behind when the lookup lands after a restore', async () => {
+    const onUpdateArgs: Array<Record<string, unknown>> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    let releaseLookup: (rows: Array<{ channelId: string; name: string }>) => void = () => {}
+    const lookup = new Promise<Array<{ channelId: string; name: string }>>((resolve) => {
+      releaseLookup = resolve
+    })
+
+    // `introduce` issues a best-effort topic preload query first; only the
+    // SUBSEQUENT query is the channel-id lookup we want to hang.
+    let queryCalls = 0
+    const stub = {
+      query: vi.fn(async () => {
+        queryCalls += 1
+        if (queryCalls === 1) return [] // introduce's topic preload
+        return await lookup // channels.listAll — hangs until released
+      }),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 100 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateArgs.push(args)
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+      close: vi.fn(async () => {}),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    // Subscribe with NO cached channel id ⇒ the async listAll lookup is now
+    // in flight, and the feed is registered-but-not-yet-attached.
+    const delivered: string[] = []
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) => delivered.push(msg.text))
+    expect(onUpdateArgs).toHaveLength(0)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+
+    // joinChannel caches the id and restores the feed ⇒ onUpdate #1.
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    expect(onUpdateArgs).toHaveLength(1)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(true)
+
+    // Now the original lookup finally lands. Its register() must NOT fire.
+    releaseLookup([{ channelId: 'chan_dev', name: 'dev' }])
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Guard the stub's own premise: exactly two queries ran (introduce's
+    // preload, then the channel-id lookup). If `introduce` ever stops issuing
+    // the preload, the call-count dispatch above would silently hand the
+    // hanging promise to the wrong caller — fail loudly here instead.
+    expect(queryCalls).toBe(2)
+
+    // EXACTLY ONE live onUpdate for this channel.
+    expect(onUpdateArgs).toHaveLength(1)
+    expect(callbacks).toHaveLength(1)
+
+    // And therefore a broadcast is delivered exactly once, not twice.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hello', ts: 200 }])
+    expect(delivered).toEqual(['hello'])
+  })
+})
+
+/**
+ * A restore must not re-attach a feed onto a transport that degraded WHILE the
+ * join was in flight.
+ *
+ * `joinChannel` / `joinTopic` guard `enabled` on entry, so the already-degraded
+ * case never reaches a restore. The reachable window is degradation DURING the
+ * mutation's await: the join succeeds, the transport self-disables underneath
+ * it, and the restore then runs. Without the guard it would attach a fresh
+ * onUpdate to a transport that has explicitly given up — which is the whole
+ * point of graceful degradation.
+ */
+describe('RemoteTransport feed restore on a transport that degraded mid-join', () => {
+  function makeStub(): {
+    stub: Record<string, unknown>
+    onUpdateCount: () => number
+    degrade: () => void
+    setMutationHook: (fn: () => void) => void
+  } {
+    const errorCallbacks: Array<(err: unknown) => void> = []
+    let onUpdates = 0
+    let hook: () => void = () => {}
+    const stub = {
+      query: vi.fn(async () => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        hook() // fires while the join is still awaiting
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 100 }
+        }
+        if ('topicId' in args && 'sessionId' in args && !('text' in args)) {
+          return { channel: 'dev', history: [] }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn(
+        (_q: unknown, _args: Record<string, unknown>, _cb: (rows: unknown) => void, onErr: (e: unknown) => void) => {
+          onUpdates += 1
+          errorCallbacks.push(onErr)
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+      close: vi.fn(async () => {}),
+    }
+    // Schema drift trips degradation on the FIRST error — the transport's own
+    // documented "give up now" signal.
+    const drift = new Error('Could not find function listByChannel on deployment')
+    drift.name = 'FunctionNotFoundError'
+    return {
+      stub,
+      onUpdateCount: () => onUpdates,
+      degrade: () => errorCallbacks.forEach((cb) => cb(drift)),
+      setMutationHook: (fn) => {
+        hook = fn
+      },
+    }
+  }
+
+  it('does not re-attach a channel feed when the transport degrades during joinChannel', async () => {
+    const { stub, onUpdateCount, degrade, setMutationHook } = makeStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(onUpdateCount()).toBe(1)
+
+    // Suspend the feed, then degrade the transport mid-rejoin. The feed must be
+    // SUSPENDED (still in the registry), not forgotten — otherwise the restore
+    // would bail on `feed === undefined` and this test would pass without ever
+    // exercising the guard it exists to pin.
+    await transport.leaveChannel({ sessionName: 'laptop', channel: 'dev' })
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+    expect(transport.suspendedFeeds().channels).toContain('dev')
+    setMutationHook(degrade)
+
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+
+    expect(transport.enabled).toBe(false)
+    // No new onUpdate: the degraded transport must not resurrect the feed.
+    expect(onUpdateCount()).toBe(1)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+  })
+
+  it('does not re-attach a topic feed when the transport degrades during joinTopic', async () => {
+    const { stub, onUpdateCount, degrade, setMutationHook } = makeStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(onUpdateCount()).toBe(1)
+
+    // Suspended, not forgotten — see the channel test above.
+    await transport.leaveTopic({ sessionName: 'laptop', topicId: 't1' })
+    expect(transport.hasLiveTopicFeed('t1')).toBe(false)
+    expect(transport.suspendedFeeds().topics).toContain('t1')
+    setMutationHook(degrade)
+
+    await transport.joinTopic({ sessionName: 'laptop', topicId: 't1' })
+
+    expect(transport.enabled).toBe(false)
+    expect(onUpdateCount()).toBe(1)
+    expect(transport.hasLiveTopicFeed('t1')).toBe(false)
+  })
+})

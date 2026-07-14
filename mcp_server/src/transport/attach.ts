@@ -586,11 +586,6 @@ export function hasChannelSubscription(transport: Transport): transport is Trans
   return typeof (transport as { subscribeChannelMessages?: unknown }).subscribeChannelMessages === 'function'
 }
 
-/** Type guard: does this transport carry a per-channel delivery cursor that a
- *  deliberate `leave_channel` should forget? Only remote transports do; the
- *  local broker replays nothing on re-join. */
-/** Type guard: can this transport be asked to forget a feed outright — i.e.
- *  does it own a feed registry (KAI-418)? Only remote transports do. */
 /** Does this transport know which organization its session row is bound to? */
 export function hasBoundOrganization(transport: Transport): transport is Transport & {
   getBoundOrganizationId: RemoteTransport['getBoundOrganizationId']
@@ -598,6 +593,8 @@ export function hasBoundOrganization(transport: Transport): transport is Transpo
   return typeof (transport as { getBoundOrganizationId?: unknown }).getBoundOrganizationId === 'function'
 }
 
+/** Type guard: can this transport be asked to forget a feed outright — i.e.
+ *  does it own a feed registry (KAI-418)? Only remote transports do. */
 export function hasFeedRegistry(transport: Transport): transport is Transport & {
   forgetTopicFeed: RemoteTransport['forgetTopicFeed']
   forgetChannelFeed: RemoteTransport['forgetChannelFeed']
