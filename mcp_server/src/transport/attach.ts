@@ -1,4 +1,4 @@
-import type { ActiveContext } from '../context.js'
+import { normalizeChannelName, type ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { ResolvedLocation } from '../config/resolve.js'
@@ -232,25 +232,36 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   const displayName = ctx.session.hasName() ? ctx.session.displayName : undefined
   if (displayName !== undefined) {
     for (const channel of location.channels) {
+      // Normalize the config's channel KEY once, here at the boundary, and use
+      // it downstream. `ActiveContext` lowercases on the way in, and every tool
+      // reads the channel name back out of the context — so a raw key like
+      // "Dev" would key the subscription map under `remote::Dev` while every
+      // later lookup asks for `remote::dev`. That mismatch silently defeats
+      // `teardownChannelSubscription` and `forgetChannelCursor` on leave, and —
+      // because the identity tool's stale-subscription check reads the context
+      // name — makes the location look permanently un-subscribed, so EVERY
+      // re-introduce registers another live feed for the same channel and each
+      // broadcast arrives twice.
+      const channelName = normalizeChannelName(channel.name)
       try {
-        await transport.joinChannel({ sessionName: displayName, channel: channel.name })
+        await transport.joinChannel({ sessionName: displayName, channel: channelName })
       } catch (err) {
         logError(
-          `Auto-join channel "${channel.name}" at "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Auto-join channel "${channelName}" at "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
       ensureChannelSubscription({
         transport,
         locationName: name,
-        channelName: channel.name,
+        channelName,
         messageBus: ctx.messageBus,
         map: ctx.remoteChannelUnsubscribes,
       })
       try {
-        ctx.context.joinChannel(channel.name, 'cccollab.json', name)
+        ctx.context.joinChannel(channelName, 'cccollab.json', name)
       } catch (err) {
         logError(
-          `Auto-subscribe bookkeeping for channel "${channel.name}" at "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Auto-subscribe bookkeeping for channel "${channelName}" at "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
         )
         continue
       }
@@ -261,7 +272,7 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
       try {
         const rows = await transport.listTopics({
           sessionName: displayName,
-          channel: channel.name,
+          channel: channelName,
           includeArchived: false,
         })
         existing = rows.map((r) => ({ id: r.id, topic: r.topic }))
@@ -276,16 +287,16 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
           let historyHighestTs: number | undefined
           if (found) {
             const joined = await transport.joinTopic({ sessionName: displayName, topicId: found.id })
-            ctx.context.joinTopic(found.id, topic.name, channel.name, name)
+            ctx.context.joinTopic(found.id, topic.name, channelName, name)
             topicId = found.id
             historyHighestTs = highestHistoryTs(joined.history)
           } else {
             const created = await transport.createTopic({
               sessionName: displayName,
-              channel: channel.name,
+              channel: channelName,
               topic: topic.name,
             })
-            ctx.context.joinTopic(created.id, topic.name, channel.name, name)
+            ctx.context.joinTopic(created.id, topic.name, channelName, name)
             topicId = created.id
             // Fresh topic: no history, so prime to "now" to avoid a
             // replay if another producer happens to post while the
@@ -296,14 +307,14 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
             transport,
             locationName: name,
             topicId,
-            channelName: channel.name,
+            channelName,
             sinceTs: historyHighestTs,
             messageBus: ctx.messageBus,
             map: ctx.remoteTopicUnsubscribes,
           })
         } catch (err) {
           logError(
-            `Auto-subscribe topic "${topic.name}" at "${name}"/"${channel.name}" failed: ${err instanceof Error ? err.message : String(err)}`,
+            `Auto-subscribe topic "${topic.name}" at "${name}"/"${channelName}" failed: ${err instanceof Error ? err.message : String(err)}`,
           )
         }
       }
