@@ -24,6 +24,9 @@ export interface BrokerLocalEvent {
   type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast'
   channel?: string
   topicId?: string
+  /** Name of the topic `topicId` refers to. Carried on topic traffic so a
+   *  channel watcher, which never joined the topic, can still name it. */
+  topicName?: string
   topic?: { id: string; topic: string; channel?: string; creator: string; state?: string; createdAt?: string }
   sender?: string
   text?: string
@@ -140,6 +143,18 @@ export class BrokerEventListener {
     return this.context.isChannelSubscribed(channel)
   }
 
+  /**
+   * Should topic traffic reach this session? Normally only for topics it
+   * joined — that is what keeps a busy worker out of unrelated topics. A
+   * session watching the channel sees all of it, including topics created
+   * after it subscribed: the gate is evaluated per event, so there is no
+   * subscription list to keep up to date and nothing to forget to join.
+   */
+  private topicVisible(channel: string, topicId: string | undefined): boolean {
+    if (!topicId) return false
+    return this.context.isTopicJoined(topicId) || this.context.isChannelWatched(channel)
+  }
+
   private async handleLocalEvent(event: BrokerLocalEvent): Promise<void> {
     switch (event.type) {
       case 'topic_created': {
@@ -174,8 +189,8 @@ export class BrokerEventListener {
           this.log(`DROPPED message: channel "${channel}" not subscribed`)
           return
         }
-        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED message: topic ${event.topicId ?? 'none'} not joined`)
+        if (!this.topicVisible(channel, event.topicId)) {
+          this.log(`DROPPED message: topic ${event.topicId ?? 'none'} not joined and channel not watched`)
           return
         }
         if (event.sender && this.session.isExactSelf(event.sender)) {
@@ -189,6 +204,7 @@ export class BrokerEventListener {
           channel,
           channelName: channel,
           threadTs: event.topicId,
+          ...(event.topicName ? { topicName: event.topicName } : {}),
         }
         this.log(`PUSHING message to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
@@ -200,8 +216,8 @@ export class BrokerEventListener {
           this.log(`DROPPED topic_archived: channel "${channel}" not subscribed`)
           return
         }
-        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED topic_archived: topic ${event.topicId ?? 'none'} not joined`)
+        if (!this.topicVisible(channel, event.topicId)) {
+          this.log(`DROPPED topic_archived: topic ${event.topicId ?? 'none'} not joined and channel not watched`)
           return
         }
         if (event.archivedBy && this.session.isExactSelf(event.archivedBy)) {
@@ -215,6 +231,7 @@ export class BrokerEventListener {
           channel,
           channelName: channel,
           threadTs: event.topicId,
+          ...(event.topicName ? { topicName: event.topicName } : {}),
         }
         this.log(`PUSHING topic_archived to Claude`)
         await this.bus.push(msg)
@@ -226,8 +243,8 @@ export class BrokerEventListener {
           this.log(`DROPPED topic_unarchived: channel "${channel}" not subscribed`)
           return
         }
-        if (!event.topicId || !this.context.isTopicJoined(event.topicId)) {
-          this.log(`DROPPED topic_unarchived: topic ${event.topicId ?? 'none'} not joined`)
+        if (!this.topicVisible(channel, event.topicId)) {
+          this.log(`DROPPED topic_unarchived: topic ${event.topicId ?? 'none'} not joined and channel not watched`)
           return
         }
         if (event.unarchivedBy && this.session.isExactSelf(event.unarchivedBy)) {
@@ -241,6 +258,7 @@ export class BrokerEventListener {
           channel,
           channelName: channel,
           threadTs: event.topicId,
+          ...(event.topicName ? { topicName: event.topicName } : {}),
         }
         this.log(`PUSHING topic_unarchived to Claude`)
         await this.bus.push(msg)

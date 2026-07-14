@@ -130,6 +130,9 @@ export async function handleIdentityTool(
         name: c.name,
         location: c.location,
         source: c.source,
+        // Surfaced so channel-wide visibility (or the lack of it) is
+        // diagnosable here rather than only in the debug log.
+        watching: c.watching,
       }))
 
       // Expose every transport's runtime state so the user sees

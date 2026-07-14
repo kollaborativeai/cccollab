@@ -165,8 +165,22 @@ describe('Identity Tools', () => {
         expect(result.objective).toBe('design the API')
         expect(result.activeChannel).toEqual({ name: 'default', location: 'local' })
         expect(result.subscribedChannels).toEqual([
-          { name: 'default', location: 'local', source: 'fallback' },
-          { name: 'project_x', location: 'local', source: 'manual' },
+          { name: 'default', location: 'local', source: 'fallback', watching: false },
+          { name: 'project_x', location: 'local', source: 'manual', watching: false },
+        ])
+      })
+
+      it('reports which channels are in channel-wide watch mode (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        deps.context.joinChannel('quiet', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true },
+          { name: 'quiet', location: 'local', source: 'manual', watching: false },
         ])
       })
 

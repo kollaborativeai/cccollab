@@ -1,7 +1,7 @@
 import type { ActiveContext, ChannelSource } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
-import type { ChannelLocation } from '../transport/index.js'
+import { LOCAL_LOCATION, type ChannelLocation } from '../transport/index.js'
 import type { TransportRouter } from '../transport/router.js'
 import { ensureChannelSubscription, teardownChannelSubscription } from '../transport/attach.js'
 import { normalizeChannelName } from '../context.js'
@@ -49,8 +49,11 @@ export async function handleChannelTool(
       return handleListChannels(deps, location)
     }
     case 'join_channel': {
-      const { name: rawName, location } = args as { name?: string; location?: ChannelLocation }
-      return handleJoinChannel(deps, rawName ?? '', location ?? 'local')
+      const { name: rawName, location, watch } = args as { name?: string; location?: ChannelLocation; watch?: boolean }
+      // `location` is passed through UNDEFAULTED: handleJoinChannel must be
+      // able to tell "the caller chose local" from "the caller said nothing",
+      // because a watch with an unstated location is ambiguous and dangerous.
+      return handleJoinChannel(deps, rawName ?? '', location, watch)
     }
     case 'leave_channel': {
       const { name: rawName, location } = args as { name?: string; location?: ChannelLocation }
@@ -115,6 +118,10 @@ interface ChannelRow {
   messageCount?: number
   subscribed: boolean
   isActive: boolean
+  /** Channel-wide topic visibility (KAI-414). Surfaced here as well as in
+   *  `whoami` because this is the other place a session looks to answer
+   *  "am I actually seeing this channel?". */
+  watching: boolean
 }
 
 async function handleListChannels(deps: ChannelToolDeps, locationFilter?: ChannelLocation): Promise<string> {
@@ -154,6 +161,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
         messageCount: c.messageCount,
         subscribed: sub !== undefined,
         isActive: active?.name === c.name && active?.location === transport.source,
+        watching: sub?.watching === true,
       })
     }
   }
@@ -176,6 +184,7 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
       messageCount: undefined,
       subscribed: true,
       isActive: active?.name === sub.name && active?.location === sub.location,
+      watching: sub.watching,
     })
   }
 
@@ -185,9 +194,51 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
   })
 }
 
-async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, location: ChannelLocation): Promise<string> {
+async function handleJoinChannel(
+  deps: ChannelToolDeps,
+  rawName: string,
+  requestedLocation: ChannelLocation | undefined,
+  watch?: boolean,
+): Promise<string> {
   const normalized = normalizeChannelName(rawName)
   if (!normalized) return JSON.stringify({ error: 'Channel name must be non-empty.' })
+
+  const location = requestedLocation ?? LOCAL_LOCATION
+
+  // Remote delivers topic messages via per-topic subscriptions, so a watched
+  // remote channel would silently miss every topic created after the join —
+  // the exact blind spot watch mode exists to close. Refuse loudly until the
+  // remote topic-created event (KAI-413) lands. Fail BEFORE joining: a
+  // half-applied watch is worse than none.
+  if (watch === true && location !== LOCAL_LOCATION) {
+    return JSON.stringify({
+      error:
+        `Channel-wide watch is local-transport only; "${location}" is remote. ` +
+        `Remote watch needs the topic-created event (KAI-413), which is not ready. ` +
+        `Re-run without \`watch\` to subscribe normally.`,
+    })
+  }
+
+  // A watch with an UNSTATED location is the nastiest case of all: `location`
+  // silently defaults to local and join_channel implicitly creates channels,
+  // so an orchestrator whose fleet lives on a remote would get a brand-new,
+  // empty LOCAL channel of the same name, a success response, and
+  // `watching: true` — then sit in an empty room hearing nothing while whoami
+  // reports it is watching. Confidently blind, which is the precise failure
+  // this feature exists to eliminate. When any remote is in play, make the
+  // caller say which one they mean.
+  if (watch === true && requestedLocation === undefined) {
+    const remotes = deps.router.enabled().filter((t) => t.source !== LOCAL_LOCATION)
+    if (remotes.length > 0) {
+      const names = remotes.map((t) => t.source).join(', ')
+      return JSON.stringify({
+        error:
+          `Ambiguous watch: \`location\` was not specified and non-local locations exist (${names}). ` +
+          `Watching would silently subscribe you to a LOCAL channel named "${normalized}", which may not be ` +
+          `where your fleet is. Pass \`location\` explicitly (e.g. "local") to confirm which channel to watch.`,
+      })
+    }
+  }
 
   await deps.ensureAttached?.(location)
   let transport
@@ -201,7 +252,7 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
     sessionName: deps.session.displayName,
     channel: normalized,
   })
-  const { becameActive } = deps.context.joinChannel(normalized, 'manual', location)
+  const { becameActive, watching } = deps.context.joinChannel(normalized, 'manual', location, watch)
   if (deps.messageBus && deps.remoteChannelUnsubscribes) {
     ensureChannelSubscription({
       transport,
@@ -211,7 +262,7 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
       map: deps.remoteChannelUnsubscribes,
     })
   }
-  return JSON.stringify({ channel: normalized, location, becameActive, subscriberCount })
+  return JSON.stringify({ channel: normalized, location, becameActive, subscriberCount, watching })
 }
 
 async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, location: ChannelLocation): Promise<string> {

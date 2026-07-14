@@ -247,3 +247,167 @@ describe('BrokerEventListener (channel-aware)', () => {
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 })
+
+describe('BrokerEventListener (channel watch mode)', () => {
+  let listener: BrokerEventListener
+  let mockBus: ReturnType<typeof createMockMessageBus>
+  let context: ActiveContext
+
+  function messageIn(topicId: string, topicName?: string): BrokerLocalEvent {
+    return {
+      source: 'local',
+      type: 'message',
+      channel: 'default',
+      topicId,
+      topicName,
+      sender: 'worker-1',
+      text: 'PR merged',
+    }
+  }
+
+  beforeEach(() => {
+    mockBus = createMockMessageBus()
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    context = new ActiveContext()
+
+    listener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: mockBus as never,
+      sessionManager: session,
+      context,
+    })
+  })
+
+  it('delivers a message from a topic it never joined when watching the channel', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'worker-1', text: 'PR merged', threadTs: 'never-joined-topic' }),
+      )
+    })
+  })
+
+  it('tags the delivered message with its topic name', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent(messageIn('never-joined-topic', 'KAI-401'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ topicName: 'KAI-401' }))
+    })
+  })
+
+  it('drops a message from an unjoined topic when NOT watching the channel', async () => {
+    context.joinChannel('default', 'manual', 'local')
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('delivers messages from topics created AFTER the session started watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    // A topic that did not exist at watch time; the gate is per-event, so no
+    // re-subscription is needed for it to be visible.
+    listener.processLocalEvent(messageIn('topic-created-later'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ threadTs: 'topic-created-later' }))
+    })
+  })
+
+  it('does not deliver topic traffic from a channel it is not subscribed to, even while watching another', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'other',
+      topicId: 't1',
+      sender: 'worker-1',
+      text: 'Noise',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('still drops self messages while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'default',
+      topicId: 't1',
+      sender: 'orchestrator',
+      text: 'My own message',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('delivers topic_archived for an unjoined topic while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_archived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      archivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ text: 'Topic archived' }))
+    })
+  })
+
+  // "Topic archived" against a bare uuid is unusable to a watcher: it never
+  // joined the topic, so it has no local name for that id. It would know that
+  // *a* topic closed, not which one — for an orchestrator whose whole use of
+  // this event is "which worker just finished", that is a functional miss.
+  it('names the topic in a topic_archived event so the watcher knows WHICH topic closed', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_archived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      topicName: 'KAI-401',
+      archivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ topicName: 'KAI-401' }))
+    })
+  })
+
+  it('delivers and names a topic_unarchived event for an unjoined topic while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_unarchived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      topicName: 'KAI-401',
+      unarchivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ text: 'Topic unarchived', topicName: 'KAI-401' }),
+      )
+    })
+  })
+
+  // The sharpest form of the opt-in guarantee: watching one channel must not
+  // leak topic traffic from ANOTHER channel the session is subscribed to but
+  // is NOT watching. This is what protects a worker that happens to share a
+  // channel with an orchestrator.
+  it('does not deliver unjoined-topic traffic from a SUBSCRIBED but unwatched channel', async () => {
+    context.joinChannel('watched-ch', 'manual', 'local', true)
+    context.joinChannel('quiet-ch', 'manual', 'local')
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'quiet-ch',
+      topicId: 'unjoined-in-quiet',
+      sender: 'worker-1',
+      text: 'should not be seen',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+})

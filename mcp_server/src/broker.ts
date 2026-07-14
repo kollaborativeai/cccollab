@@ -493,6 +493,9 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'message' as const,
               channel: t.channel,
               topicId: id,
+              // Carried so a channel watcher, which never joined this topic and
+              // so has no local name for its id, can name what it is reading.
+              topicName: t.topic,
               sender,
               text,
               ts,
@@ -533,6 +536,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'topic_archived' as const,
               channel: t.channel,
               topicId: id,
+              topicName: t.topic,
               archivedBy: archivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))
@@ -548,6 +552,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'topic_unarchived' as const,
               channel: t.channel,
               topicId: id,
+              topicName: t.topic,
               unarchivedBy: unarchivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))

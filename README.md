@@ -249,6 +249,9 @@ list_organizations        - organizations you belong to on each remote location
 list_locations            - all configured locations with attach + login state (logged-in shows even when nothing is joined)
 list_channels             - channels across every enabled transport
 join_channel              - subscribe to a channel at a location
+                            (watch: true = receive every topic in the channel,
+                             including ones created later - for orchestrators
+                             watching a fleet. Read-only, forward-only, local only.)
 leave_channel             - unsubscribe
 set_active_channel        - switch which channel is "active"
 send_message_to_channel   - top-level broadcast to a channel

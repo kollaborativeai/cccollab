@@ -381,7 +381,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   console.error(`[cccollab] Session "${session.sessionName}" connected as ${config.username}`)
 }
 
-interface ToolDeps {
+export interface ToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -484,7 +484,10 @@ function buildInstructions(session: SessionManager, resolved: ResolvedConfig, ro
  * Business logic lives in `handleXxxTool`; this function is only the
  * MCP-SDK-facing glue (Zod schemas + CallToolResult shaping).
  */
-function registerTools(mcp: McpServer, deps: ToolDeps): void {
+/** Exported so tests can drive the tools through a real MCP client. The zod
+ *  `inputSchema` here is the true argument boundary — the SDK drops anything it
+ *  does not declare — so it must be exercised, not bypassed. */
+export function registerTools(mcp: McpServer, deps: ToolDeps): void {
   const text = (s: string): CallToolResult => ({ content: [{ type: 'text' as const, text: s }] })
   const error = (err: unknown): CallToolResult => ({
     content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -624,7 +627,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'join_channel',
     {
       description:
-        'Subscribe to a channel (implicitly created) at the given location. Idempotent. Channels with the same name at different locations are distinct - specify `location` when a name exists at multiple locations. Returns {channel, location, becameActive, subscriberCount}.',
+        'Subscribe to a channel (implicitly created) at the given location. Idempotent. Channels with the same name at different locations are distinct - specify `location` when a name exists at multiple locations. Returns {channel, location, becameActive, subscriberCount, watching}.',
       inputSchema: {
         name: z.string().describe('Channel name (case-insensitive, non-empty).'),
         location: z
@@ -632,6 +635,12 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
           .optional()
           .default('local')
           .describe('Location name. Defaults to "local" (the in-process broker).'),
+        watch: z
+          .boolean()
+          .optional()
+          .describe(
+            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now.",
+          ),
       },
     },
     async (args) => {

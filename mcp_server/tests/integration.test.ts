@@ -337,4 +337,54 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       RIGHT.listener.stop()
     }
   }, 15_000)
+
+  /**
+   * The KAI-414 story end-to-end, through a real broker and real SSE: an
+   * orchestrator watching a channel sees a worker's topic traffic WITHOUT ever
+   * joining the topic — including a topic created after it started watching —
+   * while an ordinary worker on the same channel stays blind to it. The unit
+   * tests gate on a synthetic event; this proves the whole chain
+   * (broker fan-out -> SSE -> listener -> MessageBus) actually delivers.
+   */
+  it('a watching orchestrator sees a topic it never joined; an ordinary session does not', async () => {
+    const ORCH = await makeSession('watch-orchestrator', brokerPort)
+    const WORKER = await makeSession('watch-worker', brokerPort)
+    const BYSTANDER = await makeSession('watch-bystander', brokerPort)
+    try {
+      // The orchestrator opts in to channel-wide visibility. The bystander is
+      // an ordinary session on the SAME channel: it must stay unaffected.
+      await handleChannelTool('join_channel', { name: 'watch-ch', watch: true }, ORCH.channelDeps)
+      await handleChannelTool('join_channel', { name: 'watch-ch' }, WORKER.channelDeps)
+      await handleChannelTool('join_channel', { name: 'watch-ch' }, BYSTANDER.channelDeps)
+
+      // Topic is created AFTER the orchestrator started watching, and neither
+      // the orchestrator nor the bystander ever joins it.
+      const started = JSON.parse(
+        await handleTopicTool('start_topic', { topic: 'KAI-999', channel: 'watch-ch' }, WORKER.topicDeps),
+      )
+      const topicId = started.id as string
+
+      ORCH.received.length = 0
+      BYSTANDER.received.length = 0
+
+      await handleTopicTool('send_message_to_topic', { text: 'PR merged', topic: 'KAI-999' }, WORKER.topicDeps)
+
+      await waitUntil(() => (ORCH.received.some((m) => m.text === 'PR merged') ? true : null), 3000)
+
+      const seen = ORCH.received.find((m) => m.text === 'PR merged')
+      expect(seen).toBeDefined()
+      expect(seen?.threadTs).toBe(topicId)
+      expect(seen?.channel).toBe('watch-ch')
+      // Tagged with the topic, so the watcher can tell which room it's reading.
+      expect(seen?.topicName).toBe('KAI-999')
+
+      // Opt-in guarantee: the ordinary session on the same channel, which also
+      // never joined the topic, must NOT be exposed to this traffic.
+      expect(BYSTANDER.received.some((m) => m.text === 'PR merged')).toBe(false)
+    } finally {
+      ORCH.listener.stop()
+      WORKER.listener.stop()
+      BYSTANDER.listener.stop()
+    }
+  }, 15_000)
 })

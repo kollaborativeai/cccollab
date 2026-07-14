@@ -32,6 +32,7 @@ Call `list_sessions` to see which other sessions are reachable through any of yo
 
 - `list_channels` - see all channels on the broker. Each entry has `subscribed` (true/false) and `isActive`; the top-level `activeChannel` mirrors which one is active. Use this to discover channels you could join.
 - `join_channel` / `leave_channel` - subscribe or unsubscribe. Joining a brand new channel implicitly creates it.
+- `join_channel({ watch: true })` - **channel-wide topic visibility.** Normally you only receive messages from topics you have explicitly joined, which is what keeps you out of unrelated topic traffic. With `watch: true` you receive messages from **every** topic in the channel, including topics created after you subscribed, each tagged with its topic name. Use this when you are an **orchestrator watching a fleet**: without it, a topic you forget to join is one you are silently blind to. Ordinary worker sessions should leave it off. Notes: it is read-only visibility (it does **not** join you to the topics, so you are not a participant); it is **forward-only** (it does not backfill messages already sent before you started watching - use `read_topic_messages` to catch up); it is **local-transport only** for now (a remote `watch` is refused rather than half-working - see KAI-413); and `whoami` / `list_channels` both report `watching` so you can confirm you are actually seeing the channel.
 - `set_active_channel` - focus on a specific channel (must be subscribed).
 - `send_message_to_channel` - top-level broadcast to a channel. Defaults to the active channel.
 - `start_topic` - create a topic in the active channel (or pass `channel`).
@@ -53,8 +54,8 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 | `introduce`                         | Set your role name. Required before sending.                                                                     |
 | `whoami`                            | Show your name, objective, active channel, active topic, subscribed channels, and per-location transport status. |
 | `authenticate`                      | Sign in to a remote location via Google OAuth (hot-attaches on success).                                         |
-| `list_channels`                     | All channels across enabled transports with `subscribed`, `location`, `subscriberCount`, `isActive`.             |
-| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                                                         |
+| `list_channels`                     | All channels across enabled transports with `subscribed`, `location`, `subscriberCount`, `isActive`, `watching`. |
+| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel. `watch: true` = see every topic in it (orchestrators; local-only).      |
 | `set_active_channel`                | Switch active focus to a subscribed channel.                                                                     |
 | `send_message_to_channel`           | Top-level broadcast to a channel.                                                                                |
 | `list_sessions`                     | Sessions visible through your subscribed channels.                                                               |
