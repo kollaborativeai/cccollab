@@ -47,8 +47,16 @@ export class SessionManager {
   /** The organization this session most recently introduced into. The
    *  backend keys CLI sessions by (user, org, sessionName), so this is
    *  tracked to detect an org change on a same-name re-introduce, which
-   *  would rebind the backend row and orphan the old memberships. */
+   *  would rebind the backend row and orphan the old memberships.
+   *
+   *  An `undefined` org NEVER clobbers a tracked one. Unlike `objective`,
+   *  this binding is monotonic for the session's lifetime: an org-less
+   *  re-introduce (reachable once every remote has self-disabled, since the
+   *  `hasRemote` gate then stops requiring an `organization`) must not ERASE
+   *  the tracked org — doing so would disarm the org-change rejection for the
+   *  rest of the session. There is no case where clearing it is meaningful. */
   setOrganization(organization: string | undefined): void {
+    if (organization === undefined) return
     this.organization = organization
   }
 

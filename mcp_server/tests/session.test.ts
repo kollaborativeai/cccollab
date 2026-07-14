@@ -109,4 +109,29 @@ describe('SessionManager', () => {
       expect(sm.isSelf('carlos | api | backend')).toBe(false)
     })
   })
+
+  describe('organization', () => {
+    it('is undefined until set', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      expect(sm.getOrganization()).toBeUndefined()
+    })
+
+    it('records the introduced organization', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setOrganization('org_1')
+      expect(sm.getOrganization()).toBe('org_1')
+    })
+
+    it('does not clobber a tracked organization with undefined', () => {
+      // The org binding is monotonic for the session's lifetime: an org-less
+      // re-introduce must never erase a tracked org (that would disarm the
+      // org-change rejection). It may still be UPDATED to another concrete org.
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setOrganization('org_1')
+      sm.setOrganization(undefined)
+      expect(sm.getOrganization()).toBe('org_1')
+      sm.setOrganization('org_2')
+      expect(sm.getOrganization()).toBe('org_2')
+    })
+  })
 })

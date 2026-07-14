@@ -595,6 +595,34 @@ describe('Identity Tools', () => {
           expect(calls).toEqual([])
         })
 
+        it('keeps the guard armed when an org-less re-introduce omits the organization', async () => {
+          // Once every remote has self-disabled, the `hasRemote` gate no
+          // longer requires an `organization`, so an org-less re-introduce is
+          // reachable. It must not ERASE the tracked org — that would disarm
+          // the reject above for the rest of the session.
+          const calls: RecordedCall[] = []
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+
+          // The remote self-disables; an org-less re-introduce now passes the gate.
+          transport.enabled = false
+          await handleIdentityTool('introduce', { name: 'a' }, deps)
+          expect(deps.session.getOrganization()).toBe('org_1')
+
+          calls.length = 0
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+
+          expect(JSON.parse(result).error).toMatch(/different organization/i)
+          expect(deps.session.getOrganization()).toBe('org_1')
+          expect(calls).toEqual([])
+        })
+
         it('allows a simultaneous name-and-org change (migration proceeds)', async () => {
           const calls: RecordedCall[] = []
           const transport = makeRecordingRemoteTransport('remote', calls)
