@@ -866,6 +866,60 @@ describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
     expect(onUpdateCalls).toHaveLength(2)
     expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 300 })
   })
+
+  /**
+   * The other half of that rule. Seeding `channelMaxTs` only when absent is what
+   * lets the migration's transient leave/re-join keep its place in the stream —
+   * but it also means a cursor left behind by a DELIBERATE `leave_channel` would
+   * survive, and a later re-join would resume from it and replay every broadcast
+   * that accrued while the session was away as fresh inbound notifications.
+   * `forgetChannelCursor` (called from the leave_channel tool, never from the
+   * migration) drops it so the re-join re-seeds from `latestTs` and skips that
+   * backlog.
+   */
+  it('forgets the cursor on a deliberate leave, so a later re-join skips the backlog', async () => {
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    let joinLatestTs = 100
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: joinLatestTs }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'me' })
+    await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
+    const unsub = transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    // Deliver a broadcast so the delivered cursor advances to 300.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
+
+    // Deliberate leave_channel: drop the subscription AND forget the cursor.
+    unsub()
+    transport.forgetChannelCursor('dev')
+
+    // A large backlog accrues while the session is away.
+    joinLatestTs = 99_999
+
+    await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+
+    // Re-seeded from latestTs — NOT resumed from the stale 300, which would
+    // replay the whole 300..99_999 backlog at the agent.
+    expect(onUpdateCalls).toHaveLength(2)
+    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 99_999 })
+  })
 })
 
 /**

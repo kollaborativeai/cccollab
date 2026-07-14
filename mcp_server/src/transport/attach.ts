@@ -605,6 +605,15 @@ export function hasChannelSubscription(transport: Transport): transport is Trans
   return typeof (transport as { subscribeChannelMessages?: unknown }).subscribeChannelMessages === 'function'
 }
 
+/** Type guard: does this transport carry a per-channel delivery cursor that a
+ *  deliberate `leave_channel` should forget? Only remote transports do; the
+ *  local broker replays nothing on re-join. */
+export function hasChannelCursor(transport: Transport): transport is Transport & {
+  forgetChannelCursor: RemoteTransport['forgetChannelCursor']
+} {
+  return typeof (transport as { forgetChannelCursor?: unknown }).forgetChannelCursor === 'function'
+}
+
 /**
  * Establish a channel-broadcast subscription on a remote transport if one
  * isn't already in place. Idempotent; keyed by

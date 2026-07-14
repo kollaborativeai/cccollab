@@ -1056,6 +1056,26 @@ export class RemoteTransport implements Transport {
   }
 
   /**
+   * Forget a channel's delivery cursor, so the NEXT `joinChannel` re-seeds it
+   * from the channel's `latestTs` and the feed skips everything that accrued
+   * while the session was away.
+   *
+   * Called only when the session DELIBERATELY leaves a channel (`leave_channel`).
+   * `joinChannel` seeds the cursor only when absent — that is what stops the
+   * identity migration's transient leave/re-join from skipping broadcasts that
+   * land mid-rename — but it also means a cursor left behind by an intentional
+   * leave would survive, and a later re-join would replay the entire backlog
+   * since the last delivered message as fresh inbound notifications. Dropping
+   * the cursor here keeps the two leaves distinct: transient (migration) keeps
+   * its place in the stream, deliberate (tool) starts fresh on re-join.
+   */
+  forgetChannelCursor(channelName: string): void {
+    const channelId = this.channelIdsByName.get(channelName)
+    if (channelId === undefined) return
+    this.channelMaxTs.delete(channelId)
+  }
+
+  /**
    * Tear down the transport: invoke every outstanding subscribe-returned
    * unsubscribe (DMs, topics, anything else future code adds via
    * `trackUnsubscribe`), then close the underlying ConvexClient so its
