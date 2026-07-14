@@ -1111,6 +1111,34 @@ describe('Identity Tools', () => {
         expect(calls.indexOf(leave!)).toBeLessThan(calls.indexOf(join!))
       })
 
+      it('tears down the username ghost from TOPICS too, not just channels', async () => {
+        // The channel path above says nothing about topics, which are the other
+        // half of the ghost: server.ts auto-joins configured topics under the
+        // same username fallback, and a topic membership left behind under it is
+        // just as real a ghost as a channel one.
+        const calls: RecordedCall[] = []
+        const deps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'samuel', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([makeRecordingTransport('local', calls)]),
+        }
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+        deps.context.joinTopic('uuid-1', 'KAI-408', 'kai', 'local')
+
+        await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
+
+        const leaveTopicAt = calls.findIndex((c) => c.method === 'leaveTopic')
+        const joinTopicAt = calls.findIndex((c) => c.method === 'joinTopic')
+        expect(leaveTopicAt).toBeGreaterThanOrEqual(0)
+        expect(joinTopicAt).toBeGreaterThanOrEqual(0)
+        expect(calls[leaveTopicAt]!.args).toMatchObject({ sessionName: 'samuel', topicId: 'uuid-1' })
+        expect(calls[joinTopicAt]!.args).toMatchObject({ sessionName: 'kai-408', topicId: 'uuid-1' })
+        // Left under the old identity before being re-joined under the new one.
+        expect(leaveTopicAt).toBeLessThan(joinTopicAt)
+        // Same-org rename ⇒ the topic is re-joined, never dropped.
+        expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['uuid-1'])
+      })
+
       it('does not churn when a no-config-name session introduces its own username', async () => {
         const calls: RecordedCall[] = []
         const deps: IdentityToolDeps = {
