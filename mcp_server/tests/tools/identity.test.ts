@@ -192,7 +192,7 @@ function makeRecordingDeps(calls: RecordedCall[], overrides?: Partial<Transport>
 function makeRecordingRemoteTransport(
   source: string,
   calls: RecordedCall[],
-  opts?: { introduceThrowsAfter?: number },
+  opts?: { introduceThrowsAfter?: number; introduceThrowsOnCall?: number },
 ): Transport {
   let sessionId: string | null = null
   let introduceCount = 0
@@ -202,7 +202,10 @@ function makeRecordingRemoteTransport(
     introduce: async (args: Record<string, unknown>): Promise<void> => {
       introduceCount += 1
       calls.push({ method: 'introduce', args })
-      if (opts?.introduceThrowsAfter !== undefined && introduceCount > opts.introduceThrowsAfter) {
+      if (
+        (opts?.introduceThrowsAfter !== undefined && introduceCount > opts.introduceThrowsAfter) ||
+        opts?.introduceThrowsOnCall === introduceCount
+      ) {
         throw new Error(`introduce blip on ${source}`)
       }
       sessionId = `session_${String(args.sessionName)}`
@@ -790,51 +793,218 @@ describe('Identity Tools', () => {
        * from "genuinely different org" here (that lives in the backend), so we
        * REJECT rather than half-migrate.
        */
-      describe('organization change without a name change', () => {
-        it('rejects an org-only change and mutates nothing', async () => {
-          const calls: RecordedCall[] = []
-          const transport = makeRecordingRemoteTransport('remote', calls)
+      describe('organization change', () => {
+        /** A remote location with a channel and a topic joined, introduced into org_1. */
+        async function remoteInOrg1(
+          calls: RecordedCall[],
+          opts?: { introduceThrowsOnCall?: number },
+        ): Promise<{
+          deps: IdentityToolDeps
+          transport: Transport
+          topicMap: Map<string, () => void>
+          channelMap: Map<string, () => void>
+        }> {
+          const topicMap = new Map<string, () => void>()
+          const channelMap = new Map<string, () => void>()
+          const transport = makeRecordingRemoteTransport('remote', calls, opts)
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
             context: new ActiveContext(),
             router: new TransportRouter([transport]),
+            messageBus,
+            remoteTopicUnsubscribes: topicMap,
+            remoteChannelUnsubscribes: channelMap,
           }
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureTopicSubscription({
+            transport,
+            locationName: 'remote',
+            topicId: 'topic_1',
+            channelName: 'kai',
+            messageBus,
+            map: topicMap,
+          })
+          return { deps, transport, topicMap, channelMap }
+        }
+
+        const indexOf = (calls: RecordedCall[], method: string): number => {
+          const i = calls.findIndex((c) => c.method === method)
+          expect(i, `expected a "${method}" call`).toBeGreaterThanOrEqual(0)
+          return i
+        }
+
+        it('migrates the location on an org-only change and DROPS its foreign-org topics', async () => {
+          // A location's backend row is keyed by (user, org, sessionName), so an
+          // org change rebinds it exactly like a rename does — the old identity
+          // must be torn down first or it ghosts the OLD org. Channels are
+          // addressed by NAME and re-resolve in the new org, so they carry
+          // across. Topic IDS belong to the old org and are meaningless in the
+          // new one, so they are dropped — and REPORTED, never silently.
+          const calls: RecordedCall[] = []
+          const { deps } = await remoteInOrg1(calls)
           calls.length = 0
 
           const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
 
-          expect(JSON.parse(result).error).toMatch(/different organization/i)
-          // Nothing was touched: no leave, no introduce, no join.
-          expect(calls).toEqual([])
-          // ...and, critically, the SESSION's own state is untouched too. If
-          // the reject path leaked the new org onto the session, the very next
-          // (identical) call would see orgChanged === false and sail through
-          // with no teardown — the defect, resurrected by a plain retry.
-          expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
-          expect(deps.session.displayName).toBe('a')
+          // The old identity is torn down while still bound to the OLD org row.
+          expect(indexOf(calls, 'leaveTopic')).toBeLessThan(indexOf(calls, 'introduce'))
+          expect(indexOf(calls, 'leaveChannel')).toBeLessThan(indexOf(calls, 'introduce'))
+          expect(calls.find((c) => c.method === 'leaveTopic')!.args).toMatchObject({
+            sessionName: 'a',
+            topicId: 'topic_1',
+          })
+          expect(calls.find((c) => c.method === 'introduce')!.args).toMatchObject({ organizationId: 'org_2' })
+
+          // The channel carries across (re-joined by name in the new org)...
+          expect(calls.some((c) => c.method === 'joinChannel' && c.args.channel === 'kai')).toBe(true)
+          // ...the foreign-org topic id is never re-joined or re-subscribed...
+          expect(calls.some((c) => c.method === 'joinTopic')).toBe(false)
+          expect(calls.some((c) => c.method === 'subscribeTopicMessages')).toBe(false)
+          // ...it is gone from the session's context...
+          expect(deps.context.getJoinedTopics()).toEqual([])
+          // ...and the user is TOLD it was dropped.
+          expect(JSON.parse(result)).toEqual({
+            name: 'a',
+            droppedTopics: [{ topic: 'KAI-408', channel: 'kai', location: 'remote' }],
+          })
         })
 
-        it('rejects the SAME call again when the agent simply retries it', async () => {
-          const calls: RecordedCall[] = []
-          const transport = makeRecordingRemoteTransport('remote', calls)
+        it('never drops LOCAL topics on an org change (the broker is single-tenant)', async () => {
+          // The single most dangerous mistake available here: treating the local
+          // location as org-changed would tear down and DROP the user's local
+          // topics on an org switch. The broker ignores organizationId entirely.
+          const localCalls: RecordedCall[] = []
+          const remoteCalls: RecordedCall[] = []
+          const topicMap = new Map<string, () => void>()
+          const channelMap = new Map<string, () => void>()
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const local = makeRecordingTransport('local', localCalls)
+          const remote = makeRecordingRemoteTransport('remote', remoteCalls)
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
             context: new ActiveContext(),
-            router: new TransportRouter([transport]),
+            router: new TransportRouter([local, remote]),
+            messageBus,
+            remoteTopicUnsubscribes: topicMap,
+            remoteChannelUnsubscribes: channelMap,
           }
-          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          deps.context.joinChannel('kai', 'cccollab.json', 'local')
+          deps.context.joinChannel('ops', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          deps.context.joinTopic('topic_local', 'Local work', 'kai', 'local')
+          deps.context.joinTopic('topic_remote', 'Remote work', 'ops', 'remote')
+          ensureChannelSubscription({
+            transport: remote,
+            locationName: 'remote',
+            channelName: 'ops',
+            messageBus,
+            map: channelMap,
+          })
+          ensureTopicSubscription({
+            transport: remote,
+            locationName: 'remote',
+            topicId: 'topic_remote',
+            channelName: 'ops',
+            messageBus,
+            map: topicMap,
+          })
+          localCalls.length = 0
+          remoteCalls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+
+          // The REMOTE topic is dropped and reported...
+          expect(JSON.parse(result).droppedTopics).toEqual([
+            { topic: 'Remote work', channel: 'ops', location: 'remote' },
+          ])
+          // ...while the LOCAL topic survives untouched: never left, still joined.
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_local'])
+          expect(localCalls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(localCalls.some((c) => c.method === 'leaveChannel')).toBe(false)
+        })
+
+        it('treats LOCAL as never org-changed even if a local org binding somehow exists', async () => {
+          // Defense in depth, and the rule itself rather than just its outcome.
+          // Nothing records an org for the local broker today (single-tenant, it
+          // ignores organizationId), so the outcome test above passes even
+          // without the LOCAL guard on the org-changed snapshot. Seed a local
+          // binding directly: local must STILL never count as org-changed, or a
+          // future change that starts recording one would silently drop every
+          // local topic on an org switch.
+          const localCalls: RecordedCall[] = []
+          const remoteCalls: RecordedCall[] = []
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const local = makeRecordingTransport('local', localCalls)
+          const remote = makeRecordingRemoteTransport('remote', remoteCalls)
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([local, remote]),
+            messageBus,
+            remoteTopicUnsubscribes: new Map(),
+            remoteChannelUnsubscribes: new Map(),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'local')
+          deps.context.joinChannel('ops', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          deps.context.joinTopic('topic_local', 'Local work', 'kai', 'local')
+          // Force the condition the LOCAL guard exists to withstand.
+          deps.session.setOrganizationFor('local', 'org_1')
+          localCalls.length = 0
+          remoteCalls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_local'])
+          expect(localCalls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(localCalls.some((c) => c.method === 'leaveChannel')).toBe(false)
+          expect(JSON.parse(result).droppedTopics).toBeUndefined()
+        })
+
+        it('re-joins the channel under the new name and drops foreign-org topics on a name+org change', async () => {
+          const calls: RecordedCall[] = []
+          const { deps } = await remoteInOrg1(calls)
           calls.length = 0
 
-          const first = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
-          const second = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+          const result = await handleIdentityTool('introduce', { name: 'b', organization: 'org_2' }, deps)
 
-          expect(JSON.parse(first).error).toMatch(/different organization/i)
-          expect(JSON.parse(second).error).toMatch(/different organization/i)
+          expect(calls.find((c) => c.method === 'leaveChannel')!.args).toMatchObject({ sessionName: 'a' })
+          expect(calls.some((c) => c.method === 'joinChannel' && c.args.sessionName === 'b')).toBe(true)
+          expect(calls.some((c) => c.method === 'joinTopic')).toBe(false)
+          expect(JSON.parse(result)).toEqual({
+            name: 'b',
+            droppedTopics: [{ topic: 'KAI-408', channel: 'kai', location: 'remote' }],
+          })
+        })
+
+        it('still migrates on a later introduce after a FAILED org change', async () => {
+          // Round-trip with the per-location binding: the failed attempt never
+          // recorded org_2, so the location is still known to be on org_1 and
+          // the next successful introduce must STILL migrate it.
+          const calls: RecordedCall[] = []
+          // call 1 = bootstrap (ok), call 2 = the failing org change, call 3 = ok.
+          const { deps } = await remoteInOrg1(calls, { introduceThrowsOnCall: 2 })
+
+          const failedAttempt = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+          expect(JSON.parse(failedAttempt).degraded).toEqual(['remote'])
           expect(deps.session.getOrganizationFor('remote')).toBe('org_1')
-          expect(calls).toEqual([])
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+
+          // The migration still happens: old identity left, foreign-org topic dropped.
+          expect(calls.some((c) => c.method === 'leaveChannel' && c.args.sessionName === 'a')).toBe(true)
+          expect(calls.some((c) => c.method === 'joinTopic')).toBe(false)
+          expect(deps.context.getJoinedTopics()).toEqual([])
+          expect(JSON.parse(result)).toEqual({
+            name: 'a',
+            droppedTopics: [{ topic: 'KAI-408', channel: 'kai', location: 'remote' }],
+          })
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_2')
         })
 
         it('an org-less re-introduce does not erase a location’s tracked org', async () => {
@@ -907,24 +1077,6 @@ describe('Identity Tools', () => {
           expect(deps.session.getOrganizationFor('local')).toBeUndefined()
         })
 
-        it('allows a simultaneous name-and-org change (migration proceeds)', async () => {
-          const calls: RecordedCall[] = []
-          const transport = makeRecordingRemoteTransport('remote', calls)
-          const deps: IdentityToolDeps = {
-            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
-            context: new ActiveContext(),
-            router: new TransportRouter([transport]),
-          }
-          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
-          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
-          calls.length = 0
-
-          const result = await handleIdentityTool('introduce', { name: 'b', organization: 'org_2' }, deps)
-
-          expect(JSON.parse(result)).toEqual({ name: 'b' })
-          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(true)
-          expect(calls.some((c) => c.method === 'introduce')).toBe(true)
-        })
       })
 
       /**
