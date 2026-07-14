@@ -850,17 +850,20 @@ describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
     // First subscribe resumes past the seeded cursor.
     expect(onUpdateCalls[0]!.args).toMatchObject({ sinceTs: 100 })
 
-    // Deliver a broadcast at ts=100 so the delivered high-water mark is 100.
-    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 100 }])
+    // DELIVER a broadcast at ts=300 — strictly greater than the seed — so the
+    // delivered high-water mark ADVANCES to 300. Using a value greater than
+    // the seed (not equal to it) is what makes this pin the delivery-side
+    // cursor advance, not merely the join seed.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
 
     // The migration re-joins (peer traffic pushed the channel's latestTs to
-    // 500) and re-subscribes. The re-subscribe must resume from the
-    // PRESERVED delivered cursor (100), not the re-join's latestTs (500) —
-    // otherwise messages in (100, 500] are lost.
+    // 500) and re-subscribes. The re-subscribe must resume from the PRESERVED
+    // delivered cursor (300) — neither reset to the seed (100) nor bumped to
+    // the re-join's latestTs (500) — otherwise messages in (300, 500] are lost.
     await transport.joinChannel({ sessionName: 'kai-408', channel: 'dev' })
     transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
 
     expect(onUpdateCalls).toHaveLength(2)
-    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 100 })
+    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 300 })
   })
 })
