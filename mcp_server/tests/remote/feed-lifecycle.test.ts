@@ -332,3 +332,91 @@ describe('RemoteTransport owns its feed lifecycle', () => {
     expect(h.live(CHANNEL_Q)).toHaveLength(0)
   })
 })
+
+/**
+ * Three NEGATIVES that the suite never pinned — each one could be removed with
+ * the suite still green, which means the behaviour they protect was load-bearing
+ * but unguarded.
+ */
+describe('RemoteTransport feed lifecycle — the negatives', () => {
+  it('restoring a channel feed does NOT restore the topic feeds inside it', async () => {
+    // The backend's listByTopic asserts CHANNEL presence *and* TOPIC membership.
+    // On a rebind the channel is re-joined before the topics are, so a topic feed
+    // re-attached by the channel's restore would query while its topic membership
+    // is still gone -> ConvexError -> registerSubscriptionFailure -> three of
+    // those disable the whole transport. Only `joinTopic` may restore a topic.
+    const h = makeHarness({ sessionIds: ['session_1', 'session_2'] })
+    const transport = new RemoteTransport({ client: h.client, source: 'remote', log: () => {} })
+
+    await transport.introduce({ sessionName: 'bootstrap' })
+    await transport.joinChannel({ sessionName: 'bootstrap', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeTopicMessages({ topicId: 'topic_1', channelName: 'dev' }, () => {})
+    await transport.joinTopic({ sessionName: 'bootstrap', topicId: 'topic_1' })
+    expect(transport.suspendedFeeds()).toEqual({ topics: [], channels: [] })
+
+    // The rebind suspends both.
+    await transport.introduce({ sessionName: 'renamed' })
+    expect(transport.suspendedFeeds()).toEqual({ topics: ['topic_1'], channels: ['dev'] })
+
+    // Re-joining ONLY the channel must revive ONLY the channel.
+    await transport.joinChannel({ sessionName: 'renamed', channel: 'dev' })
+    expect(transport.hasLiveChannelFeed('dev')).toBe(true)
+    expect(transport.hasLiveTopicFeed('topic_1')).toBe(false)
+    expect(transport.suspendedFeeds()).toEqual({ topics: ['topic_1'], channels: [] })
+
+    // The topic comes back only when its own membership does.
+    await transport.joinTopic({ sessionName: 'renamed', topicId: 'topic_1' })
+    expect(transport.hasLiveTopicFeed('topic_1')).toBe(true)
+  })
+
+  it('does not restore feeds on a transport that has been shut down', async () => {
+    // shutdown() detaches every feed and closes the client. A join arriving after
+    // that (an in-flight tool call losing the race) must not resurrect a feed
+    // against a dead ConvexClient.
+    const h = makeHarness()
+    const transport = new RemoteTransport({ client: h.client, source: 'remote', log: () => {} })
+
+    await transport.introduce({ sessionName: 'me' })
+    await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeTopicMessages({ topicId: 'topic_1', channelName: 'dev' }, () => {})
+    await transport.joinTopic({ sessionName: 'me', topicId: 'topic_1' })
+
+    await transport.shutdown()
+    expect(h.live('messages:listByChannel')).toHaveLength(0)
+    expect(h.live('messages:listByTopic')).toHaveLength(0)
+
+    // A late join must NOT re-attach anything.
+    await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
+    await transport.joinTopic({ sessionName: 'me', topicId: 'topic_1' })
+    expect(h.live('messages:listByChannel')).toHaveLength(0)
+    expect(h.live('messages:listByTopic')).toHaveLength(0)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+    expect(transport.hasLiveTopicFeed('topic_1')).toBe(false)
+  })
+
+  it('shutdown() detaches every live feed', async () => {
+    // The replace-in-place path in attachLocation now relies ENTIRELY on
+    // shutdown() to tear the prior transport's feeds down — it no longer sweeps
+    // shared unsubscribe maps itself. If shutdown stopped detaching, the old
+    // transport's feeds would keep firing into the MessageBus alongside the new
+    // transport's, which is duplicate delivery from a session that is supposed
+    // to be gone.
+    const h = makeHarness()
+    const transport = new RemoteTransport({ client: h.client, source: 'remote', log: () => {} })
+
+    await transport.introduce({ sessionName: 'me' })
+    await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeTopicMessages({ topicId: 'topic_1', channelName: 'dev' }, () => {})
+    await transport.joinTopic({ sessionName: 'me', topicId: 'topic_1' })
+    expect(h.live('messages:listByChannel')).toHaveLength(1)
+    expect(h.live('messages:listByTopic')).toHaveLength(1)
+
+    await transport.shutdown()
+
+    expect(h.live('messages:listByChannel')).toHaveLength(0)
+    expect(h.live('messages:listByTopic')).toHaveLength(0)
+  })
+})
