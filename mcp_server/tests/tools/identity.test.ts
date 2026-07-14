@@ -815,14 +815,24 @@ describe('Identity Tools', () => {
 
           // The topic re-join now fails (introduce and the channel re-join still
           // work), so the topic feed the leave suspended can never come back.
-          const broken = transport as unknown as { joinTopic: () => Promise<never> }
-          broken.joinTopic = (): Promise<never> => Promise.reject(new Error('joinTopic exploded'))
+          // It still RECORDS the attempt, so the assertions below can tell
+          // "attempted and failed" from "never attempted at all".
+          const broken = transport as unknown as {
+            joinTopic: (args: Record<string, unknown>) => Promise<never>
+          }
+          broken.joinTopic = (args: Record<string, unknown>): Promise<never> => {
+            calls.push({ method: 'joinTopic', args })
+            return Promise.reject(new Error('joinTopic exploded'))
+          }
 
           const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
 
           // introduce succeeded, so the location is NOT in `failed` for that
-          // reason...
+          // reason, and the tool really did try to re-join the topic (without
+          // this, "the feed stayed suspended" could equally mean the re-join was
+          // never attempted, and the test would pass for the wrong reason)...
           expect(calls.some((c) => c.method === 'introduce' && c.args.sessionName === 'kai-408')).toBe(true)
+          expect(calls.some((c) => c.method === 'joinTopic')).toBe(true)
           // ...but a feed is still suspended, so the session is deaf there...
           const suspended = transport as unknown as {
             suspendedFeeds: () => { topics: string[]; channels: string[] }
