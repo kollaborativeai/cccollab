@@ -333,15 +333,18 @@ describe('Identity Tools', () => {
         )
       })
 
-      it('leaves nothing on a first-ever introduce (there is no previous identity)', async () => {
+      it('leaves nothing on a first introduce when nothing was joined under the prior identity', async () => {
+        // Nothing joined yet ⇒ even though the prior display name is the
+        // username fallback, there is no membership to tear down. (The case
+        // where a channel WAS auto-joined under the username is covered by
+        // 'tears down the username ghost…' below.)
         const calls: RecordedCall[] = []
         const deps = makeRecordingDeps(calls)
-        deps.context.joinChannel('kai', 'cccollab.json', 'local')
 
         await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
 
         expect(calls.filter((c) => c.method === 'leaveTopic' || c.method === 'leaveChannel')).toEqual([])
-        expect(calls.map((c) => c.method)).toEqual(['introduce', 'joinChannel'])
+        expect(calls.map((c) => c.method)).toEqual(['introduce'])
       })
 
       it('does not churn leaves/re-joins when re-introducing under the SAME name', async () => {
@@ -610,6 +613,54 @@ describe('Identity Tools', () => {
           expect(calls.some((c) => c.method === 'leaveChannel')).toBe(true)
           expect(calls.some((c) => c.method === 'introduce')).toBe(true)
         })
+      })
+
+      /**
+       * When there is no config `name`, the session boots with displayName =
+       * username and hasName() === false, yet server.ts still auto-joins its
+       * local channels under that username. The agent then introduces its
+       * real name. Because the migration guard used to key off hasName(), the
+       * username was never torn down and lingered as a local ghost — the same
+       * bug class, for the no-name path. The prior identity must be the
+       * EFFECTIVE display name (username fallback included), not only an
+       * explicitly-set name.
+       */
+      it('tears down the username ghost when a no-config-name session introduces a real name', async () => {
+        const calls: RecordedCall[] = []
+        const deps: IdentityToolDeps = {
+          // No name set ⇒ displayName falls back to the username.
+          session: new SessionManager({ username: 'samuel', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([makeRecordingTransport('local', calls)]),
+        }
+        // Simulate server.ts's pre-introduce local auto-join under the username.
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+
+        const result = await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
+
+        expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
+        const leave = calls.find((c) => c.method === 'leaveChannel')
+        const join = calls.find((c) => c.method === 'joinChannel')
+        expect(leave?.args).toMatchObject({ sessionName: 'samuel', channel: 'kai' })
+        expect(join?.args).toMatchObject({ sessionName: 'kai-408', channel: 'kai' })
+        // The ghost is dropped before the new identity re-joins.
+        expect(calls.indexOf(leave!)).toBeLessThan(calls.indexOf(join!))
+      })
+
+      it('does not churn when a no-config-name session introduces its own username', async () => {
+        const calls: RecordedCall[] = []
+        const deps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'samuel', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([makeRecordingTransport('local', calls)]),
+        }
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+
+        await handleIdentityTool('introduce', { name: 'samuel' }, deps)
+
+        // Introducing the same name the channel was already joined under is
+        // not a rename: no ghost, so nothing to tear down.
+        expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
       })
 
       it('still introduces under the new name when the transport throws on leave/join', async () => {

@@ -103,9 +103,14 @@ export async function handleIdentityTool(
       // channel and topic it joined. This is the common path, not an
       // edge case: a session boots under the config's default name,
       // auto-joins its configured channels/topics under it, and only
-      // then does the agent introduce itself for real.
-      const previousName = deps.session.hasName() ? deps.session.displayName : undefined
-      const renamed = previousName !== undefined && previousName !== displayName
+      // then does the agent introduce itself for real. The prior identity is
+      // the EFFECTIVE display name, which falls back to the username when no
+      // config `name` was set: server.ts still auto-joins local channels
+      // under that username, so it too must be torn down or it lingers as a
+      // local ghost. (On the remote transport this is a safe no-op — with no
+      // prior introduce its sessionId is null and leave*/join* early-return.)
+      const previousName = deps.session.displayName
+      const renamed = previousName !== displayName
       const subs = renamed ? remoteSubscriptionDeps(deps) : undefined
 
       // The (user, org, sessionName) backend key means an org change ALSO
