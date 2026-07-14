@@ -87,16 +87,31 @@ function lockFilePath(): string {
   return `${CCCOLLAB_CONFIG_FILE}.lock`
 }
 
-/** True if `pid` is unset, unparseable, or no longer a live process on
- *  this machine. `process.kill(pid, 0)` is the standard liveness probe:
- *  signal 0 performs the existence/permission check without delivering
- *  anything. ESRCH (no such process) means dead; EPERM means alive but
- *  owned by another user (still alive — don't reap). Any other thrown
- *  error is treated conservatively as "still alive" so we never reap a
- *  lock we can't prove is dead. */
+/** True only when `pid` is PROVABLY a dead process on this machine.
+ *  `process.kill(pid, 0)` is the standard liveness probe: signal 0
+ *  performs the existence/permission check without delivering anything.
+ *  ESRCH (no such process) means dead; EPERM means alive but owned by
+ *  another user (still alive — don't reap). Any other thrown error is
+ *  treated conservatively as "still alive" so we never reap a lock we
+ *  can't prove is dead.
+ *
+ *  FAIL-CLOSED on an empty / unparseable body (KAI-417): this used to
+ *  return `true`, i.e. it treated "I could not read a PID" as proof of
+ *  death. Combined with the caller's unlink-by-path, that let a waiter
+ *  delete a LIVE holder's lock — e.g. a torn read landing in the gap
+ *  between a peer's reap-unlink and its `wx` re-create — putting two
+ *  processes in the critical section, both burning the same single-use
+ *  Clerk refresh token. Absence of evidence is not evidence of death.
+ *
+ *  Tradeoff (accepted): a process crashing between the lock file's
+ *  `open()` and its `write()` leaves a 0-byte lock that is now never
+ *  auto-reaped and needs one manual `rm`. That is a LOUD, recoverable
+ *  failure — the acquire timeout already tells the user to delete the
+ *  lock file — and is strictly preferable to a silent double-refresh
+ *  that forces a re-authentication. */
 function isPidDead(raw: string): boolean {
   const pid = Number.parseInt(raw.trim(), 10)
-  if (!Number.isFinite(pid) || pid <= 0) return true
+  if (!Number.isFinite(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
     return false
@@ -121,11 +136,16 @@ function acquireLock(): void {
       try {
         const age = Date.now() - statSync(lock).mtimeMs
         if (age > STALE_LOCK_MS) {
-          let holderPid = ''
+          let holderPid: string
           try {
             holderPid = readFileSync(lock, 'utf-8')
           } catch {
-            /* lock vanished; retry */
+            // The lock vanished between `stat` and this read — a peer
+            // reaped it. Retry the `wx` create immediately rather than
+            // falling through: everything below reasons about a holder we
+            // just failed to identify, and acting on that was the KAI-417
+            // reaper bug (the empty `holderPid` was read as "dead").
+            continue
           }
           if (isPidDead(holderPid)) {
             try {
@@ -147,14 +167,46 @@ function acquireLock(): void {
           { cause: err },
         )
       }
-      // Sleep briefly before retrying. `saveLocationAuth` is synchronous,
-      // so we can't await `setTimeout`; `Atomics.wait` is the standard
-      // Node sync-sleep primitive that does not burn CPU. Under
-      // contention by multiple MCP processes this keeps the waiter at
-      // ~0% CPU instead of pegging a core.
+      // Sleep briefly before retrying. `acquireLock` is synchronous, so
+      // we can't await `setTimeout`; `Atomics.wait` is the standard Node
+      // sync-sleep primitive that does not burn CPU. Same-process callers
+      // never reach this loop under contention (they queue on the
+      // in-process gate below), so the only waiters here are genuinely
+      // foreign processes.
       syncSleep(LOCK_POLL_MS)
     }
   }
+}
+
+/**
+ * In-process async gate in front of the on-disk lock.
+ *
+ * `acquireLock` is a synchronous spin (Atomics.wait) that blocks the whole
+ * event loop, and `withConfigLock` holds the file lock across an `await`
+ * (the network token refresh). With two remote locations, refresh A takes
+ * the lock and yields on its await; refresh B — in the SAME process — then
+ * calls `acquireLock`, sees a lock file owned by its own live PID (so never
+ * reapable), and spins the event loop so A can never resume to release it.
+ * Guaranteed self-deadlock at LOCK_TIMEOUT_MS.
+ *
+ * Fix: same-process users queue on a promise chain and never spin on a lock
+ * their own process holds. The on-disk lock file keeps doing only its real
+ * job — cross-process mutual exclusion — and is now only ever contended by
+ * genuinely foreign processes. Every entry point (`withConfigLock`,
+ * `saveLocationAuth`) must go through this gate, otherwise a sync writer can
+ * still deadlock against an in-flight async lock holder.
+ */
+let configLockChain: Promise<unknown> = Promise.resolve()
+
+function withInProcessConfigLock<T>(run: () => Promise<T>): Promise<T> {
+  const next = configLockChain.then(run, run)
+  // Swallow rejections on the chain itself so one failing critical section
+  // doesn't reject every subsequent waiter.
+  configLockChain = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  return next
 }
 
 function releaseLock(): void {
@@ -187,14 +239,10 @@ function releaseLock(): void {
  * the same `~/.cccollab/config.json` cannot lose updates. See the
  * `acquireLock` / `releaseLock` block above for the lock protocol.
  */
-export function saveLocationAuth(locationName: string, auth: LocationAuth): void {
-  ensureHomeDir()
-  acquireLock()
-  try {
-    writeLocationAuthInLock(locationName, auth)
-  } finally {
-    releaseLock()
-  }
+export async function saveLocationAuth(locationName: string, auth: LocationAuth): Promise<void> {
+  await withConfigLock(async (persist) => {
+    persist(locationName, auth)
+  })
 }
 
 /**
@@ -255,13 +303,15 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
 export async function withConfigLock<T>(
   callback: (persist: (locationName: string, auth: LocationAuth) => void) => Promise<T>,
 ): Promise<T> {
-  ensureHomeDir()
-  acquireLock()
-  try {
-    return await callback(writeLocationAuthInLock)
-  } finally {
-    releaseLock()
-  }
+  return await withInProcessConfigLock(async () => {
+    ensureHomeDir()
+    acquireLock()
+    try {
+      return await callback(writeLocationAuthInLock)
+    } finally {
+      releaseLock()
+    }
+  })
 }
 
 /**

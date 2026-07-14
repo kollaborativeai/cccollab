@@ -44,7 +44,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
   it('a peer write between in-memory load and refresh is observable inside the lock', async () => {
     // Initial state: tokens R0 / A0 persisted to disk. This represents
     // both processes' startup snapshot.
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A0',
@@ -58,7 +58,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // Simulate: peer process A successfully refreshed and persisted
     // R1/A1. saveLocationAuth itself is cross-process safe via the
     // lock — this is the scenario the fix relies on.
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A1',
@@ -135,9 +135,8 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       }),
     ).rejects.toThrow(/synthetic refresh failure/)
 
-    // Lock must be released — saveLocationAuth grabs it again
-    // synchronously.
-    saveLocationAuth('flatout', {
+    // Lock must be released — the next saveLocationAuth grabs it again.
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A3',
@@ -150,7 +149,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
 
   it('loadPersistedLocationAuth returns null for unknown locations and missing files', async () => {
     expect(loadPersistedLocationAuth('flatout')).toBeNull()
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A4',

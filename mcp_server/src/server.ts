@@ -496,7 +496,13 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'introduce',
     {
       description:
-        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers on every enabled transport. Returns JSON.',
+        'Set your name and optionally your current objective. Required before any topic/messaging tool will work. ' +
+        'Registers on every enabled transport. Returns JSON. ' +
+        'Registration is attempted on every transport even if one fails; any that failed are reported in an ' +
+        '`errors` array of {location, message} — e.g. an invalid `organization` is reported here. ' +
+        'If `errors` is present the registration did NOT fully succeed: the failed location has no session and no ' +
+        'organization bound (whoami may still report a previously-bound org). Surface the failure and fix the ' +
+        'cause — do not treat the call as successful. The key is absent when everything registered.',
       inputSchema: {
         name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),

@@ -25,8 +25,8 @@ describe('saveLocationAuth', () => {
     rmSync(TMP_HOME, { recursive: true, force: true })
   })
 
-  it('writes auth fields under the named location in the user-level file', () => {
-    saveLocationAuth('flatout', {
+  it('writes auth fields under the named location in the user-level file', async () => {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://wonderful-narwhal-409.convex.cloud',
       accessToken: 'jwt-abc',
@@ -46,8 +46,8 @@ describe('saveLocationAuth', () => {
     expect(content.locations.flatout.updatedAt).toBe(1_700_000_000_000)
   })
 
-  it('writes the file with mode 0600', () => {
-    saveLocationAuth('flatout', {
+  it('writes the file with mode 0600', async () => {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
@@ -61,7 +61,7 @@ describe('saveLocationAuth', () => {
     }
   })
 
-  it('preserves other locations and top-level fields when updating one location', () => {
+  it('preserves other locations and top-level fields when updating one location', async () => {
     // Pre-populate the user-level file with two locations and a
     // top-level `name` to verify they survive the round-trip.
     writeFileSync(
@@ -88,7 +88,7 @@ describe('saveLocationAuth', () => {
       ),
       { mode: 0o600 },
     )
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       accessToken: 'new-token',
       refreshToken: 'new-refresh',
@@ -106,9 +106,9 @@ describe('saveLocationAuth', () => {
     expect(content.locations.other.accessToken).toBe('other-token')
   })
 
-  it('creates the file when it does not yet exist', () => {
+  it('creates the file when it does not yet exist', async () => {
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(false)
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
@@ -134,7 +134,7 @@ describe('saveLocationAuth', () => {
     const ancient = (Date.now() - 60_000) / 1000
     utimesSync(lockPath, ancient, ancient)
 
-    saveLocationAuth('flatout', {
+    await saveLocationAuth('flatout', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'after-stale',
@@ -161,7 +161,7 @@ describe('saveLocationAuth', () => {
     utimesSync(lockPath, ancient, ancient)
 
     const start = Date.now()
-    expect(() =>
+    await expect(
       saveLocationAuth('flatout', {
         authType: 'clerk',
         url: 'https://a.convex.cloud',
@@ -170,7 +170,7 @@ describe('saveLocationAuth', () => {
         idToken: 'id-should-not-write',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
-    ).toThrow(/timed out/)
+    ).rejects.toThrow(/timed out/)
     const elapsed = Date.now() - start
     // Should have taken at least LOCK_TIMEOUT_MS (5s) — confirming the
     // lock was not reaped. Allow a generous lower bound (4s) for clock
@@ -190,7 +190,7 @@ describe('saveLocationAuth', () => {
     }
   }, 20_000)
 
-  it('throws rather than overwriting when the prior config cannot be parsed', () => {
+  it('throws rather than overwriting when the prior config cannot be parsed', async () => {
     // A prior config that exists but cannot be parsed must NOT be silently
     // replaced — doing so drops every other location and any app-pointer
     // fields (clerkIssuer/clerkClientId) the caller did not re-supply.
@@ -200,7 +200,7 @@ describe('saveLocationAuth', () => {
     const corrupt = '{this is not valid json'
     writeFileSync(CCCOLLAB_CONFIG_FILE, corrupt, { mode: 0o600 })
 
-    expect(() =>
+    await expect(
       saveLocationAuth('flatout', {
         authType: 'clerk',
         url: 'https://a.convex.cloud',
@@ -209,19 +209,19 @@ describe('saveLocationAuth', () => {
         idToken: 'id-new-token',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
-    ).toThrow(/not valid JSON|failed to parse/i)
+    ).rejects.toThrow(/not valid JSON|failed to parse/i)
 
     // The original file is untouched — not overwritten, not destroyed.
     expect(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8')).toBe(corrupt)
   })
 
-  it('throws rather than dropping app-pointer fields when the prior clerk config is unparseable', () => {
+  it('throws rather than dropping app-pointer fields when the prior clerk config is unparseable', async () => {
     // Regression: a parse failure used to make saveLocationAuth write a
     // fresh config containing only url + tokens, silently losing
     // clerkIssuer/clerkClientId and crashing the next server start.
     writeFileSync(CCCOLLAB_CONFIG_FILE, 'not json at all', { mode: 0o600 })
 
-    expect(() =>
+    await expect(
       saveLocationAuth('remote', {
         authType: 'clerk',
         url: 'https://x.convex.cloud',
@@ -230,7 +230,7 @@ describe('saveLocationAuth', () => {
         idToken: 'id-tok',
         accessTokenExpiresAt: 1_700_000_000_000,
       }),
-    ).toThrow()
+    ).rejects.toThrow()
   })
 })
 
@@ -242,8 +242,8 @@ describe('saveLocationAuth with authType=clerk', () => {
     clearUserConfig()
   })
 
-  it('persists authType, accessToken, refreshToken, and accessTokenExpiresAt', () => {
-    saveLocationAuth('kai', {
+  it('persists authType, accessToken, refreshToken, and accessTokenExpiresAt', async () => {
+    await saveLocationAuth('kai', {
       authType: 'clerk',
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
@@ -260,8 +260,8 @@ describe('saveLocationAuth with authType=clerk', () => {
     })
   })
 
-  it('persists userEmail, userId, and url for clerk auth', () => {
-    saveLocationAuth('kai', {
+  it('persists userEmail, userId, and url for clerk auth', async () => {
+    await saveLocationAuth('kai', {
       authType: 'clerk',
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
@@ -277,8 +277,8 @@ describe('saveLocationAuth with authType=clerk', () => {
     expect(onDisk?.url).toBe('https://x.convex.cloud')
   })
 
-  it('round-trip via schema parse is valid for clerk auth', () => {
-    saveLocationAuth('kai', {
+  it('round-trip via schema parse is valid for clerk auth', async () => {
+    await saveLocationAuth('kai', {
       authType: 'clerk',
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
@@ -310,7 +310,7 @@ describe('saveLocationAuth with authType=clerk', () => {
     }
   })
 
-  it('persists clerkIssuer and clerkClientId so refresh uses the app-pointer that minted the tokens', () => {
+  it('persists clerkIssuer and clerkClientId so refresh uses the app-pointer that minted the tokens', async () => {
     // Regression: `authenticate` mints tokens against the resolved
     // clerkIssuer/clerkClientId (which CCCOLLAB_CLERK_* env vars can
     // override). If those app-pointer fields are not persisted alongside
@@ -319,7 +319,7 @@ describe('saveLocationAuth with authType=clerk', () => {
     // wrong Clerk instance -> "backend rejected introduce". Persisting the
     // minting pointer keeps the token and the issuer that produced it
     // together.
-    saveLocationAuth('kai', {
+    await saveLocationAuth('kai', {
       authType: 'clerk',
       url: 'https://x.convex.cloud',
       accessToken: 'tok',
