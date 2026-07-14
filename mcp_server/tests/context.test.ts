@@ -269,10 +269,6 @@ describe('ActiveContext', () => {
     // policy: a watched remote subscription would report watching:true while
     // silently receiving nothing. Enforce it at the state layer so no future
     // caller of joinChannel can bypass the tool's guard.
-    it('refuses to watch a non-local channel', () => {
-      expect(() => ctx.joinChannel('kai', 'manual', 'flatout', true)).toThrow(/local/i)
-    })
-
     it('a non-local channel can still be joined normally', () => {
       expect(() => ctx.joinChannel('kai', 'manual', 'flatout')).not.toThrow()
       expect(ctx.isChannelWatched('kai', 'flatout')).toBe(false)

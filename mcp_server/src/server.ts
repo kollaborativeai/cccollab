@@ -630,16 +630,15 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
         'Subscribe to a channel (implicitly created) at the given location. Idempotent. Channels with the same name at different locations are distinct - specify `location` when a name exists at multiple locations. Returns {channel, location, becameActive, subscriberCount, watching}.',
       inputSchema: {
         name: z.string().describe('Channel name (case-insensitive, non-empty).'),
-        location: z
-          .string()
-          .optional()
-          .default('local')
-          .describe('Location name. Defaults to "local" (the in-process broker).'),
+        // Deliberately NOT `.default('local')`: zod would fill it in before the
+        // handler runs, and the handler must be able to tell "the caller chose
+        // local" from "the caller said nothing" to refuse an ambiguous watch.
+        location: z.string().optional().describe('Location name. Defaults to "local" (the in-process broker).'),
         watch: z
           .boolean()
           .optional()
           .describe(
-            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now.",
+            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now. Not a durable log: the event stream has no replay, so messages published while it is reconnecting (>=2s after a broker restart) are missed - read_topic_messages to backfill.",
           ),
       },
     },

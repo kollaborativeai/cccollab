@@ -10,6 +10,11 @@ export interface ChannelToolDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  /** Every CONFIGURED location, attached or not. The router only knows the
+   *  ones that attached, and a fresh orchestrator's remotes are still dormant —
+   *  so "does a remote exist?" must be asked here, not of the router.
+   *  Structural, not `ResolvedLocation[]`: only the name and locality matter. */
+  locations: Array<{ name: string; isLocal: boolean }>
   /** Inbound message pipeline. Optional so legacy tests that don't
    *  exercise remote broadcast subscriptions can keep constructing deps
    *  without one; wiring degrades to a no-op when absent. */
@@ -194,6 +199,13 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
   })
 }
 
+/** Non-local locations the session could plausibly have meant. Read from the
+ *  CONFIG, not the router: the router only holds locations that have attached,
+ *  and a fresh orchestrator's remotes are still dormant. */
+function remoteLocationNames(deps: ChannelToolDeps): string[] {
+  return deps.locations.filter((l) => !l.isLocal).map((l) => l.name)
+}
+
 async function handleJoinChannel(
   deps: ChannelToolDeps,
   rawName: string,
@@ -206,10 +218,9 @@ async function handleJoinChannel(
   const location = requestedLocation ?? LOCAL_LOCATION
 
   // Remote delivers topic messages via per-topic subscriptions, so a watched
-  // remote channel would silently miss every topic created after the join —
-  // the exact blind spot watch mode exists to close. Refuse loudly until the
-  // remote topic-created event (KAI-413) lands. Fail BEFORE joining: a
-  // half-applied watch is worse than none.
+  // remote channel would silently miss every topic created after the join — the
+  // blind spot watch mode exists to close. Refuse until KAI-413 lands, and
+  // refuse BEFORE joining: a half-applied watch is worse than none.
   if (watch === true && location !== LOCAL_LOCATION) {
     return JSON.stringify({
       error:
@@ -219,21 +230,16 @@ async function handleJoinChannel(
     })
   }
 
-  // A watch with an UNSTATED location is the nastiest case of all: `location`
-  // silently defaults to local and join_channel implicitly creates channels,
-  // so an orchestrator whose fleet lives on a remote would get a brand-new,
-  // empty LOCAL channel of the same name, a success response, and
-  // `watching: true` — then sit in an empty room hearing nothing while whoami
-  // reports it is watching. Confidently blind, which is the precise failure
-  // this feature exists to eliminate. When any remote is in play, make the
-  // caller say which one they mean.
+  // Worse: a watch with an UNSTATED location. join_channel implicitly creates
+  // channels, so an orchestrator whose fleet lives on a remote would get a
+  // brand-new empty LOCAL channel, a success response, and `watching: true` —
+  // confidently blind. When any remote exists, make the caller name one.
   if (watch === true && requestedLocation === undefined) {
-    const remotes = deps.router.enabled().filter((t) => t.source !== LOCAL_LOCATION)
+    const remotes = remoteLocationNames(deps)
     if (remotes.length > 0) {
-      const names = remotes.map((t) => t.source).join(', ')
       return JSON.stringify({
         error:
-          `Ambiguous watch: \`location\` was not specified and non-local locations exist (${names}). ` +
+          `Ambiguous watch: \`location\` was not specified and non-local locations exist (${remotes.join(', ')}). ` +
           `Watching would silently subscribe you to a LOCAL channel named "${normalized}", which may not be ` +
           `where your fleet is. Pass \`location\` explicitly (e.g. "local") to confirm which channel to watch.`,
       })

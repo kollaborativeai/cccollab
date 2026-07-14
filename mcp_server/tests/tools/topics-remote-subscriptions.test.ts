@@ -316,6 +316,10 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
       session,
       context,
       router,
+      locations: [
+        { name: 'local', isLocal: true },
+        { name: 'flatout', isLocal: false },
+      ],
       messageBus: bus,
       remoteChannelUnsubscribes: channelUnsubs,
     }

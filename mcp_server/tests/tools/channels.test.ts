@@ -17,7 +17,47 @@ function createDeps(): ChannelToolDeps {
   // mock `global.fetch` and assert URLs / bodies. Remote-transport
   // cases are covered in the dual-transport integration tests.
   const transport = new LocalTransport(7850)
-  return { session, context, router: new TransportRouter([transport]) }
+  return { session, context, router: new TransportRouter([transport]), locations: [LOCAL] }
+}
+
+const LOCAL = { name: 'local', isLocal: true }
+
+/** Deps whose config knows a non-local location. `attached` controls whether it
+ *  also made it into the router: a dormant remote (the state a fresh
+ *  orchestrator is in) is configured but absent from `router.enabled()`. */
+function createRemoteDeps(opts: { attached?: boolean; subscriberCount?: number } = {}): ChannelToolDeps {
+  const { attached = true, subscriberCount = 1 } = opts
+  const remote = {
+    source: 'flatout',
+    enabled: true,
+    hasTopic: () => false,
+    introduce: async () => {},
+    joinChannel: async () => ({ subscriberCount }),
+    leaveChannel: async () => {},
+    listChannels: async () => [],
+    broadcast: async () => {},
+    createTopic: async () => {
+      throw new Error('not implemented')
+    },
+    listTopics: async () => [],
+    getTopicById: async () => null,
+    joinTopic: async () => ({ history: [] }),
+    leaveTopic: async () => {},
+    archiveTopic: async () => {},
+    unarchiveTopic: async () => {},
+    sendTopicMessage: async () => {},
+    listSessions: async () => [],
+    deregisterSession: async () => {},
+  } as unknown as Transport
+  const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+  session.setName('orchestrator')
+  const transports = attached ? [new LocalTransport(7850), remote] : [new LocalTransport(7850)]
+  return {
+    session,
+    context: new ActiveContext(),
+    router: new TransportRouter(transports),
+    locations: [LOCAL, { name: 'flatout', isLocal: false }],
+  }
 }
 
 describe('Channel Tools', () => {
@@ -168,35 +208,7 @@ describe('Channel Tools', () => {
     })
 
     it('fails loudly on a non-local location instead of half-working', async () => {
-      const remote: Transport = {
-        source: 'flatout',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 1 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        deregisterSession: async () => {},
-      } as unknown as Transport
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('architect')
-      const remoteDeps: ChannelToolDeps = {
-        session,
-        context: new ActiveContext(),
-        router: new TransportRouter([new LocalTransport(7850), remote]),
-      }
+      const remoteDeps = createRemoteDeps()
 
       const result = JSON.parse(
         await handleChannelTool('join_channel', { name: 'kai', location: 'flatout', watch: true }, remoteDeps),
@@ -215,41 +227,24 @@ describe('Channel Tools', () => {
     // reports it is watching. That is the exact "confidently blind" failure
     // this ticket exists to eliminate, so it must be refused, not defaulted.
     it('refuses a defaulted-location watch when remote locations exist, instead of watching an empty local channel', async () => {
-      const remote = {
-        source: 'flatout',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 1 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        deregisterSession: async () => {},
-      } as unknown as Transport
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('orchestrator')
-      const ambiguous: ChannelToolDeps = {
-        session,
-        context: new ActiveContext(),
-        router: new TransportRouter([new LocalTransport(7850), remote]),
-      }
+      const ambiguous = createRemoteDeps()
 
       // No `location` passed — the dangerous case.
       const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, ambiguous))
       expect(result.error).toMatch(/location/i)
       expect(ambiguous.context.isChannelSubscribed('kai', 'local')).toBe(false)
       expect(ambiguous.context.isChannelWatched('kai', 'local')).toBe(false)
+    })
+
+    // A fresh orchestrator's remotes have not attached yet, so the router does
+    // not know them. The guard must read the CONFIGURED locations, or the exact
+    // session this feature is for is the one that slips through it.
+    it('refuses a defaulted-location watch when the only remote is configured but dormant', async () => {
+      const dormant = createRemoteDeps({ attached: false })
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, dormant))
+      expect(result.error).toMatch(/location/i)
+      expect(result.error).toContain('flatout')
+      expect(dormant.context.isChannelSubscribed('kai', 'local')).toBe(false)
     })
 
     it('allows a defaulted-location watch when only the local transport exists', async () => {
@@ -259,35 +254,7 @@ describe('Channel Tools', () => {
     })
 
     it('allows an explicit local watch even when remote locations exist', async () => {
-      const remote = {
-        source: 'flatout',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 1 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        deregisterSession: async () => {},
-      } as unknown as Transport
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('orchestrator')
-      const explicit: ChannelToolDeps = {
-        session,
-        context: new ActiveContext(),
-        router: new TransportRouter([new LocalTransport(7850), remote]),
-      }
+      const explicit = createRemoteDeps()
 
       const result = JSON.parse(
         await handleChannelTool('join_channel', { name: 'kai', location: 'local', watch: true }, explicit),
@@ -297,35 +264,7 @@ describe('Channel Tools', () => {
     })
 
     it('still allows a plain (unwatched) join on a non-local location', async () => {
-      const remote = {
-        source: 'flatout',
-        enabled: true,
-        hasTopic: () => false,
-        introduce: async () => {},
-        joinChannel: async () => ({ subscriberCount: 3 }),
-        leaveChannel: async () => {},
-        listChannels: async () => [],
-        broadcast: async () => {},
-        createTopic: async () => {
-          throw new Error('not implemented')
-        },
-        listTopics: async () => [],
-        getTopicById: async () => null,
-        joinTopic: async () => ({ history: [] }),
-        leaveTopic: async () => {},
-        archiveTopic: async () => {},
-        unarchiveTopic: async () => {},
-        sendTopicMessage: async () => {},
-        listSessions: async () => [],
-        deregisterSession: async () => {},
-      } as unknown as Transport
-      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
-      session.setName('architect')
-      const remoteDeps: ChannelToolDeps = {
-        session,
-        context: new ActiveContext(),
-        router: new TransportRouter([new LocalTransport(7850), remote]),
-      }
+      const remoteDeps = createRemoteDeps({ subscriberCount: 3 })
 
       const result = JSON.parse(
         await handleChannelTool('join_channel', { name: 'kai', location: 'flatout' }, remoteDeps),
@@ -588,6 +527,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+        locations: [LOCAL],
       }
       const result = JSON.parse(await handleChannelTool('list_channels', {}, stubDeps))
       expect(result.channels[0].messageCount).toBe(7)
@@ -625,6 +565,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router,
+        locations: [LOCAL, dormant],
         ensureAttached: (target?: string) =>
           ensureLazyAttach(target, {
             session,
@@ -729,6 +670,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+        locations: [LOCAL],
       }
       const result = JSON.parse(await handleChannelTool('read_channel_messages', { channel: 'dev' }, stubDeps))
       expect(result.messages[0].text).toBe('hi')

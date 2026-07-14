@@ -328,6 +328,31 @@ describe('BrokerEventListener (channel watch mode)', () => {
     expect(mockBus.push).not.toHaveBeenCalled()
   })
 
+  // The listener only ever handles LOCAL broker events, so both of its gates
+  // must ask about the LOCAL subscription. An unqualified lookup answers "is
+  // ANY subscription of this name watched/subscribed?", which once remote watch
+  // lands (KAI-413) would let a session watching remote "default" in org A read
+  // local broker traffic of the same channel name.
+  it('does not deliver local topic traffic to a session that only watches a REMOTE channel of the same name', async () => {
+    context.joinChannel('default', 'manual', 'flatout', true)
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('does not deliver local broadcasts to a session that is only subscribed to a REMOTE channel of the same name', async () => {
+    context.joinChannel('default', 'manual', 'flatout')
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'broadcast',
+      channel: 'default',
+      sender: 'worker-1',
+      text: 'Noise from another org',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
   it('still drops self messages while watching', async () => {
     context.joinChannel('default', 'manual', 'local', true)
     listener.processLocalEvent({

@@ -14,6 +14,7 @@ import { TransportRouter } from '../src/transport/router.js'
 import { handleIdentityTool } from '../src/tools/identity.js'
 import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
+import type { ResolvedLocation } from '../src/config/resolve.js'
 import type { ParsedMessage } from '../src/types.js'
 
 const PROFILE = `itest-${process.pid}`
@@ -33,6 +34,7 @@ interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  locations: ResolvedLocation[]
 }
 
 interface SessionHarness {
@@ -68,7 +70,7 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router }
+  const deps: HarnessDeps = { session, context, router, locations: [{ name: 'local', isLocal: true, channels: [] }] }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {

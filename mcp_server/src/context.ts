@@ -45,14 +45,8 @@ export class ActiveContext {
   private readonly joinedTopics = new Map<string, JoinedTopic>()
 
   /** `watch` is tri-state on purpose: `undefined` leaves an existing
-   *  subscription's flag alone, so a plain re-join never silently drops a
-   *  watcher back into the blind spot it opted out of.
-   *
-   *  Watching a non-local channel throws. That is an invariant, not a tool
-   *  policy: remote delivers topic messages via per-topic subscriptions, so a
-   *  "watched" remote channel would report `watching: true` while silently
-   *  receiving nothing from topics created after the join. Enforced here, at
-   *  the state layer, so no caller can bypass it (see KAI-413). */
+   *  subscription's flag alone, so a plain re-join (startup, re-attach) never
+   *  silently drops a watcher back into the blind spot it opted out of. */
   joinChannel(
     name: string,
     source: ChannelSource,
@@ -61,11 +55,6 @@ export class ActiveContext {
   ): { channel: string; location: ChannelLocation; becameActive: boolean; watching: boolean } {
     const channel = normalizeChannelName(name)
     if (!channel) throw new Error('Channel name must be non-empty')
-    if (watch === true && location !== LOCAL_LOCATION) {
-      throw new Error(
-        `Channel-wide watch is local-transport only; "${location}" is not local. See KAI-413 for remote support.`,
-      )
-    }
     const key = channelKey(channel, location)
     const existing = this.subscribed.get(key)
     const entry: SubscribedChannel = existing ?? { name: channel, location, source, watching: watch ?? false }

@@ -6,6 +6,7 @@ import type { ActiveContext } from './context.js'
 import type { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 import { normalizeChannelName } from './context.js'
+import { LOCAL_LOCATION } from './transport/index.js'
 import { CCCOLLAB_LOGS_DIR } from './constants.js'
 
 mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
@@ -138,21 +139,24 @@ export class BrokerEventListener {
     appendFileSync(LOG_FILE, line)
   }
 
+  // Both gates are qualified with LOCAL_LOCATION: this listener only ever
+  // handles local broker events, and an unqualified lookup matches a
+  // same-named channel at ANY location — a cross-org leak once remote watch
+  // lands (KAI-413).
   private channelSubscribed(channel: string | undefined): boolean {
     if (!channel) return false
-    return this.context.isChannelSubscribed(channel)
+    return this.context.isChannelSubscribed(channel, LOCAL_LOCATION)
   }
 
   /**
    * Should topic traffic reach this session? Normally only for topics it
-   * joined — that is what keeps a busy worker out of unrelated topics. A
-   * session watching the channel sees all of it, including topics created
-   * after it subscribed: the gate is evaluated per event, so there is no
-   * subscription list to keep up to date and nothing to forget to join.
+   * joined. A channel watcher sees all of it, including topics created after
+   * it subscribed: the gate is per-event, so there is no list to keep current
+   * and nothing to forget to join.
    */
   private topicVisible(channel: string, topicId: string | undefined): boolean {
     if (!topicId) return false
-    return this.context.isTopicJoined(topicId) || this.context.isChannelWatched(channel)
+    return this.context.isTopicJoined(topicId) || this.context.isChannelWatched(channel, LOCAL_LOCATION)
   }
 
   private async handleLocalEvent(event: BrokerLocalEvent): Promise<void> {
