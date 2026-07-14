@@ -137,21 +137,31 @@ export async function handleIdentityTool(
       deps.session.setObjective(objective)
 
       // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
+      // it can attribute messages and list us in `list_sessions`. Track
+      // which locations actually rebound: introduce() rethrows only AFTER
+      // failing to bind its new session row, so a failure leaves that
+      // location's id pointing at the pre-rename identity (or the transport
+      // self-disabled). Running the joins / resubscribe below against such a
+      // location would recreate the old-name ghost under the stale id (or
+      // throw-and-swallow into a stranded session) — so anything that did
+      // not rebind is EXCLUDED from every subsequent per-location step, and
+      // reported back as `degraded` instead of masqueraded as success.
+      const introduced = new Set<string>()
+      const failed: string[] = []
       for (const transport of deps.router.enabled()) {
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          introduced.add(transport.source)
         } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+          failed.push(transport.source)
         }
       }
 
       // Channel joins go per-location: each subscribed channel has its
-      // own transport and the router picks the matching one by name.
+      // own transport and the router picks the matching one by name. Skip
+      // locations whose introduce did not rebind (see above).
       for (const ch of deps.context.getSubscribedChannels()) {
+        if (!introduced.has(ch.location)) continue
         try {
           const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
@@ -168,7 +178,9 @@ export async function handleIdentityTool(
         // The in-process `ActiveContext` bookkeeping is unchanged - only
         // the transports need to learn the new name - so the returned
         // history is discarded rather than re-emitted as fresh messages.
+        // Same per-location gate: never re-join under a stale session id.
         for (const topic of deps.context.getJoinedTopics()) {
+          if (!introduced.has(topic.location)) continue
           try {
             const transport = deps.router.get(topic.location)
             await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
@@ -181,10 +193,14 @@ export async function handleIdentityTool(
         // CURRENT sessionId into their args, so they must be registered
         // after introduce() rebound it, and after the re-joins recreated
         // the membership rows those same queries are gated on.
-        if (subs) resubscribeRemote(deps, subs)
+        if (subs) resubscribeRemote(deps, subs, introduced)
       }
 
-      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
+      return JSON.stringify({
+        name: displayName,
+        ...(objective ? { objective } : {}),
+        ...(failed.length > 0 ? { degraded: failed } : {}),
+      })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
@@ -293,8 +309,12 @@ function teardownRemoteSubscriptions(deps: IdentityToolDeps, subs: RemoteSubscri
  * named session has none, and a subscribe without an explicit `sinceTs`
  * would dump the channel's entire broadcast backlog into the agent.
  */
-function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps): void {
+function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps, introduced: Set<string>): void {
   for (const ch of deps.context.getSubscribedChannels()) {
+    // A subscription binds the transport's CURRENT session id; a location
+    // whose introduce did not rebind would subscribe under the stale id and
+    // immediately fail its membership gate, so skip it (see the fan-out).
+    if (!introduced.has(ch.location)) continue
     try {
       ensureChannelSubscription({
         transport: deps.router.get(ch.location),
@@ -310,6 +330,7 @@ function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps)
     }
   }
   for (const topic of deps.context.getJoinedTopics()) {
+    if (!introduced.has(topic.location)) continue
     try {
       ensureTopicSubscription({
         transport: deps.router.get(topic.location),
