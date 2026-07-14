@@ -676,3 +676,133 @@ describe('RemoteTransport session-scoped query arguments', () => {
     expect(queryMock.mock.calls[0]![1]).toEqual({})
   })
 })
+
+/**
+ * Self-echo filtering must survive a re-introduce.
+ *
+ * Auto-subscribed channels/topics are subscribed BEFORE the agent calls
+ * `introduce` with its real name, and `introduce` rebinds `this.sessionId`
+ * to the new backend session row. A filter that compares against the
+ * sessionId captured at SUBSCRIBE time therefore stops recognising our own
+ * messages after a rename, and the session gets its own broadcasts pushed
+ * back at it as inbound events.
+ */
+describe('RemoteTransport self-echo filtering across a re-introduce', () => {
+  function makeReintroduceStub(): {
+    client: ConvexClient
+    callbacks: Array<(rows: unknown) => void>
+  } {
+    const callbacks: Array<(rows: unknown) => void> = []
+    const sessionIds = ['session_bootstrap', 'session_renamed']
+    let introduceCount = 0
+    const stub = {
+      query: vi.fn(async () => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        // Dispatch off arg shape so the test stays independent of
+        // FunctionReference identity (as elsewhere in this file).
+        if ('sessionName' in args) return sessionIds[introduceCount++] ?? 'session_extra'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) return { channelId: 'chan_dev' }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, _args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    return { client: stub as unknown as ConvexClient, callbacks }
+  }
+
+  it('drops own topic messages sent under the post-rename session id', async () => {
+    const { client, callbacks } = makeReintroduceStub()
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'bootstrap' })
+
+    const delivered: string[] = []
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push(msg.text))
+
+    await transport.introduce({ sessionName: 'kai-408' })
+
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'session_renamed', text: 'my own message', ts: 1_700_000_100_000 },
+      { _id: 'm2', fromSessionId: 'session_alice', text: 'someone else', ts: 1_700_000_200_000 },
+    ])
+
+    expect(delivered).toEqual(['someone else'])
+  })
+
+  it('drops own channel broadcasts sent under the post-rename session id', async () => {
+    const { client, callbacks } = makeReintroduceStub()
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'bootstrap' })
+    await transport.joinChannel({ sessionName: 'bootstrap', channel: 'dev' })
+
+    const delivered: string[] = []
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) => delivered.push(msg.text))
+
+    await transport.introduce({ sessionName: 'kai-408' })
+
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'session_renamed', text: 'my own broadcast', ts: 1_700_000_100_000 },
+      { _id: 'm2', fromSessionId: 'session_alice', text: 'someone else', ts: 1_700_000_200_000 },
+    ])
+    // Let the fire-and-forget ackChannel settle.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(delivered).toEqual(['someone else'])
+  })
+})
+
+/**
+ * A reactive subscription binds `this.sessionId` into its QUERY ARGS at
+ * subscribe time, and Convex keeps those args for the life of the
+ * subscription. The backend gates both feeds on that session's membership
+ * rows. So when `introduce` rebinds the session row, the old subscription
+ * is querying as a session that no longer holds the memberships — the tool
+ * layer must re-subscribe, and the fresh subscription must carry the new id
+ * without rewinding the cursor and replaying history.
+ */
+describe('RemoteTransport re-subscription after a re-introduce', () => {
+  it('binds the NEW sessionId into the query args and keeps the existing cursor', async () => {
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const sessionIds = ['session_bootstrap', 'session_renamed']
+    let introduceCount = 0
+    const stub = {
+      query: vi.fn(async () => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return sessionIds[introduceCount++] ?? 'session_extra'
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'bootstrap' })
+    const unsubscribe = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1', sessionId: 'session_bootstrap' })
+
+    // Deliver a message so the transport's own high-water mark advances.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'session_alice', text: 'hi', ts: 1_700_000_200_000 }])
+
+    // The rename: tear the old subscription down, re-introduce, re-subscribe.
+    unsubscribe()
+    await transport.introduce({ sessionName: 'kai-408' })
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+
+    // The new subscription queries as the NEW session row, and resumes from
+    // the transport's retained cursor rather than replaying from zero.
+    expect(onUpdateCalls).toHaveLength(2)
+    expect(onUpdateCalls[1]!.args).toEqual({
+      topicId: 't1',
+      sessionId: 'session_renamed',
+      sinceTs: 1_700_000_200_000,
+    })
+  })
+})

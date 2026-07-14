@@ -6,7 +6,14 @@ import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
-import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import {
+  attachLocation,
+  ensureChannelSubscription,
+  ensureTopicSubscription,
+  teardownChannelSubscription,
+  teardownTopicSubscription,
+  type AttachCtx,
+} from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -88,6 +95,44 @@ export async function handleIdentityTool(
         })
       }
 
+      // A session's identity IS its name: the broker keys sessions,
+      // channel membership and topic membership by it, and the backend
+      // keys CLI sessions by (user, org, sessionName). So a rename is a
+      // MIGRATION, not an overwrite - without tearing the old name's
+      // memberships down first it lingers as a ghost member of every
+      // channel and topic it joined. This is the common path, not an
+      // edge case: a session boots under the config's default name,
+      // auto-joins its configured channels/topics under it, and only
+      // then does the agent introduce itself for real.
+      const previousName = deps.session.hasName() ? deps.session.displayName : undefined
+      const renamed = previousName !== undefined && previousName !== displayName
+      const subs = renamed ? remoteSubscriptionDeps(deps) : undefined
+
+      if (renamed) {
+        // Drop the remote reactive subscriptions BEFORE the membership
+        // rows they are gated on disappear. A live Convex `onUpdate` keeps
+        // the sessionId it was registered with in its query args forever,
+        // and the backend's listByTopic ASSERTS channel presence for that
+        // id (ConvexError) while listByChannel returns []. Left running
+        // across the leaves below, the topic subscription would therefore
+        // start erroring - and `registerSubscriptionFailure` disables the
+        // whole transport after three errors in a minute. No messages are
+        // lost across this window: the transport keeps its own high-water
+        // marks, so the re-subscription below re-requests everything with
+        // a ts above what we last delivered.
+        if (subs) teardownRemoteSubscriptions(deps, subs)
+
+        // Ordering is load-bearing. RemoteTransport ignores `sessionName`
+        // and addresses the backend by its bound session row, which the
+        // introduce() fan-out below rebinds to the new name - so the old
+        // row is only still reachable BEFORE that. LocalTransport keys
+        // these calls by `sessionName`, so both transports drop exactly
+        // the old identity's memberships. We deliberately do not delete
+        // the old session itself: the bootstrap name is shared across the
+        // user's concurrently-booting sessions.
+        await leaveUnderPreviousName(deps, previousName)
+      }
+
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
 
@@ -113,6 +158,30 @@ export async function handleIdentityTool(
         } catch {
           // Non-fatal.
         }
+      }
+
+      if (renamed) {
+        // Re-join under the new name what the teardown above dropped,
+        // otherwise a rename silently evicts the session from its own
+        // topics. Strictly after the channel loop: the broker rejects a
+        // topic join from a session that isn't in the topic's channel.
+        // The in-process `ActiveContext` bookkeeping is unchanged - only
+        // the transports need to learn the new name - so the returned
+        // history is discarded rather than re-emitted as fresh messages.
+        for (const topic of deps.context.getJoinedTopics()) {
+          try {
+            const transport = deps.router.get(topic.location)
+            await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
+          } catch {
+            // Non-fatal.
+          }
+        }
+
+        // Re-subscribe last: the reactive queries bind the transport's
+        // CURRENT sessionId into their args, so they must be registered
+        // after introduce() rebound it, and after the re-joins recreated
+        // the membership rows those same queries are gated on.
+        if (subs) resubscribeRemote(deps, subs)
       }
 
       return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
@@ -163,6 +232,125 @@ export async function handleIdentityTool(
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)
+  }
+}
+
+/** The subset of deps needed to move the remote reactive subscriptions
+ *  over to a new identity. All three are optional on `IdentityToolDeps`
+ *  (the hot-attach path threads them; legacy unit tests don't), so this
+ *  narrows them together or not at all. */
+interface RemoteSubscriptionDeps {
+  messageBus: MessageBus
+  topicMap: Map<string, () => void>
+  channelMap: Map<string, () => void>
+}
+
+function remoteSubscriptionDeps(deps: IdentityToolDeps): RemoteSubscriptionDeps | undefined {
+  const { messageBus, remoteTopicUnsubscribes, remoteChannelUnsubscribes } = deps
+  if (messageBus === undefined || remoteTopicUnsubscribes === undefined || remoteChannelUnsubscribes === undefined) {
+    return undefined
+  }
+  return { messageBus, topicMap: remoteTopicUnsubscribes, channelMap: remoteChannelUnsubscribes }
+}
+
+/**
+ * Drop the remote reactive subscriptions held under the outgoing identity.
+ * A Convex `onUpdate` freezes the sessionId it was registered with into its
+ * query args, so these MUST come down before the old identity's membership
+ * rows do - the backend gates both feeds on exactly those rows.
+ *
+ * No-ops for the local broker: its topic/channel messages arrive over the
+ * shared SSE stream, and `ensure*` / `teardown*` type-guard that away.
+ */
+function teardownRemoteSubscriptions(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps): void {
+  for (const topic of deps.context.getJoinedTopics()) {
+    try {
+      teardownTopicSubscription({ locationName: topic.location, topicId: topic.threadTs, map: subs.topicMap })
+    } catch {
+      // Non-fatal.
+    }
+  }
+  for (const ch of deps.context.getSubscribedChannels()) {
+    try {
+      teardownChannelSubscription({ locationName: ch.location, channelName: ch.name, map: subs.channelMap })
+    } catch {
+      // Non-fatal.
+    }
+  }
+}
+
+/**
+ * Re-register the remote reactive subscriptions so their query args carry
+ * the NEW sessionId. Callable only after the introduce fan-out and the
+ * re-joins: the args are bound at subscribe time and the queries are
+ * membership-gated.
+ *
+ * Deliberately passes no `sinceTs`. The `RemoteTransport` instance outlives
+ * the rename and keeps its own per-topic / per-channel high-water marks, so
+ * each subscribe re-primes its own cursor and neither replays history nor
+ * drops what arrived during the swap. That matters most on the channel feed:
+ * the backend's fallback read cursor is keyed by session NAME, so the newly
+ * named session has none, and a subscribe without an explicit `sinceTs`
+ * would dump the channel's entire broadcast backlog into the agent.
+ */
+function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps): void {
+  for (const ch of deps.context.getSubscribedChannels()) {
+    try {
+      ensureChannelSubscription({
+        transport: deps.router.get(ch.location),
+        locationName: ch.location,
+        channelName: ch.name,
+        messageBus: subs.messageBus,
+        map: subs.channelMap,
+      })
+    } catch {
+      // Non-fatal.
+    }
+  }
+  for (const topic of deps.context.getJoinedTopics()) {
+    try {
+      ensureTopicSubscription({
+        transport: deps.router.get(topic.location),
+        locationName: topic.location,
+        topicId: topic.threadTs,
+        channelName: topic.channel,
+        messageBus: subs.messageBus,
+        map: subs.topicMap,
+      })
+    } catch {
+      // Non-fatal.
+    }
+  }
+}
+
+/**
+ * Drop every membership the session holds under its PREVIOUS name, so the
+ * name it is about to abandon doesn't stay behind as a ghost member.
+ *
+ * Topics go first, then channels. The local broker's `leaveChannel` already
+ * sweeps that channel's topics, but leaving topics explicitly keeps the
+ * remote side exact and makes the outcome independent of that ordering.
+ *
+ * Every call is best-effort: a transport that is degraded, unconfigured, or
+ * transiently failing must not block the caller from taking on its new
+ * identity - a stale membership is a lesser evil than a nameless session.
+ */
+async function leaveUnderPreviousName(deps: IdentityToolDeps, previousName: string): Promise<void> {
+  for (const topic of deps.context.getJoinedTopics()) {
+    try {
+      const transport = deps.router.get(topic.location)
+      await transport.leaveTopic({ sessionName: previousName, topicId: topic.threadTs })
+    } catch {
+      // Non-fatal.
+    }
+  }
+  for (const ch of deps.context.getSubscribedChannels()) {
+    try {
+      const transport = deps.router.get(ch.location)
+      await transport.leaveChannel({ sessionName: previousName, channel: ch.name })
+    } catch {
+      // Non-fatal.
+    }
   }
 }
 

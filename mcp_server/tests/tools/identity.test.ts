@@ -4,7 +4,7 @@ import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
-import { ensureLazyAttach } from '../../src/transport/attach.js'
+import { ensureChannelSubscription, ensureLazyAttach, ensureTopicSubscription } from '../../src/transport/attach.js'
 import { AttachDiagnostics } from '../../src/transport/diagnostics.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { Transport } from '../../src/transport/index.js'
@@ -101,6 +101,107 @@ function makeLocalOnlyDeps(): IdentityToolDeps {
   }
 }
 
+/** One recorded transport call, in the order the tool layer made it. */
+interface RecordedCall {
+  method: string
+  args: Record<string, unknown>
+}
+
+/**
+ * A Transport that records every call it receives, in order. The identity
+ * transition (KAI-408) is fundamentally about ORDERING — the old name's
+ * leaves must reach the wire before the new name's introduce — so these
+ * tests assert on a single ordered call log rather than on per-method spies.
+ */
+function makeRecordingTransport(
+  source: string,
+  calls: RecordedCall[],
+  overrides: Partial<Transport> = {},
+): Transport {
+  const record =
+    <T>(method: string, result: T) =>
+    async (args: Record<string, unknown>): Promise<T> => {
+      calls.push({ method, args })
+      return result
+    }
+  const transport = {
+    source,
+    enabled: true,
+    hasTopic: () => true,
+    introduce: record('introduce', undefined),
+    joinChannel: record('joinChannel', { subscriberCount: 1 }),
+    leaveChannel: record('leaveChannel', undefined),
+    listChannels: record('listChannels', []),
+    broadcast: record('broadcast', undefined),
+    createTopic: record('createTopic', {
+      id: 'uuid-1',
+      topic: 'KAI-408',
+      channel: 'kai',
+      creator: 'bootstrap',
+      state: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }),
+    listTopics: record('listTopics', []),
+    getTopicById: record('getTopicById', null),
+    joinTopic: record('joinTopic', { history: [] }),
+    leaveTopic: record('leaveTopic', undefined),
+    archiveTopic: record('archiveTopic', undefined),
+    unarchiveTopic: record('unarchiveTopic', undefined),
+    sendTopicMessage: record('sendTopicMessage', undefined),
+    listSessions: record('listSessions', []),
+    readChannelMessages: record('readChannelMessages', { messages: [], hasMore: false }),
+    readTopicMessages: record('readTopicMessages', { messages: [], hasMore: false }),
+    deregisterSession: record('deregisterSession', undefined),
+    ...overrides,
+  }
+  return transport as unknown as Transport
+}
+
+function makeRecordingDeps(calls: RecordedCall[], overrides?: Partial<Transport>): IdentityToolDeps {
+  return {
+    session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+    context: new ActiveContext(),
+    router: new TransportRouter([makeRecordingTransport('local', calls, overrides)]),
+  }
+}
+
+/**
+ * A recording transport that also models the two things that make the
+ * remote path different from the local broker:
+ *
+ *  - `introduce` REBINDS an internal session id (the Convex session row),
+ *    which is what every subsequent call is addressed by, and
+ *  - the reactive subscriptions FREEZE that id into their query args at
+ *    subscribe time — so a subscription registered before a rename keeps
+ *    querying as the old, now-membership-less session.
+ *
+ * `boundSessionId` on each recorded subscribe call is what lets the tests
+ * assert the subscriptions were actually re-bound to the new identity.
+ */
+function makeRecordingRemoteTransport(source: string, calls: RecordedCall[]): Transport {
+  let sessionId: string | null = null
+  const base = makeRecordingTransport(source, calls)
+  const remote = {
+    ...base,
+    introduce: async (args: Record<string, unknown>): Promise<void> => {
+      calls.push({ method: 'introduce', args })
+      sessionId = `session_${String(args.sessionName)}`
+    },
+    primeTopicCursor: (topicId: string, ts: number): void => {
+      calls.push({ method: 'primeTopicCursor', args: { topicId, ts } })
+    },
+    subscribeTopicMessages: (args: { topicId: string; channelName: string }): (() => void) => {
+      calls.push({ method: 'subscribeTopicMessages', args: { ...args, boundSessionId: sessionId } })
+      return () => calls.push({ method: 'unsubscribeTopic', args: { topicId: args.topicId } })
+    },
+    subscribeChannelMessages: (args: { channelName: string }): (() => void) => {
+      calls.push({ method: 'subscribeChannelMessages', args: { ...args, boundSessionId: sessionId } })
+      return () => calls.push({ method: 'unsubscribeChannel', args: { channelName: args.channelName } })
+    },
+  }
+  return remote as unknown as Transport
+}
+
 describe('Identity Tools', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -150,6 +251,244 @@ describe('Identity Tools', () => {
 
     it('throws on unknown tool', async () => {
       await expect(handleIdentityTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown identity tool')
+    })
+
+    describe('introduce — identity transition on rename', () => {
+      /**
+       * A session's identity IS its name: the broker keys sessions,
+       * channel membership and topic membership by name. A session boots
+       * under the config's default name, auto-joins its channels/topics
+       * under it, and only then does the agent introduce itself for real.
+       * Without an explicit teardown the bootstrap name stays behind as a
+       * ghost member of every channel and topic it joined.
+       */
+      async function bootstrapThenRename(
+        calls: RecordedCall[],
+        overrides?: Partial<Transport>,
+      ): Promise<{ deps: IdentityToolDeps; result: string }> {
+        const deps = makeRecordingDeps(calls, overrides)
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+        await handleIdentityTool('introduce', { name: 'bootstrap' }, deps)
+        deps.context.joinTopic('uuid-1', 'KAI-408', 'kai', 'local')
+        calls.length = 0 // only the rename's wire traffic is under test
+        const result = await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
+        return { deps, result }
+      }
+
+      it('leaves topics and channels as the OLD name, then introduces and re-joins as the NEW name', async () => {
+        const calls: RecordedCall[] = []
+        await bootstrapThenRename(calls)
+
+        expect(calls.map((c) => [c.method, c.args.sessionName])).toEqual([
+          ['leaveTopic', 'bootstrap'],
+          ['leaveChannel', 'bootstrap'],
+          ['introduce', 'kai-408'],
+          ['joinChannel', 'kai-408'],
+          ['joinTopic', 'kai-408'],
+        ])
+        expect(calls[0]!.args.topicId).toBe('uuid-1')
+        expect(calls[1]!.args.channel).toBe('kai')
+        expect(calls[3]!.args.channel).toBe('kai')
+        expect(calls[4]!.args.topicId).toBe('uuid-1')
+      })
+
+      it('leaves under the old name BEFORE the introduce fan-out rebinds the remote session', async () => {
+        // Load-bearing ordering: RemoteTransport ignores `sessionName` and
+        // addresses the backend by its bound session row. Once introduce
+        // rebinds that row to the new name, a leave can no longer reach the
+        // old one — so the leaves must go out first.
+        const calls: RecordedCall[] = []
+        await bootstrapThenRename(calls)
+
+        const introduceAt = calls.findIndex((c) => c.method === 'introduce')
+        const leaveTopicAt = calls.findIndex((c) => c.method === 'leaveTopic')
+        const leaveChannelAt = calls.findIndex((c) => c.method === 'leaveChannel')
+        expect(leaveTopicAt).toBeGreaterThanOrEqual(0)
+        expect(leaveChannelAt).toBeGreaterThanOrEqual(0)
+        expect(leaveTopicAt).toBeLessThan(introduceAt)
+        expect(leaveChannelAt).toBeLessThan(introduceAt)
+      })
+
+      it('re-joins channels before topics, since the broker gates topic join on channel membership', async () => {
+        const calls: RecordedCall[] = []
+        await bootstrapThenRename(calls)
+
+        expect(calls.findIndex((c) => c.method === 'joinChannel')).toBeLessThan(
+          calls.findIndex((c) => c.method === 'joinTopic'),
+        )
+      })
+
+      it('leaves nothing on a first-ever introduce (there is no previous identity)', async () => {
+        const calls: RecordedCall[] = []
+        const deps = makeRecordingDeps(calls)
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+
+        await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
+
+        expect(calls.filter((c) => c.method === 'leaveTopic' || c.method === 'leaveChannel')).toEqual([])
+        expect(calls.map((c) => c.method)).toEqual(['introduce', 'joinChannel'])
+      })
+
+      it('does not churn leaves/re-joins when re-introducing under the SAME name', async () => {
+        const calls: RecordedCall[] = []
+        const deps = makeRecordingDeps(calls)
+        deps.context.joinChannel('kai', 'cccollab.json', 'local')
+        await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
+        deps.context.joinTopic('uuid-1', 'KAI-408', 'kai', 'local')
+        calls.length = 0
+
+        await handleIdentityTool('introduce', { name: 'kai-408', objective: 'fix the ghost member' }, deps)
+
+        expect(calls.map((c) => c.method)).toEqual(['introduce', 'joinChannel'])
+      })
+
+      /**
+       * Regression guard for the fix's own footgun. The backend gates both
+       * reactive feeds on the subscribing session's membership rows
+       * (listByTopic asserts channel presence; listByChannel returns [] with
+       * no presence row), and a Convex `onUpdate` keeps the sessionId it was
+       * registered with in its query args forever. So tearing down the old
+       * name's memberships while its subscriptions are still live doesn't
+       * just deafen the session — the topic query starts throwing, and three
+       * of those in a minute disable the whole transport. The subscriptions
+       * have to move to the new identity along with everything else.
+       */
+      describe('remote reactive subscriptions', () => {
+        async function renameWithLiveSubscriptions(calls: RecordedCall[]): Promise<{
+          deps: IdentityToolDeps
+          topicMap: Map<string, () => void>
+          channelMap: Map<string, () => void>
+          result: string
+        }> {
+          const topicMap = new Map<string, () => void>()
+          const channelMap = new Map<string, () => void>()
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+            remoteTopicUnsubscribes: topicMap,
+            remoteChannelUnsubscribes: channelMap,
+          }
+
+          // Boot as the config's default name: join the channel, introduce,
+          // join a topic, and auto-subscribe — exactly what attach.ts does
+          // before the agent gets a chance to say who it really is.
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureTopicSubscription({
+            transport,
+            locationName: 'remote',
+            topicId: 'topic_1',
+            channelName: 'kai',
+            messageBus,
+            map: topicMap,
+          })
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
+          return { deps, topicMap, channelMap, result }
+        }
+
+        it('unsubscribes the old subscriptions and re-subscribes bound to the NEW session id', async () => {
+          const calls: RecordedCall[] = []
+          const { topicMap, channelMap } = await renameWithLiveSubscriptions(calls)
+
+          // The subscriptions registered under the bootstrap identity were
+          // actually torn down (their unsubscribe fns ran)...
+          expect(calls.filter((c) => c.method === 'unsubscribeTopic')).toHaveLength(1)
+          expect(calls.filter((c) => c.method === 'unsubscribeChannel')).toHaveLength(1)
+
+          // ...and fresh ones were registered, bound to the new session row.
+          const topicSub = calls.filter((c) => c.method === 'subscribeTopicMessages')
+          const channelSub = calls.filter((c) => c.method === 'subscribeChannelMessages')
+          expect(topicSub).toHaveLength(1)
+          expect(channelSub).toHaveLength(1)
+          expect(topicSub[0]!.args).toMatchObject({ topicId: 'topic_1', boundSessionId: 'session_kai-408' })
+          expect(channelSub[0]!.args).toMatchObject({ channelName: 'kai', boundSessionId: 'session_kai-408' })
+
+          // The maps are left holding the NEW unsubscribe fns, so a later
+          // leave_topic / leave_channel still tears the right thing down.
+          expect([...topicMap.keys()]).toEqual(['remote::topic_1'])
+          expect([...channelMap.keys()]).toEqual(['remote::kai'])
+        })
+
+        it('re-subscribes only after the introduce fan-out and the re-joins', async () => {
+          const calls: RecordedCall[] = []
+          await renameWithLiveSubscriptions(calls)
+
+          const at = (method: string): number => calls.findIndex((c) => c.method === method)
+          // Subscribe args freeze the sessionId ⇒ must follow introduce.
+          expect(at('subscribeChannelMessages')).toBeGreaterThan(at('introduce'))
+          expect(at('subscribeTopicMessages')).toBeGreaterThan(at('introduce'))
+          // The queries are membership-gated ⇒ must follow the re-joins.
+          expect(at('subscribeChannelMessages')).toBeGreaterThan(at('joinChannel'))
+          expect(at('subscribeTopicMessages')).toBeGreaterThan(at('joinTopic'))
+          // And the old ones must be gone before the leaves delete the rows
+          // they are gated on.
+          expect(at('unsubscribeTopic')).toBeLessThan(at('leaveTopic'))
+          expect(at('unsubscribeChannel')).toBeLessThan(at('leaveChannel'))
+        })
+
+        it('does not re-prime the topic cursor (the transport keeps its own high-water marks)', async () => {
+          // Passing a sinceTs here would be redundant at best: the transport
+          // instance survives the rename, so each subscribe re-primes from
+          // its own topicMaxTs / channelMaxTs.
+          const calls: RecordedCall[] = []
+          await renameWithLiveSubscriptions(calls)
+          expect(calls.filter((c) => c.method === 'primeTopicCursor')).toEqual([])
+        })
+
+        it('skips re-subscription cleanly when the message bus and maps are absent', async () => {
+          // Legacy deps (and unit tests) construct IdentityToolDeps without
+          // the hot-attach plumbing. That must not crash the rename.
+          const calls: RecordedCall[] = []
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([makeRecordingRemoteTransport('remote', calls)]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
+
+          expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
+          expect(calls.some((c) => c.method.startsWith('subscribe'))).toBe(false)
+          expect(calls.map((c) => c.method)).toEqual([
+            'leaveTopic',
+            'leaveChannel',
+            'introduce',
+            'joinChannel',
+            'joinTopic',
+          ])
+        })
+      })
+
+      it('still introduces under the new name when the transport throws on leave/join', async () => {
+        const calls: RecordedCall[] = []
+        const { deps, result } = await bootstrapThenRename(calls, {
+          leaveTopic: async () => {
+            throw new Error('leaveTopic exploded')
+          },
+          leaveChannel: async () => {
+            throw new Error('leaveChannel exploded')
+          },
+          joinTopic: async () => {
+            throw new Error('joinTopic exploded')
+          },
+        })
+
+        expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
+        expect(deps.session.displayName).toBe('kai-408')
+        expect(calls.map((c) => c.method)).toEqual(['introduce', 'joinChannel'])
+      })
     })
 
     describe('whoami', () => {
