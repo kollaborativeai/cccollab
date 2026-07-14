@@ -718,6 +718,43 @@ describe('Identity Tools', () => {
           expect(JSON.parse(result)).toEqual({ name: 'kai-408', degraded: ['remote'] })
         })
 
+        it('reports a location that is already disabled at rename time as degraded', async () => {
+          // A location that self-disabled BEFORE the rename is excluded from
+          // router.enabled(), so it lands in neither `introduced` nor `failed`:
+          // its subscriptions get torn down (teardown walks the context, not the
+          // router) and are never restored, and its old-name memberships cannot
+          // be left (router.get throws). The ghost silently persists there — so
+          // a bare success would be a lie. We genuinely cannot migrate it; say so.
+          const localCalls: RecordedCall[] = []
+          const remoteCalls: RecordedCall[] = []
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const local = makeRecordingTransport('local', localCalls)
+          const remote = makeRecordingRemoteTransport('remote', remoteCalls)
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([local, remote]),
+            messageBus,
+            remoteTopicUnsubscribes: new Map(),
+            remoteChannelUnsubscribes: new Map(),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'local')
+          deps.context.joinChannel('ops', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
+
+          // The remote self-disables (graceful degradation) before the rename.
+          remote.enabled = false
+          localCalls.length = 0
+          remoteCalls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
+
+          // The healthy local location is migrated...
+          expect(localCalls.some((c) => c.method === 'joinChannel' && c.args.sessionName === 'kai-408')).toBe(true)
+          // ...and the un-migratable one is reported rather than passed off as success.
+          expect(JSON.parse(result)).toEqual({ name: 'kai-408', degraded: ['remote'] })
+        })
+
         it('omits degraded and behaves as before when every introduce succeeds', async () => {
           const calls: RecordedCall[] = []
           const transport = makeRecordingRemoteTransport('remote', calls)

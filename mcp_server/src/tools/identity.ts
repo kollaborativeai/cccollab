@@ -182,6 +182,19 @@ export async function handleIdentityTool(
         }
       }
 
+      // A location the session holds membership at but which is NOT in
+      // `router.enabled()` (it self-disabled earlier, or never attached) is
+      // never even offered an introduce, so it lands in neither `introduced`
+      // nor `failed`. Yet its subscriptions were torn down above (teardown
+      // walks the CONTEXT, not the router) and cannot be restored, and its
+      // old-name memberships cannot be left (`router.get` throws). We
+      // genuinely cannot migrate it and the ghost persists there — so it is
+      // degraded too. Reporting a bare success here would be a lie.
+      for (const location of membershipLocations(deps)) {
+        if (introduced.has(location) || failed.includes(location)) continue
+        failed.push(location)
+      }
+
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name. Skip
       // locations whose introduce did not rebind (see above).
@@ -274,6 +287,17 @@ export async function handleIdentityTool(
     default:
       throw new Error(`Unknown identity tool: ${name}`)
   }
+}
+
+/** Every location the session currently holds a membership at — the union of
+ *  its subscribed channels and joined topics. This is the set the migration
+ *  has to move; a location in here that the router cannot serve is a location
+ *  we cannot migrate. */
+function membershipLocations(deps: IdentityToolDeps): Set<string> {
+  const locations = new Set<string>()
+  for (const ch of deps.context.getSubscribedChannels()) locations.add(ch.location)
+  for (const topic of deps.context.getJoinedTopics()) locations.add(topic.location)
+  return locations
 }
 
 /** The subset of deps needed to move the remote reactive subscriptions

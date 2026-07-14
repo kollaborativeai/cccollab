@@ -867,3 +867,40 @@ describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
     expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 300 })
   })
 })
+
+/**
+ * The premise the tool layer's per-location gate rests on: a FAILED introduce
+ * must leave `sessionId` pointing at the PREVIOUS row. That is exactly why a
+ * location whose introduce threw must not be re-joined or re-subscribed — its
+ * id still addresses the pre-rename identity, so doing so would recreate the
+ * old-name ghost. The only existing coverage is the first-ever introduce
+ * (null → null), which a refactor to "clear the id, then set it" would satisfy
+ * while silently nulling the id here.
+ */
+describe('RemoteTransport.introduce failure preserves the previously bound session', () => {
+  it('keeps the previous sessionId when a LATER introduce fails', async () => {
+    let introduceCount = 0
+    const stub = {
+      query: vi.fn(async () => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) {
+          introduceCount += 1
+          if (introduceCount === 1) return 'session_1'
+          throw new Error('backend rejected introduce')
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'bootstrap' })
+    expect((transport as unknown as { sessionId: string | null }).sessionId).toBe('session_1')
+
+    await expect(transport.introduce({ sessionName: 'kai-408' })).rejects.toThrow(/backend rejected/)
+
+    // Still bound to the OLD row — NOT null, NOT the new name.
+    expect((transport as unknown as { sessionId: string | null }).sessionId).toBe('session_1')
+  })
+})
