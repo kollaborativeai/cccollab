@@ -853,3 +853,43 @@ describe('ensureLazyAttach', () => {
     expect(factory).toHaveBeenCalledTimes(2)
   })
 })
+
+/**
+ * The organization a location is bound to must survive an attach.
+ *
+ * `attachLocation` used to introduce with NO organizationId and never record
+ * one, so the session's per-location org binding stayed permanently undefined —
+ * and BOTH org-change detectors are gated on a KNOWN previous org, so neither
+ * could ever fire. An ordinary `introduce({ same name, organization: 'org_X' })`
+ * then rebound the row and suspended every topic feed while the org-change
+ * DISCARD rule stayed silent, so the topics were re-joined by their OLD-ORG ids
+ * -> backend org assertion -> registerFailure x3 -> transport disabled. The heal
+ * path became the kill path.
+ */
+describe('attachLocation — organization binding', () => {
+  it('introduces with the org the location is already bound to, and keeps it recorded', async () => {
+    const location: ResolvedLocation = {
+      name: 'flatout',
+      isLocal: false,
+      url: 'https://example.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      channels: [],
+    }
+    const ctx = makeCtx(location)
+    // The session already knows this location is on org_1 (an earlier introduce
+    // recorded it). A re-attach — e.g. `authenticate` swapping the transport in
+    // place — must not silently forget that.
+    ctx.session.setOrganizationFor('flatout', 'org_1')
+    const transport = new FakeRemoteTransport('flatout')
+    ctx.transportFactory = () => transport
+
+    const result = await attachLocation('flatout', ctx)
+
+    expect(result.ok).toBe(true)
+    expect(transport.introduce).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionName: 'architect', organizationId: 'org_1' }),
+    )
+    expect(ctx.session.getOrganizationFor('flatout')).toBe('org_1')
+  })
+})

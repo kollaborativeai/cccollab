@@ -130,8 +130,16 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   } else {
     const displayName = ctx.session.displayName
     const objective = ctx.session.getObjective()
+    // Introduce INTO the organization this location is already bound to. Passing
+    // none let the backend pick, and since nothing recorded the result the
+    // session's per-location org binding stayed permanently undefined — which
+    // silently disarmed org-change detection for the rest of the process (both
+    // detectors are gated on a KNOWN previous org). A re-attach must preserve the
+    // binding, not forget it.
+    const organizationId = ctx.session.getOrganizationFor(name)
     try {
-      await transport.introduce({ sessionName: displayName, objective })
+      await transport.introduce({ sessionName: displayName, objective, organizationId })
+      if (organizationId !== undefined) ctx.session.setOrganizationFor(name, organizationId)
     } catch (err) {
       // The transport was constructed (its ConvexClient opened a
       // websocket and installed an auth fetcher) but never registered.
@@ -583,6 +591,13 @@ export function hasChannelSubscription(transport: Transport): transport is Trans
  *  local broker replays nothing on re-join. */
 /** Type guard: can this transport be asked to forget a feed outright — i.e.
  *  does it own a feed registry (KAI-418)? Only remote transports do. */
+/** Does this transport know which organization its session row is bound to? */
+export function hasBoundOrganization(transport: Transport): transport is Transport & {
+  getBoundOrganizationId: RemoteTransport['getBoundOrganizationId']
+} {
+  return typeof (transport as { getBoundOrganizationId?: unknown }).getBoundOrganizationId === 'function'
+}
+
 export function hasFeedRegistry(transport: Transport): transport is Transport & {
   forgetTopicFeed: RemoteTransport['forgetTopicFeed']
   forgetChannelFeed: RemoteTransport['forgetChannelFeed']

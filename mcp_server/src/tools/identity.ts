@@ -6,7 +6,13 @@ import { LOCAL_LOCATION, type ChannelLocation, type Transport } from '../transpo
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
-import { attachLocation, isLocationDeaf, reconcileFeeds, type AttachCtx } from '../transport/attach.js'
+import {
+  attachLocation,
+  hasBoundOrganization,
+  isLocationDeaf,
+  reconcileFeeds,
+  type AttachCtx,
+} from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -109,7 +115,19 @@ export async function handleIdentityTool(
       const orgChangedLocations = new Set<string>()
       for (const location of membershipLocations(deps)) {
         if (location === LOCAL_LOCATION) continue
-        const previousOrg = deps.session.getOrganizationFor(location)
+        // Prefer what the TRANSPORT is actually bound to over what the session
+        // merely recorded: the transport's binding is the one the backend rows —
+        // and the topic ids — actually belong to. They diverge whenever an
+        // introduce failed at one location but succeeded at another.
+        let previousOrg = deps.session.getOrganizationFor(location)
+        try {
+          const transport = deps.router.get(location)
+          if (hasBoundOrganization(transport)) {
+            previousOrg = transport.getBoundOrganizationId() ?? previousOrg
+          }
+        } catch {
+          // Not routable; fall back to the session's record.
+        }
         if (previousOrg !== undefined && organization !== undefined && previousOrg !== organization) {
           orgChangedLocations.add(location)
         }

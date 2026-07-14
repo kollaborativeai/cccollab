@@ -599,6 +599,14 @@ export class RemoteTransport implements Transport {
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
+  /** The org id this transport's session row is bound to, as far as we can
+   *  actually know it: the one the last successful `introduce` carried.
+   *  (The backend's `getSessionContext` returns only the org NAME, so there is
+   *  no way to ask it for the id.) */
+  getBoundOrganizationId(): string | undefined {
+    return this.boundOrganizationId
+  }
+
   async getBoundOrganizationName(): Promise<string | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
