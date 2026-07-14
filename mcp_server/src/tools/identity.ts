@@ -303,8 +303,10 @@ function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps)
         messageBus: subs.messageBus,
         map: subs.channelMap,
       })
-    } catch {
-      // Non-fatal.
+    } catch (err) {
+      // Non-fatal, but observable: a throw here (e.g. a degraded location)
+      // leaves the session deaf on this channel with nothing to retry it.
+      logMigrationWarning(`re-subscribe channel "${ch.name}" (${ch.location})`, err)
     }
   }
   for (const topic of deps.context.getJoinedTopics()) {
@@ -317,8 +319,9 @@ function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps)
         messageBus: subs.messageBus,
         map: subs.topicMap,
       })
-    } catch {
-      // Non-fatal.
+    } catch (err) {
+      // Non-fatal, but observable: see re-subscribe channel above.
+      logMigrationWarning(`re-subscribe topic "${topic.threadTs}" (${topic.location})`, err)
     }
   }
 }
@@ -340,18 +343,30 @@ async function leaveUnderPreviousName(deps: IdentityToolDeps, previousName: stri
     try {
       const transport = deps.router.get(topic.location)
       await transport.leaveTopic({ sessionName: previousName, topicId: topic.threadTs })
-    } catch {
-      // Non-fatal.
+    } catch (err) {
+      // Non-fatal, but observable: a failed leave here means `previousName`
+      // stays behind as a ghost member of this topic - the exact bug this
+      // migration exists to prevent - so leave a trace rather than swallow it.
+      logMigrationWarning(`leaveTopic "${topic.threadTs}" as "${previousName}" (${topic.location})`, err)
     }
   }
   for (const ch of deps.context.getSubscribedChannels()) {
     try {
       const transport = deps.router.get(ch.location)
       await transport.leaveChannel({ sessionName: previousName, channel: ch.name })
-    } catch {
-      // Non-fatal.
+    } catch (err) {
+      // Non-fatal, but observable: see leaveTopic above.
+      logMigrationWarning(`leaveChannel "${ch.name}" as "${previousName}" (${ch.location})`, err)
     }
   }
+}
+
+/** Surface a best-effort identity-migration failure on stderr. These paths
+ *  deliberately never throw (a stale membership is a lesser evil than a
+ *  nameless session), but a silent swallow hides the very ghost-membership
+ *  outcome the migration exists to prevent - so it gets a trace. */
+function logMigrationWarning(what: string, err: unknown): void {
+  process.stderr.write(`[cccollab] identity migration: ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`)
 }
 
 /**
