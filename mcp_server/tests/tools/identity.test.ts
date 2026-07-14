@@ -563,6 +563,55 @@ describe('Identity Tools', () => {
         })
       })
 
+      /**
+       * The backend keys CLI sessions by (user, org, sessionName), so a
+       * same-name re-introduce into a DIFFERENT organization rebinds the
+       * backend row exactly like a rename does — but the migration guard only
+       * fires on a name change, so the org-only case would skip teardown and
+       * orphan the old memberships. We can't tell "same org via slug vs id"
+       * from "genuinely different org" here (that lives in the backend), so we
+       * REJECT rather than half-migrate.
+       */
+      describe('organization change without a name change', () => {
+        it('rejects an org-only change and mutates nothing', async () => {
+          const calls: RecordedCall[] = []
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+
+          expect(JSON.parse(result).error).toMatch(/different organization/i)
+          // Nothing was touched: no leave, no introduce, no join.
+          expect(calls).toEqual([])
+        })
+
+        it('allows a simultaneous name-and-org change (migration proceeds)', async () => {
+          const calls: RecordedCall[] = []
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'b', organization: 'org_2' }, deps)
+
+          expect(JSON.parse(result)).toEqual({ name: 'b' })
+          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(true)
+          expect(calls.some((c) => c.method === 'introduce')).toBe(true)
+        })
+      })
+
       it('still introduces under the new name when the transport throws on leave/join', async () => {
         const calls: RecordedCall[] = []
         const { deps, result } = await bootstrapThenRename(calls, {

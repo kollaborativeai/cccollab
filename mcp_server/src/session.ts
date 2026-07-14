@@ -13,6 +13,7 @@ export class SessionManager {
   private projectName: string
   private name: string | undefined
   private objective: string | undefined
+  private organization: string | undefined
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -41,6 +42,18 @@ export class SessionManager {
 
   getObjective(): string | undefined {
     return this.objective
+  }
+
+  /** The organization this session most recently introduced into. The
+   *  backend keys CLI sessions by (user, org, sessionName), so this is
+   *  tracked to detect an org change on a same-name re-introduce, which
+   *  would rebind the backend row and orphan the old memberships. */
+  setOrganization(organization: string | undefined): void {
+    this.organization = organization
+  }
+
+  getOrganization(): string | undefined {
+    return this.organization
   }
 
   /** Format a thread message with short display name */

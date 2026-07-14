@@ -108,6 +108,24 @@ export async function handleIdentityTool(
       const renamed = previousName !== undefined && previousName !== displayName
       const subs = renamed ? remoteSubscriptionDeps(deps) : undefined
 
+      // The (user, org, sessionName) backend key means an org change ALSO
+      // rebinds the backend row, so a same-name re-introduce into a
+      // different org orphans the old memberships exactly as an un-migrated
+      // rename would. We can't distinguish a genuine org change from a
+      // same-org id-vs-slug difference here - that resolution lives in the
+      // backend (KAI-407) - so, given `organization` is compared as its raw
+      // arg string, we fail SAFE: reject rather than half-migrate. Precise
+      // handling that treats id and slug of the same org as unchanged is
+      // deferred to a follow-up on the backend's resolved org id.
+      const previousOrg = deps.session.getOrganization()
+      const orgChanged = previousOrg !== undefined && organization !== undefined && previousOrg !== organization
+      if (deps.session.hasName() && !renamed && orgChanged) {
+        return JSON.stringify({
+          error:
+            'This session is already bound to a different organization. Re-introducing into another organization on a live session is not supported — start a new session (or re-introduce with a different name).',
+        })
+      }
+
       if (renamed) {
         // Drop the remote reactive subscriptions BEFORE the membership
         // rows they are gated on disappear. A live Convex `onUpdate` keeps
@@ -135,6 +153,8 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
+      // Record the org so the NEXT re-introduce can detect a change against it.
+      deps.session.setOrganization(organization)
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Track
