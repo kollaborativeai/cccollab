@@ -806,3 +806,61 @@ describe('RemoteTransport re-subscription after a re-introduce', () => {
     })
   })
 })
+
+/**
+ * A re-join must PRESERVE the delivery cursor, not bump it forward.
+ *
+ * `joinChannel` seeds `channelMaxTs` so the reactive feed skips pre-join
+ * history. But the identity migration re-joins the channel mid-rename, and
+ * if that re-join advances the cursor to the channel's current `latestTs`,
+ * any peer broadcast that landed during the teardown→leave→introduce→rejoin
+ * window (ts ≤ latestTs) is skipped forever, because
+ * `subscribeChannelMessages` resumes at `sinceTs = channelMaxTs` EXCLUSIVE.
+ * Mirrors `joinTopic`, which never clobbers `topicMaxTs`.
+ */
+describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
+  it('seeds channelMaxTs on the first join but preserves it on a re-join', async () => {
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    let joinCount = 0
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          // First join reports latestTs=100; a later re-join reports 500 as
+          // if peer traffic landed in between.
+          joinCount += 1
+          return { channelId: 'chan_dev', latestTs: joinCount === 1 ? 100 : 500 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const callbacks: Array<(rows: unknown) => void> = []
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    await transport.introduce({ sessionName: 'bootstrap' })
+    await transport.joinChannel({ sessionName: 'bootstrap', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    // First subscribe resumes past the seeded cursor.
+    expect(onUpdateCalls[0]!.args).toMatchObject({ sinceTs: 100 })
+
+    // Deliver a broadcast at ts=100 so the delivered high-water mark is 100.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 100 }])
+
+    // The migration re-joins (peer traffic pushed the channel's latestTs to
+    // 500) and re-subscribes. The re-subscribe must resume from the
+    // PRESERVED delivered cursor (100), not the re-join's latestTs (500) —
+    // otherwise messages in (100, 500] are lost.
+    await transport.joinChannel({ sessionName: 'kai-408', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+
+    expect(onUpdateCalls).toHaveLength(2)
+    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 100 })
+  })
+})

@@ -398,13 +398,16 @@ export class RemoteTransport implements Transport {
       })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
-        // Seed the per-channel cursor with the channel's ts at join time so
-        // `subscribeChannelMessages` starts the reactive feed past existing
-        // history instead of replaying it as fresh inbound notifications.
-        // Monotonic non-decreasing: a later rejoin can't regress it.
-        if (typeof res.latestTs === 'number') {
-          const prior = this.channelMaxTs.get(res.channelId) ?? 0
-          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
+        // Seed the per-channel cursor ONLY on the first-ever join, to skip
+        // pre-join history. A re-join (the identity migration re-joins the
+        // channel mid-rename) must NOT touch an existing cursor: the value
+        // there is the delivered high-water mark, and advancing it to the
+        // channel's current `latestTs` would skip every broadcast that
+        // arrived in (delivered, latestTs] because `subscribeChannelMessages`
+        // resumes at `sinceTs = channelMaxTs` EXCLUSIVE. Mirrors `joinTopic`,
+        // which never clobbers `topicMaxTs`.
+        if (typeof res.latestTs === 'number' && !this.channelMaxTs.has(res.channelId)) {
+          this.channelMaxTs.set(res.channelId, res.latestTs)
         }
       }
       return { subscriberCount: 0 }
