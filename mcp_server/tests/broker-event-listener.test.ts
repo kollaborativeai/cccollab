@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import http from 'node:http'
 import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
@@ -434,5 +435,62 @@ describe('BrokerEventListener (channel watch mode)', () => {
     })
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * `watching: true` is worthless if the stream that carries the traffic is down.
+ * The listener already knows: it either holds an open SSE response or it does
+ * not. These tests pin that fact to a real socket, so `whoami` can report the
+ * truth instead of a subscription flag dressed up as liveness.
+ */
+describe('BrokerEventListener connection state (KAI-414)', () => {
+  it('reports disconnected before start, connected while the SSE stream is open, disconnected after stop', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(': hello\n\n')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    expect(listener.isConnected()).toBe(false)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true))
+      listener.stop()
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it('reports disconnected when the broker is not reachable at all', async () => {
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    // Nothing is listening on this port: connect() fails, and the listener must
+    // not pretend otherwise while it waits out the reconnect delay.
+    const listener = new BrokerEventListener({
+      brokerUrl: 'http://127.0.0.1:1',
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+    try {
+      await listener.start()
+      await new Promise<void>((r) => setTimeout(r, 100))
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+    }
   })
 })

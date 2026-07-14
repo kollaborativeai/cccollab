@@ -35,6 +35,7 @@ interface HarnessDeps {
   context: ActiveContext
   router: TransportRouter
   locations: ResolvedLocation[]
+  localEventsConnected: () => boolean
 }
 
 interface SessionHarness {
@@ -70,7 +71,13 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router, locations: [{ name: 'local', isLocal: true, channels: [] }] }
+  const deps: HarnessDeps = {
+    session,
+    context,
+    router,
+    locations: [{ name: 'local', isLocal: true, channels: [] }],
+    localEventsConnected: () => listener.isConnected(),
+  }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {
@@ -383,6 +390,22 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       // Opt-in guarantee: the ordinary session on the same channel, which also
       // never joined the topic, must NOT be exposed to this traffic.
       expect(BYSTANDER.received.some((m) => m.text === 'PR merged')).toBe(false)
+
+      // The watch is live and whoami says so — against a real broker and a real
+      // SSE stream, not a stubbed liveness flag.
+      const live = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(live.subscribedChannels).toContainEqual(
+        expect.objectContaining({ name: 'watch-ch', watching: true, watchingActive: true }),
+      )
+
+      // Kill the stream: the subscription survives (watching stays true) but the
+      // orchestrator is now deaf, and whoami must admit it instead of reporting
+      // a watch that no longer delivers anything.
+      ORCH.listener.stop()
+      const deaf = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(deaf.subscribedChannels).toContainEqual(
+        expect.objectContaining({ name: 'watch-ch', watching: true, watchingActive: false }),
+      )
     } finally {
       ORCH.listener.stop()
       WORKER.listener.stop()

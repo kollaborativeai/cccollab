@@ -165,8 +165,8 @@ describe('Identity Tools', () => {
         expect(result.objective).toBe('design the API')
         expect(result.activeChannel).toEqual({ name: 'default', location: 'local' })
         expect(result.subscribedChannels).toEqual([
-          { name: 'default', location: 'local', source: 'fallback', watching: false },
-          { name: 'project_x', location: 'local', source: 'manual', watching: false },
+          { name: 'default', location: 'local', source: 'fallback', watching: false, watchingActive: false },
+          { name: 'project_x', location: 'local', source: 'manual', watching: false, watchingActive: false },
         ])
       })
 
@@ -177,10 +177,30 @@ describe('Identity Tools', () => {
         deps.context.joinChannel('quiet', 'manual', 'local')
         await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
 
-        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => true }))
         expect(result.subscribedChannels).toEqual([
-          { name: 'kai', location: 'local', source: 'manual', watching: true },
-          { name: 'quiet', location: 'local', source: 'manual', watching: false },
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: true },
+          { name: 'quiet', location: 'local', source: 'manual', watching: false, watchingActive: false },
+        ])
+      })
+
+      // `watching` is what the session ASKED for; it stays true across a broker
+      // outage, because the subscription is still there. What must not stay
+      // true is the claim that the watch is in effect: local topic traffic only
+      // reaches this session over the SSE stream, so a disconnected listener
+      // means a deaf watcher. Telling it otherwise is the confidently-blind
+      // failure this whole ticket exists to kill.
+      it('does not claim a watch is in effect while the local event listener is disconnected (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => false }),
+        )
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: false },
         ])
       })
 

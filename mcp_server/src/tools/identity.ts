@@ -36,6 +36,11 @@ export interface IdentityToolDeps {
    *  (channel messages not delivered to other remote subscribers) is
    *  covered by the same hot-attach wiring. */
   remoteChannelUnsubscribes?: Map<string, () => void>
+  /** Is the local broker's SSE stream currently connected? The only carrier of
+   *  local topic traffic, so `whoami` needs it to say whether a channel watch
+   *  is actually in effect rather than merely requested. Optional: absent means
+   *  unknown, which reports as NOT active. */
+  localEventsConnected?: () => boolean
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -126,13 +131,19 @@ export async function handleIdentityTool(
       const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
       const activeTopicLocation = deps.context.getTopicLocation()
+      // `watching` is what the session ASKED for; `watchingActive` is whether
+      // it is actually in effect. Local topic traffic only arrives over the SSE
+      // stream, so a watcher with a disconnected listener is deaf — and a
+      // `watching: true` that ignores that is exactly the confidently-blind
+      // report KAI-414 exists to eliminate. Unknown liveness reads as NOT
+      // active: under-claiming is recoverable, over-claiming is the bug.
+      const localEventsLive = deps.localEventsConnected?.() === true
       const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
         name: c.name,
         location: c.location,
         source: c.source,
-        // Surfaced so channel-wide visibility (or the lack of it) is
-        // diagnosable here rather than only in the debug log.
         watching: c.watching,
+        watchingActive: c.watching && c.location === LOCAL_LOCATION && localEventsLive,
       }))
 
       // Expose every transport's runtime state so the user sees

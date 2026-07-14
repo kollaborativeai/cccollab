@@ -36,6 +36,7 @@ function createDeps(): ToolDeps {
     context,
     router: new TransportRouter([new LocalTransport(7850)]),
     locations: [],
+    localEventsConnected: () => true,
     messageBus: new MessageBus({ notification: vi.fn().mockResolvedValue(undefined) } as never),
     remoteTopicUnsubscribes: new Map(),
     remoteChannelUnsubscribes: new Map(),

@@ -47,6 +47,12 @@ export class BrokerEventListener {
   private readonly context: ActiveContext
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
+  /** Whether an SSE response is currently open. This is the ONLY thing that
+   *  carries local topic traffic into the session, so it is also the honest
+   *  answer to "is my channel watch actually in effect right now?" — see
+   *  `whoami`'s `watchingActive`. Not a heartbeat: it tracks the socket we
+   *  already hold, nothing more. */
+  private connected = false
 
   constructor(options: BrokerEventListenerOptions) {
     this.brokerUrl = options.brokerUrl
@@ -61,8 +67,15 @@ export class BrokerEventListener {
     this.log('SSE listener started')
   }
 
+  /** True only while an SSE response is open. False before `start()`, during
+   *  the reconnect window, and after `stop()`. */
+  isConnected(): boolean {
+    return this.connected
+  }
+
   stop(): void {
     this.stopped = true
+    this.connected = false
     if (this.currentRequest) {
       this.currentRequest.destroy()
       this.currentRequest = null
@@ -77,6 +90,7 @@ export class BrokerEventListener {
 
     const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
       let buffer = ''
+      this.connected = res.statusCode === 200
 
       res.on('data', (chunk: Buffer) => {
         buffer += chunk.toString()
@@ -100,17 +114,20 @@ export class BrokerEventListener {
       })
 
       res.on('end', () => {
+        this.connected = false
         this.log('SSE connection ended')
         this.scheduleReconnect()
       })
 
       res.on('error', (err) => {
+        this.connected = false
         this.log(`SSE response error: ${err.message}`)
         this.scheduleReconnect()
       })
     })
 
     req.on('error', (err) => {
+      this.connected = false
       this.log(`SSE request error: ${err.message}`)
       this.scheduleReconnect()
     })

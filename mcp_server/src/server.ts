@@ -293,6 +293,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
     router,
     locations: resolved.locations,
+    localEventsConnected: () => listener.isConnected(),
     messageBus,
     remoteTopicUnsubscribes,
     remoteChannelUnsubscribes,
@@ -386,6 +387,11 @@ export interface ToolDeps {
   context: ActiveContext
   router: TransportRouter
   locations: ResolvedLocation[]
+  /** Live SSE-connection state of the local broker listener. `whoami` reports a
+   *  channel watch as in effect only when this is true — the stream is what
+   *  carries local topic traffic, so a disconnected listener means a deaf
+   *  watcher, however "subscribed" it is. */
+  localEventsConnected: () => boolean
   messageBus: MessageBus
   remoteTopicUnsubscribes: Map<string, () => void>
   remoteChannelUnsubscribes: Map<string, () => void>
@@ -525,7 +531,7 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source, watching, watchingActive}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). On each subscribed channel, `watching` is the channel-wide watch you REQUESTED; `watchingActive` is whether it is in effect right now - false when the local event stream is disconnected, i.e. you are subscribed but currently deaf.',
       inputSchema: {},
     },
     async () => {
@@ -638,7 +644,7 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
           .boolean()
           .optional()
           .describe(
-            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now. Not a durable log: the event stream has no replay, so messages published while it is reconnecting (>=2s after a broker restart) are missed - read_topic_messages to backfill.",
+            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now. Not a durable log: the event stream has no replay, so messages published while it is reconnecting (>=2s after a broker restart) are missed - read_topic_messages to backfill. `whoami` reports `watchingActive` per channel: true only while the event stream is actually connected.",
           ),
       },
     },
