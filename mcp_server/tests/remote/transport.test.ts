@@ -819,53 +819,15 @@ describe('RemoteTransport re-subscription after a re-introduce', () => {
  * Mirrors `joinTopic`, which never clobbers `topicMaxTs`.
  */
 describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
-  it('seeds channelMaxTs on the first join but preserves it on a re-join', async () => {
-    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
-    let joinCount = 0
-    const stub = {
-      query: vi.fn(async () => undefined),
-      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
-        if ('sessionName' in args) return 'session_1'
-        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
-          // First join reports latestTs=100; a later re-join reports 500 as
-          // if peer traffic landed in between.
-          joinCount += 1
-          return { channelId: 'chan_dev', latestTs: joinCount === 1 ? 100 : 500 }
-        }
-        return undefined
-      }),
-      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
-        onUpdateCalls.push({ args })
-        callbacks.push(cb)
-        return () => {}
-      }),
-      setAuth: vi.fn(),
-    }
-    const callbacks: Array<(rows: unknown) => void> = []
-    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
-
-    await transport.introduce({ sessionName: 'bootstrap' })
-    await transport.joinChannel({ sessionName: 'bootstrap', channel: 'dev' })
-    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
-    // First subscribe resumes past the seeded cursor.
-    expect(onUpdateCalls[0]!.args).toMatchObject({ sinceTs: 100 })
-
-    // DELIVER a broadcast at ts=300 — strictly greater than the seed — so the
-    // delivered high-water mark ADVANCES to 300. Using a value greater than
-    // the seed (not equal to it) is what makes this pin the delivery-side
-    // cursor advance, not merely the join seed.
-    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
-
-    // The migration re-joins (peer traffic pushed the channel's latestTs to
-    // 500) and re-subscribes. The re-subscribe must resume from the PRESERVED
-    // delivered cursor (300) — neither reset to the seed (100) nor bumped to
-    // the re-join's latestTs (500) — otherwise messages in (300, 500] are lost.
-    await transport.joinChannel({ sessionName: 'kai-408', channel: 'dev' })
-    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
-
-    expect(onUpdateCalls).toHaveLength(2)
-    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 300 })
-  })
+  // The "seeds on the first join, preserves on a re-join" rule (seed 100,
+  // deliver 300, re-join reports 500, resume at 300) now lives in
+  // tests/remote/feed-lifecycle.test.ts — 'preserves the delivery cursor across
+  // a suspend/restore'. Same numbers, same assertions, but driven through the
+  // real seam (rebind ⇒ suspend, joinChannel ⇒ restore) instead of the manual
+  // double-subscribe it used to use: the feed registry is idempotent now, so a
+  // second subscribeChannelMessages for the same channel is a no-op and the old
+  // mechanism can no longer be expressed. The behaviour is not weakened, only
+  // re-homed to the layer that now owns it.
 
   /**
    * The other half of that rule. Seeding `channelMaxTs` only when absent is what
