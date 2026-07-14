@@ -204,6 +204,22 @@ describe('Identity Tools', () => {
         ])
       })
 
+      // watchingActive is a claim about LOCAL delivery: the SSE stream carries
+      // local topic traffic only. A remote subscription flagged `watching` (only
+      // reachable by bypassing the tool, today — see KAI-413) must never inherit
+      // a live local stream as evidence that it is being watched.
+      it('never reports a REMOTE watch as active, even with a live local event stream (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'flatout', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, { ...deps, localEventsConnected: () => true }))
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'flatout', source: 'manual', watching: true, watchingActive: false },
+        ])
+      })
+
       it('omits activeTopic when none set', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
         vi.stubGlobal('fetch', mockFetch)

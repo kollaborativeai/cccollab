@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
@@ -1022,7 +1022,21 @@ async function main() {
   await startServer(config, brokerPort, resolved)
 }
 
-main().catch((err) => {
-  console.error('[cccollab] Fatal error:', err)
-  process.exit(1)
-})
+/** Is `moduleUrl` the module the process was started with? Exported for test. */
+export function isProcessEntrypoint(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false
+  return moduleUrl === pathToFileURL(argv1).href
+}
+
+// Guarded: importing this module must be inert. `registerTools` lives here and
+// tests import it to drive the real zod schemas — the only boundary that
+// catches a dropped argument. Unguarded, that import would load config, spawn a
+// detached broker daemon, register a session on the developer's real broker,
+// attach a StdioServerTransport to the importing process's stdio, and on any
+// failure call process.exit(1) — inside a vitest worker.
+if (isProcessEntrypoint(import.meta.url, process.argv[1])) {
+  main().catch((err) => {
+    console.error('[cccollab] Fatal error:', err)
+    process.exit(1)
+  })
+}

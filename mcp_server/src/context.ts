@@ -16,7 +16,15 @@ interface SubscribedChannel {
   source: ChannelSource
   /** Channel-wide topic visibility. When true, topic traffic in this channel
    *  is delivered even for topics the session never joined — including topics
-   *  created after it subscribed. Opt-in; false for ordinary sessions. */
+   *  created after it subscribed. Opt-in; false for ordinary sessions.
+   *
+   *  INVARIANT, enforced only in `tools/channels.ts`: nothing flips a NON-LOCAL
+   *  subscription to watched. Remote delivers topic messages per-topic, so a
+   *  "watched" remote channel would report watching while receiving nothing
+   *  from topics created after the join. This layer does not re-check it (the
+   *  tool is the sole caller that passes `watch`), so whoever lands remote watch
+   *  (KAI-413) must re-establish the invariant at whatever new caller they add.
+   *  `whoami`'s `watchingActive` refuses to call a non-local watch active. */
   watching: boolean
 }
 

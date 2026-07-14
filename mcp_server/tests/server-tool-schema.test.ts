@@ -89,6 +89,34 @@ describe('join_channel tool schema (KAI-414)', () => {
     expect(JSON.parse(firstText(result)).watching).toBe(false)
     expect(deps.context.isChannelWatched('kai', 'local')).toBe(false)
   })
+
+  // The tri-state (`undefined` = leave the flag alone) is only worth anything if
+  // `undefined` actually survives the schema. A `.default(false)` on `watch`
+  // would turn every plain re-join into a silent un-watch — the same bug class
+  // as the `.default('local')` that made the ambiguity guard dead code, two
+  // lines away in the same schema. The handler-level re-join test cannot see
+  // this: it never passes through zod.
+  it('a plain re-join through the MCP boundary does not silently un-watch (tri-state survives the schema)', async () => {
+    const client = await connectClient(deps)
+    await client.callTool({ name: 'join_channel', arguments: { name: 'kai', watch: true } })
+
+    const result = await client.callTool({ name: 'join_channel', arguments: { name: 'kai' } })
+
+    expect(JSON.parse(firstText(result)).watching).toBe(true)
+    expect(deps.context.isChannelWatched('kai', 'local')).toBe(true)
+  })
+
+  // Same guarantee for the startup/re-attach path, which re-joins configured
+  // channels with no `watch` argument at all.
+  it('watch: false through the MCP boundary still turns watching off', async () => {
+    const client = await connectClient(deps)
+    await client.callTool({ name: 'join_channel', arguments: { name: 'kai', watch: true } })
+
+    const result = await client.callTool({ name: 'join_channel', arguments: { name: 'kai', watch: false } })
+
+    expect(JSON.parse(firstText(result)).watching).toBe(false)
+    expect(deps.context.isChannelWatched('kai', 'local')).toBe(false)
+  })
 })
 
 /**
