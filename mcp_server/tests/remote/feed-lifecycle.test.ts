@@ -38,11 +38,25 @@ interface Harness {
 /** `cccollab/channels:join` -> `channels:join` */
 const shortName = (ref: unknown): string => getFunctionName(ref as never).split('/')[1] ?? ''
 
-function makeHarness(opts?: { sessionIds?: string[]; joinLatestTs?: number[] }): Harness {
+function makeHarness(opts?: {
+  sessionIds?: string[]
+  joinLatestTs?: number[]
+  /** How the async channel-id lookup behaves. A channel feed subscribed before
+   *  any `joinChannel` has cached its id must resolve the id via
+   *  `channels:listAll` — which can reject, or come back with no matching row.
+   *  Either way `register()` never runs and the feed is NOT live. */
+  listAll?: 'ok' | 'reject' | 'nomatch'
+  /** Make `client.onUpdate` throw for this query, modelling a client that
+   *  refuses to register the subscription (e.g. closed / rejected args). The
+   *  feed must then NOT be considered live. */
+  onUpdateThrowsFor?: string
+}): Harness {
   const events: string[] = []
   const feeds: Feed[] = []
   const sessionIds = opts?.sessionIds ?? ['session_1']
   const joinLatestTs = opts?.joinLatestTs ?? []
+  const listAll = opts?.listAll ?? 'ok'
+  const onUpdateThrowsFor = opts?.onUpdateThrowsFor
   let nextId = 0
   let introduceCount = 0
   let channelJoinCount = 0
@@ -69,6 +83,9 @@ function makeHarness(opts?: { sessionIds?: string[]; joinLatestTs?: number[] }):
     query: vi.fn(async (ref: unknown) => {
       const name = shortName(ref)
       if (name === 'channels:listAll') {
+        events.push('query:channels:listAll')
+        if (listAll === 'reject') throw new Error('listAll blew up')
+        if (listAll === 'nomatch') return [{ channelId: 'chan_other', name: 'somewhere-else' }]
         return [
           { channelId: 'chan_dev', name: 'dev' },
           { channelId: 'chan_ops', name: 'ops' },
@@ -78,6 +95,7 @@ function makeHarness(opts?: { sessionIds?: string[]; joinLatestTs?: number[] }):
     }),
     onUpdate: vi.fn((ref: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
       const name = shortName(ref)
+      if (onUpdateThrowsFor === name) throw new Error(`onUpdate refused for ${name}`)
       const id = (nextId += 1)
       const feed: Feed = { id, query: name, args, cb, alive: true }
       feeds.push(feed)
@@ -418,5 +436,112 @@ describe('RemoteTransport feed lifecycle — the negatives', () => {
 
     expect(h.live('messages:listByChannel')).toHaveLength(0)
     expect(h.live('messages:listByTopic')).toHaveLength(0)
+  })
+})
+
+/**
+ * `attached` must mean "the onUpdate is REALLY registered" — not "we asked for
+ * one" (KAI-418, blocker 2).
+ *
+ * A channel feed subscribed before any `joinChannel` has cached its id must
+ * resolve that id asynchronously via `channels:listAll`. That lookup can reject,
+ * or return no matching row. In BOTH cases `register()` never runs, so no
+ * onUpdate exists and the session cannot hear a thing on that channel — while
+ * the feed object, the `inner` handle and the registry entry all exist.
+ *
+ * If `attached` were set at feed CREATION instead of inside `register()`, every
+ * liveness question would lie: `hasLiveChannelFeed` true, `suspendedFeeds`
+ * empty, `deafLocations` silent, and the tool would return a clean success on a
+ * deaf session. That is the exact defect these pin.
+ */
+describe('RemoteTransport channel feed — attached means genuinely attached', () => {
+  /** Subscribe a channel feed WITHOUT a prior joinChannel, so the async
+   *  channel-id lookup (not the cached fast path) is what has to resolve it. */
+  async function subscribeWithoutCachedId(
+    t: RemoteTransport,
+  ): Promise<{ msgs: string[] }> {
+    const msgs: string[] = []
+    await t.introduce({ sessionName: 'a' })
+    t.subscribeChannelMessages({ channelName: 'dev' }, (m: ParsedMessage) => msgs.push(m.text))
+    // Let the async id lookup settle.
+    await vi.waitFor(() => expect(t.suspendedFeeds).toBeDefined())
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    return { msgs }
+  }
+
+  it('is NOT live when the channel-id lookup REJECTS', async () => {
+    const h = makeHarness({ listAll: 'reject' })
+    const t = makeTransport(h)
+
+    await subscribeWithoutCachedId(t)
+
+    // The lookup was attempted and blew up, so no onUpdate was ever registered.
+    expect(h.events).toContain('query:channels:listAll')
+    expect(h.live(CHANNEL_Q)).toHaveLength(0)
+    // ...and every liveness question tells the truth about it.
+    expect(t.hasLiveChannelFeed('dev')).toBe(false)
+    expect(t.suspendedFeeds().channels).toContain('dev')
+  })
+
+  it('is NOT live when the channel-id lookup finds NO MATCHING channel', async () => {
+    const h = makeHarness({ listAll: 'nomatch' })
+    const t = makeTransport(h)
+
+    await subscribeWithoutCachedId(t)
+
+    expect(h.live(CHANNEL_Q)).toHaveLength(0)
+    expect(t.hasLiveChannelFeed('dev')).toBe(false)
+    expect(t.suspendedFeeds().channels).toContain('dev')
+  })
+
+  it('recovers: once the id resolves on a later join, the feed goes live and DELIVERS', async () => {
+    // A failed lookup must be a SUSPENSION, not a death sentence — the feed
+    // stays registered and the next join that resolves the id restores it.
+    const h = makeHarness({ listAll: 'reject' })
+    const t = makeTransport(h)
+    const { msgs } = await subscribeWithoutCachedId(t)
+    expect(t.hasLiveChannelFeed('dev')).toBe(false)
+
+    // joinChannel caches the real channel id and restores the suspended feed.
+    await t.joinChannel({ sessionName: 'a', channel: 'dev' })
+
+    expect(t.hasLiveChannelFeed('dev')).toBe(true)
+    expect(t.suspendedFeeds().channels).not.toContain('dev')
+
+    // And it can actually HEAR — liveness that does not deliver is worthless.
+    const feed = h.live(CHANNEL_Q).at(-1)!
+    feed.cb([{ _id: 'm1', fromSessionId: 'peer', text: 'hello', ts: 500 }])
+    expect(msgs).toEqual(['hello'])
+  })
+})
+
+/**
+ * The topic-side twin of the invariant above.
+ *
+ * A topic feed needs no async id lookup (topics are addressed by id), so its
+ * `onUpdate` registers synchronously and `attached` is set immediately after —
+ * which is correct. But "immediately after" is only right because it is AFTER:
+ * if the client refuses to register the subscription, no onUpdate exists and the
+ * feed is deaf. Nothing pinned that ordering, so marking the feed live at
+ * CREATION passed the whole suite. This closes it: `attached` must mean the
+ * onUpdate is really there, on both feed kinds.
+ */
+describe('RemoteTransport topic feed — attached means genuinely attached', () => {
+  it('is NOT live when the client refuses to register the onUpdate', async () => {
+    const h = makeHarness({ onUpdateThrowsFor: TOPIC_Q })
+    const t = makeTransport(h)
+    await t.introduce({ sessionName: 'a' })
+    await t.joinChannel({ sessionName: 'a', channel: 'dev' })
+    await t.joinTopic({ sessionName: 'a', topicId: 't1' })
+
+    // The refusal is not swallowed — but whatever the caller does with it, the
+    // feed must never claim to be live.
+    expect(() => t.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})).toThrow(/onUpdate refused/)
+
+    expect(h.live(TOPIC_Q)).toHaveLength(0)
+    expect(t.hasLiveTopicFeed('t1')).toBe(false)
+    expect(t.suspendedFeeds().topics).toContain('t1')
   })
 })

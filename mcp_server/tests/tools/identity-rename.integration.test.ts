@@ -38,7 +38,14 @@ interface Feed {
 
 const shortName = (ref: unknown): string => getFunctionName(ref as never).split('/')[1] ?? ''
 
-function makeConvexStub(sessionIds: string[]): { client: ConvexClient; feeds: Feed[] } {
+function makeConvexStub(
+  sessionIds: string[],
+  /** When true the backend never yields a channel id: `channels:join` comes back
+   *  without one and `channels:listAll` has no matching row. A channel feed then
+   *  can never register its onUpdate — the session is DEAF on that channel even
+   *  though the feed object exists. */
+  opts?: { unresolvableChannelId?: boolean },
+): { client: ConvexClient; feeds: Feed[] } {
   const feeds: Feed[] = []
   let introduceCount = 0
   const client = {
@@ -49,7 +56,9 @@ function makeConvexStub(sessionIds: string[]): { client: ConvexClient; feeds: Fe
         introduceCount += 1
         return id
       }
-      if (name === 'channels:join') return { channelId: 'chan_dev', latestTs: 100 }
+      if (name === 'channels:join') {
+        return opts?.unresolvableChannelId === true ? {} : { channelId: 'chan_dev', latestTs: 100 }
+      }
       if (name === 'topics:join') return { topicId: 'topic_1', channelId: 'chan_dev', name: 'KAI-418' }
       return undefined
     }),
@@ -228,5 +237,48 @@ describe('integration: a transport swapped in place must not leave the session d
 
     // ...and it must not be reported as a clean success if it cannot.
     expect(result.degraded).toBeUndefined()
+  })
+
+  it('reports the location as degraded when a channel feed can never resolve its channel id', async () => {
+    // Blocker 2, across the real seam. The feed object, its `inner` handle and
+    // its registry entry all exist — but the channel id never resolves, so
+    // `register()` never runs and no onUpdate is ever created. The session is
+    // DEAF on that channel. If liveness were read from "we asked for a feed"
+    // instead of "the onUpdate really attached", the tool would hand back a
+    // clean success on a session that cannot hear a word.
+    const { client, feeds } = makeConvexStub(['session_bootstrap', 'session_kai418'], {
+      unresolvableChannelId: true,
+    })
+    const transport = new RemoteTransport({ client, source: 'remote', log: () => {} })
+    const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+
+    const deps: IdentityToolDeps = {
+      session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+      context: new ActiveContext(),
+      router: new TransportRouter([transport]),
+      messageBus,
+    }
+
+    deps.context.joinChannel('dev', 'cccollab.json', 'remote')
+    await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
+    ensureChannelSubscription({ transport, channelName: 'dev', messageBus })
+    // Let the async channel-id lookup settle (it finds nothing).
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // No onUpdate was ever registered for the channel — and the feed says so
+    // RIGHT AWAY, at creation. (Asserting only after the rename would not pin
+    // this: the rename detaches the feed, which clears `attached` regardless,
+    // so a feed that lied at creation would look honest by then.)
+    expect(liveFeed(feeds, 'messages:listByChannel')).toHaveLength(0)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+
+    const result = JSON.parse(await handleIdentityTool('introduce', { name: 'kai-418', organization: 'org_a' }, deps))
+
+    // Still deaf after the rename — and the tool SAYS so.
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+    expect(transport.suspendedFeeds().channels).toContain('dev')
+    expect(result.degraded).toEqual(['remote'])
   })
 })
