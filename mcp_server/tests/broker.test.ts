@@ -189,9 +189,7 @@ describe('Broker: isolation guards and invariants', () => {
   })
 
   describe('self-declared identity (KAI-401)', () => {
-    async function getSessions(): Promise<
-      Array<{ name: string; identity?: Record<string, unknown> }>
-    > {
+    async function getSessions(): Promise<Array<{ name: string; identity?: Record<string, unknown> }>> {
       const res = await fetch(`http://127.0.0.1:${port}/sessions`)
       const body = (await res.json()) as { sessions: Array<{ name: string; identity?: Record<string, unknown> }> }
       return body.sessions
