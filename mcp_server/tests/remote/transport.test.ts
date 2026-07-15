@@ -631,7 +631,11 @@ describe('RemoteTransport.subscribeTopicsCreated (remote topic-created parity, K
     expect(delivered[0]!.text).toBe('New topic in "product": "Preview"')
   })
 
-  it('the returned unsubscribe stops further delivery', async () => {
+  // Scoped to what is actually ours to guarantee: that we call through to the
+  // Convex client's unsubscribe. Delivery then stops because the client stops
+  // invoking the callback — asserting that against this stub (whose callback
+  // stays hand-callable) would assert the stub's behavior, not ours.
+  it('the returned unsubscribe calls through to the raw Convex unsubscribe', async () => {
     const { stub, callbacks } = makeCapturingStub()
     let rawUnsubscribed = false
     stub.onUpdate = vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
@@ -644,8 +648,7 @@ describe('RemoteTransport.subscribeTopicsCreated (remote topic-created parity, K
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
     await transport.introduce({ sessionName: 'sessionB' })
 
-    const delivered: unknown[] = []
-    const unsub = transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+    const unsub = transport.subscribeTopicsCreated({ channelName: 'product' }, () => {})
     callbacks[0]!([]) // baseline
     unsub()
     expect(rawUnsubscribed).toBe(true)
