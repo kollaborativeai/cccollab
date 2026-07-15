@@ -27,6 +27,24 @@ export type TransportSource = ChannelLocation
 /** Reserved name for the in-process broker location. */
 export const LOCAL_LOCATION: ChannelLocation = 'local'
 
+/**
+ * Self-declared session identity (KAI-401). Every field is optional and
+ * the whole object is optional: a session that declares nothing behaves
+ * exactly as before. `company`/`repo`/`worktree`/`branch` are the grouping
+ * keys for KAI-403's Company → Repo → Worktree view; `sessionId` (the
+ * Claude Code session UUID) is the stable anchor KAI-415 keys its persisted
+ * state on (see `sessionKey`); `pid`/`cwd` round out liveness + location.
+ */
+export interface SessionIdentity {
+  company?: string
+  repo?: string
+  worktree?: string
+  branch?: string
+  cwd?: string
+  sessionId?: string
+  pid?: number
+}
+
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
   name: string
@@ -34,6 +52,7 @@ export interface TransportSession {
   machine?: string
   channels: string[]
   registeredAt?: string
+  identity?: SessionIdentity
 }
 
 /** Channel summary as surfaced by `list_channels`. */
@@ -113,7 +132,12 @@ export interface Transport {
   hasTopic(topicId: string): boolean
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void>
+  introduce(args: {
+    sessionName: string
+    objective?: string
+    organizationId?: string
+    identity?: SessionIdentity
+  }): Promise<void>
 
   // ─── Channels ─────────────────────────────────────────────────────────
   joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }>

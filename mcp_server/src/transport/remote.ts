@@ -6,6 +6,7 @@ import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
+  type SessionIdentity,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -357,16 +358,22 @@ export class RemoteTransport implements Transport {
    * counts this against the failure window — a transient blip at startup
    * is a failure just like one mid-session.
    */
-  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+  async introduce(args: {
+    sessionName: string
+    objective?: string
+    organizationId?: string
+    identity?: SessionIdentity
+  }): Promise<void> {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
     try {
-      const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
+      const base = {
         sessionName: args.sessionName,
         objective: args.objective,
         organizationId: args.organizationId,
-      })) as string
+      }
+      const id = (await this.introduceWithIdentityFallback(base, args.identity)) as string
       this.sessionId = id
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
@@ -384,6 +391,40 @@ export class RemoteTransport implements Transport {
     } catch (err) {
       this.registerFailure('introduce', err)
       throw err
+    }
+  }
+
+  /**
+   * Call the introduce mutation with declared identity, auto-falling-back
+   * to a no-identity call if KAI's backend validator doesn't yet accept the
+   * `identity` arg (KAI-401 Option D).
+   *
+   * Convex validates mutation args strictly: an unknown field throws an
+   * `ArgumentValidationError`. If we let that propagate, `introduce`'s
+   * caller (`attach.ts`) aborts before registering the transport and the
+   * session goes silently local-only — the KAI-413 divergence this ticket
+   * exists to prevent. So on that SPECIFIC error we retry once without
+   * identity: no regression on a not-yet-updated backend, and identity
+   * flows automatically the moment the backend adds the optional arg. Any
+   * OTHER error is a genuine failure and rethrows as before.
+   */
+  private async introduceWithIdentityFallback(
+    base: { sessionName: string; objective?: string; organizationId?: string },
+    identity: SessionIdentity | undefined,
+  ): Promise<unknown> {
+    const ref = fn<'mutation'>(this.refs.sessions.mutations.introduce)
+    if (identity === undefined) {
+      return this.client.mutation(ref, base)
+    }
+    try {
+      return await this.client.mutation(ref, { ...base, identity })
+    } catch (err) {
+      if (!isArgumentValidationError(err)) throw err
+      this.log(
+        `introduce: backend rejected the identity field (${err instanceof Error ? err.message : String(err)}); ` +
+          `retrying without it. Identity will flow once the backend accepts it.`,
+      )
+      return this.client.mutation(ref, base)
     }
   }
 
@@ -735,6 +776,7 @@ export class RemoteTransport implements Transport {
         objective?: string
         machine?: string
         createdAt: number
+        identity?: SessionIdentity
       }>
       return rows.map((r) => ({
         name: r.sessionName,
@@ -744,6 +786,9 @@ export class RemoteTransport implements Transport {
         // session today; leave empty so the shape stays stable.
         channels: [],
         registeredAt: new Date(r.createdAt).toISOString(),
+        // Only surface identity when the backend row carries it, so a row
+        // without it serializes exactly as before (KAI-401 parity with local).
+        ...(r.identity ? { identity: r.identity } : {}),
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
@@ -1183,6 +1228,20 @@ function extractConvexErrorMessage(err: unknown): string {
     }
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Detect Convex's strict-arg-validation rejection. When a mutation receives
+ * a field its validator doesn't declare, Convex throws an
+ * `ArgumentValidationError` whose message names the extra field. We match
+ * the error name (the stable signal) and fall back to the message pattern.
+ * Used to gate KAI-401's identity auto-fallback: only this specific error
+ * triggers a retry-without-identity; anything else is a real failure.
+ */
+function isArgumentValidationError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return /ArgumentValidationError|extra field .* (?:that is )?not in the validator/i.test(msg)
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {

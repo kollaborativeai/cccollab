@@ -1,6 +1,7 @@
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
+  type SessionIdentity,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -32,9 +33,20 @@ export class LocalTransport implements Transport {
   }
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+  async introduce(args: {
+    sessionName: string
+    objective?: string
+    organizationId?: string
+    identity?: SessionIdentity
+  }): Promise<void> {
     // The local broker is single-tenant; organizationId is intentionally ignored.
-    await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
+    // Only include `identity` when declared so an undeclared session's POST
+    // body is byte-identical to before (KAI-401: no breaking change).
+    await this.brokerPost('/sessions', {
+      name: args.sessionName,
+      objective: args.objective,
+      ...(args.identity ? { identity: args.identity } : {}),
+    })
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────

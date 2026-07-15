@@ -507,6 +507,25 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
             'Organization id (from list_organizations) to create this session in. ' +
               'Required when connected to a remote location.',
           ),
+        // Fully optional self-declared identity (KAI-401). Enables grouped
+        // views (Company → Repo → Worktree) and stable-key persistence across
+        // restarts without name-matching or OS-scanning. Omitting it keeps
+        // today's behavior exactly.
+        identity: z
+          .object({
+            company: z.string().optional().describe('Owning company / org, e.g. "flatout"'),
+            repo: z.string().optional().describe('Repository name, e.g. "cccollab"'),
+            worktree: z.string().optional().describe('Git worktree name, e.g. "KAI-401"'),
+            branch: z.string().optional().describe('Git branch'),
+            cwd: z.string().optional().describe('Absolute working directory'),
+            sessionId: z
+              .string()
+              .optional()
+              .describe('Claude Code session UUID — stable across restarts; the key persistence anchors on'),
+            pid: z.number().optional().describe('Process id of the Claude Code session'),
+          })
+          .optional()
+          .describe('Self-declared session identity for grouping and stable restart identity (all fields optional)'),
       },
     },
     async (args) => {
@@ -522,7 +541,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `identity` is present only when the session self-declared it at introduce. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
       inputSchema: {},
     },
     async () => {

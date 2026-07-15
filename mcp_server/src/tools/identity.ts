@@ -2,7 +2,7 @@ import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
-import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
+import { LOCAL_LOCATION, type SessionIdentity, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
@@ -75,10 +75,12 @@ export async function handleIdentityTool(
         name: displayName,
         objective,
         organization,
+        identity,
       } = args as {
         name: string
         objective?: string
         organization?: string
+        identity?: SessionIdentity
       }
 
       const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
@@ -90,6 +92,7 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
+      deps.session.setIdentity(identity)
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Each
@@ -97,7 +100,7 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          await transport.introduce({ sessionName: displayName, objective, organizationId: organization, identity })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.
@@ -122,6 +125,7 @@ export async function handleIdentityTool(
         return JSON.stringify({ error: 'No identity set. Call introduce with a name.' })
       }
       const objective = deps.session.getObjective()
+      const identity = deps.session.getIdentity()
       const activeChannel = deps.context.getActiveChannelRef()
       const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
@@ -143,6 +147,7 @@ export async function handleIdentityTool(
       return JSON.stringify({
         name: deps.session.displayName,
         ...(objective ? { objective } : {}),
+        ...(identity ? { identity } : {}),
         ...(activeChannel ? { activeChannel: { name: activeChannel.name, location: activeChannel.location } } : {}),
         ...(activeTopicName
           ? {

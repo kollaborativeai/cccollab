@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SessionManager } from '../src/session.js'
+import { SessionManager, sessionKey } from '../src/session.js'
 
 describe('SessionManager', () => {
   describe('session name derivation', () => {
@@ -83,6 +83,28 @@ describe('SessionManager', () => {
 
     it('returns null for empty messages', () => {
       expect(SessionManager.parse('')).toBeNull()
+    })
+  })
+
+  describe('sessionKey (KAI-415 stable-key resolver)', () => {
+    it('anchors on the CC session UUID, not the name: same UUID + different name -> same key', () => {
+      // This is the six-renames-a-day case. The name churned; the UUID did not.
+      const runA = sessionKey({ sessionId: 'uuid-abc', cwd: '/projects/x' })
+      const runB = sessionKey({ sessionId: 'uuid-abc', cwd: '/projects/x' })
+      expect(runA).toBe('uuid-abc')
+      expect(runB).toBe(runA)
+    })
+
+    it('returns null when no sessionId is declared (the optional case)', () => {
+      expect(sessionKey({ cwd: '/projects/x', repo: 'x' })).toBeNull()
+    })
+
+    it('returns null when identity is absent entirely', () => {
+      expect(sessionKey(undefined)).toBeNull()
+    })
+
+    it('resolves different sessionIds to different keys', () => {
+      expect(sessionKey({ sessionId: 'uuid-abc' })).not.toBe(sessionKey({ sessionId: 'uuid-def' }))
     })
   })
 

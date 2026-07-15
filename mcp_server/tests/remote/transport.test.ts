@@ -143,6 +143,85 @@ describe('RemoteTransport graceful degradation', () => {
 })
 
 /**
+ * Self-declared identity on the remote transport (KAI-401), including the
+ * auto-fallback-on-reject path that is the no-silent-remote-regression
+ * guarantee: if KAI's Convex `introduce` validator doesn't yet accept the
+ * identity arg, sending it must NOT abort introduce (which would leave the
+ * remote transport unregistered and the session silently local-only —
+ * the KAI-413 failure family). Instead we retry once without identity.
+ */
+describe('RemoteTransport self-declared identity (KAI-401)', () => {
+  const identity = {
+    company: 'flatout',
+    repo: 'cccollab',
+    worktree: 'KAI-401',
+    branch: 'KAI-401',
+    cwd: '/projects/cccollab-KAI-401',
+    sessionId: 'uuid-401',
+    pid: 4321,
+  }
+
+  it('sends identity to introduce when the backend accepts it', async () => {
+    const introduceArgs: Array<Record<string, unknown>> = []
+    const { client } = makeStubClient(
+      async () => [], // listJoinedForUser preload
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        introduceArgs.push(args)
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.introduce({ sessionName: 'architect', identity })
+
+    expect(introduceArgs).toHaveLength(1)
+    expect(introduceArgs[0]!.identity).toEqual(identity)
+  })
+
+  it('auto-falls-back without identity on ArgumentValidationError, and stays enabled', async () => {
+    class ArgumentValidationError extends Error {
+      constructor() {
+        super('ArgumentValidationError: Object contains extra field `identity` that is not in the validator.')
+        this.name = 'ArgumentValidationError'
+      }
+    }
+    const introduceArgs: Array<Record<string, unknown>> = []
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        introduceArgs.push(args)
+        if ('identity' in args) throw new ArgumentValidationError()
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // Must not throw: a rethrow here aborts attach and loses remote entirely.
+    await expect(transport.introduce({ sessionName: 'architect', identity })).resolves.toBeUndefined()
+
+    // Transport survives: first attempt WITH identity, retry WITHOUT it.
+    expect(transport.enabled).toBe(true)
+    expect(introduceArgs).toHaveLength(2)
+    expect(introduceArgs[0]!.identity).toEqual(identity)
+    expect(introduceArgs[1]).not.toHaveProperty('identity')
+  })
+
+  it('reads identity back from listSessions when the row carries it', async () => {
+    const { client } = makeStubClient(async (_ref: unknown, _args: unknown) => [
+      { _id: 's1', sessionName: 'architect', createdAt: 1_700_000_000_000, identity },
+      { _id: 's2', sessionName: 'plain', createdAt: 1_700_000_000_000 },
+    ])
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    const sessions = await transport.listSessions({})
+    expect(sessions.find((s) => s.name === 'architect')?.identity).toEqual(identity)
+    expect(sessions.find((s) => s.name === 'plain')).not.toHaveProperty('identity')
+  })
+})
+
+/**
  * `subscribeTopicMessages` should pass a `sinceTs` to the reactive
  * `listByTopic` query on re-subscribe so Convex narrows results to
  * messages newer than what we've already delivered. The per-topic

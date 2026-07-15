@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { PROFILE, BROKER_RENDEZVOUS_FILE, CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 import { clampHistoryLimit, pageTopicHistory } from './history-paging.js'
+import type { SessionIdentity } from './transport/index.js'
 
 mkdirSync(CCCOLLAB_RUN_DIR, { recursive: true })
 mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
@@ -56,6 +57,7 @@ interface SessionInfo {
   objective?: string
   registeredAt: string
   channels: Set<string>
+  identity?: SessionIdentity
 }
 
 const topics = new Map<string, LocalTopic>()
@@ -565,10 +567,24 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (pathname === '/sessions' && method === 'GET') {
     const channelFilter = normalizeChannel(searchParams.get('channel'))
-    const result: Array<{ name: string; objective?: string; registeredAt: string; channels: string[] }> = []
+    const result: Array<{
+      name: string
+      objective?: string
+      registeredAt: string
+      channels: string[]
+      identity?: SessionIdentity
+    }> = []
     for (const s of sessions.values()) {
       if (channelFilter && !s.channels.has(channelFilter)) continue
-      result.push({ name: s.name, objective: s.objective, registeredAt: s.registeredAt, channels: [...s.channels] })
+      result.push({
+        name: s.name,
+        objective: s.objective,
+        registeredAt: s.registeredAt,
+        channels: [...s.channels],
+        // Only surface identity when declared, so a session that
+        // declared none serializes exactly as before (KAI-401).
+        ...(s.identity ? { identity: s.identity } : {}),
+      })
     }
     jsonResponse(res, 200, { sessions: result })
     return
@@ -577,15 +593,31 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (pathname === '/sessions' && method === 'POST') {
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { name?: string; objective?: string }
+        const body = JSON.parse(await readBody(req)) as {
+          name?: string
+          objective?: string
+          identity?: SessionIdentity
+        }
         if (!body.name) {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
         const existing = sessions.get(body.name)
         const info: SessionInfo = existing
-          ? { ...existing, objective: body.objective ?? existing.objective }
-          : { name: body.name, objective: body.objective, registeredAt: new Date().toISOString(), channels: new Set() }
+          ? {
+              ...existing,
+              objective: body.objective ?? existing.objective,
+              // Last-write-wins on a re-introduce, mirroring `objective`.
+              // A re-introduce that omits identity keeps the prior value.
+              identity: body.identity ?? existing.identity,
+            }
+          : {
+              name: body.name,
+              objective: body.objective,
+              registeredAt: new Date().toISOString(),
+              channels: new Set(),
+              identity: body.identity,
+            }
         sessions.set(body.name, info)
         log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
         jsonResponse(res, 200, { ok: true })

@@ -152,6 +152,70 @@ describe('Identity Tools', () => {
       await expect(handleIdentityTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown identity tool')
     })
 
+    describe('self-declared identity (KAI-401)', () => {
+      const identity = {
+        company: 'flatout',
+        repo: 'cccollab',
+        worktree: 'KAI-401',
+        branch: 'KAI-401',
+        cwd: '/projects/cccollab-KAI-401',
+        sessionId: 'uuid-401',
+        pid: 4321,
+      }
+
+      it('forwards declared identity to every enabled transport (local + remote parity)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', identity, organization: 'org_a' }, remoteDeps)
+
+        // Remote transport received the identity.
+        expect(seen[0]?.identity).toEqual(identity)
+        // Local transport sent it in the POST /sessions body.
+        const localPost = mockFetch.mock.calls.find(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(localPost).toBeDefined()
+        expect(JSON.parse((localPost![1]! as RequestInit).body as string).identity).toEqual(identity)
+      })
+
+      it('forwards no identity when none is declared (no breaking change)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+
+        expect(seen[0]?.identity).toBeUndefined()
+        // The local broker wire is byte-identical to before: no identity key.
+        const localPost = mockFetch.mock.calls.find(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(JSON.parse((localPost![1]! as RequestInit).body as string)).not.toHaveProperty('identity')
+      })
+
+      it('whoami surfaces the declared identity so restored-vs-fresh is diagnosable', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.identity).toEqual(identity)
+      })
+
+      it('whoami omits identity when none was declared', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result).not.toHaveProperty('identity')
+      })
+    })
+
     describe('whoami', () => {
       it('reports active channel with location and subscriptions with source+location', async () => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
