@@ -80,7 +80,7 @@ describe('session-state store (KAI-415)', () => {
       expect(sessionStateFile('uuid-a')).not.toBe(sessionStateFile('uuid-b'))
     })
 
-    it('each session loads back its OWN subscriptions, never its neighbour is', () => {
+    it("each session loads back its OWN subscriptions, never its neighbour's", () => {
       saveSessionState(stateFor('uuid-a', { channels: [{ name: 'alpha', location: 'local', source: 'manual' }] }))
       saveSessionState(stateFor('uuid-b', { channels: [{ name: 'beta', location: 'local', source: 'manual' }] }))
 
