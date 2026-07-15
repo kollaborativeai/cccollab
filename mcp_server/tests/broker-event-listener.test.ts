@@ -673,6 +673,11 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 5000 })
       await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000 })
       expect(listener.mayHaveMissedEvents()).toBe(true)
+      // Pin F2 mutation B: dropStream() is a test-only seam today, but the
+      // OLD shape reset `connected` here, so a future dev restoring that shape
+      // could plausibly reset the flag too. It must not.
+      listener.dropStream()
+      expect(listener.mayHaveMissedEvents()).toBe(true)
     } finally {
       listener.stop()
       await new Promise<void>((r) => server.close(() => r()))
