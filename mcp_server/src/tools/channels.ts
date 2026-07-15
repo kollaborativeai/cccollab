@@ -217,15 +217,18 @@ async function handleJoinChannel(
 
   const location = requestedLocation ?? LOCAL_LOCATION
 
-  // Remote delivers topic messages via per-topic subscriptions, so a watched
-  // remote channel would silently miss every topic created after the join — the
-  // blind spot watch mode exists to close. Refuse until KAI-413 lands, and
+  // Remote now delivers topic-CREATED notifications (KAI-413), but watch also
+  // promises topic MESSAGES from topics the session never joined, and remote
+  // delivers those per-topic — so a watched remote channel would report
+  // watching while staying deaf to traffic in topics created after the join.
+  // Auto-subscribing each new topic's message feed (and making `watchingActive`
+  // honest for remote) is tracked in KAI-425. Until it lands, refuse — and
   // refuse BEFORE joining: a half-applied watch is worse than none.
   if (watch === true && location !== LOCAL_LOCATION) {
     return JSON.stringify({
       error:
         `Channel-wide watch is local-transport only; "${location}" is remote. ` +
-        `Remote watch needs the topic-created event (KAI-413), which is not ready. ` +
+        `Remote watch needs per-topic message fan-out for newly created topics (KAI-425), which is not ready. ` +
         `Re-run without \`watch\` to subscribe normally.`,
     })
   }

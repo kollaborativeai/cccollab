@@ -514,6 +514,144 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
   })
 })
 
+describe('RemoteTransport.subscribeTopicsCreated (remote topic-created parity, KAI-413)', () => {
+  // A stub whose onUpdate captures the topics.listByChannel callback so the
+  // test can drive the reactive query by hand. introduce() sets sessionId
+  // (needed for self-drop + org-scoping); its listJoinedForUser query returns [].
+  function makeCapturingStub() {
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const stub = {
+      query: vi.fn(async (): Promise<unknown> => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'sessionB'
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    return { stub, onUpdateCalls, callbacks }
+  }
+
+  const topicRow = (over: Partial<{ topicId: string; name: string; creatorSessionId: string; createdAt: number }>) => ({
+    topicId: 't1',
+    name: 'Feature request',
+    creatorSessionId: 'sessionA',
+    createdAt: 1_700_000_000_000,
+    ...over,
+  })
+
+  it('org-scopes the listByChannel subscription (sessionId + channel + includeArchived:false)', async () => {
+    const { stub, onUpdateCalls } = makeCapturingStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' })
+
+    transport.subscribeTopicsCreated({ channelName: 'product' }, () => {})
+
+    expect(onUpdateCalls).toHaveLength(1)
+    expect(onUpdateCalls[0]!.args).toMatchObject({
+      channel: 'product',
+      includeArchived: false,
+      sessionId: 'sessionB',
+    })
+  })
+
+  it('does NOT notify for the baseline batch, but DOES for a topic created afterward', async () => {
+    const { stub, callbacks } = makeCapturingStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' })
+
+    const delivered: Array<{ sender: string; text: string; channel: string; threadTs?: string }> = []
+    transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+
+    // Baseline: two topics already exist. Silent.
+    callbacks[0]!([topicRow({ topicId: 'old1', name: 'Old A' }), topicRow({ topicId: 'old2', name: 'Old B' })])
+    expect(delivered).toHaveLength(0)
+
+    // A genuinely new topic arrives in a later batch (baseline + the new one).
+    callbacks[0]!([
+      topicRow({ topicId: 'old1', name: 'Old A' }),
+      topicRow({ topicId: 'old2', name: 'Old B' }),
+      topicRow({ topicId: 'new1', name: 'Shiny new topic', creatorSessionId: 'sessionA' }),
+    ])
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({
+      sender: 'sessionA',
+      text: 'New topic in "product": "Shiny new topic"',
+      channel: 'product',
+      threadTs: undefined,
+    })
+  })
+
+  it("drops the session's OWN topic creations (self-drop parity with local isExactSelf)", async () => {
+    const { stub, callbacks } = makeCapturingStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' }) // sessionId === 'sessionB'
+
+    const delivered: unknown[] = []
+    transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+
+    callbacks[0]!([]) // empty baseline
+    // Two new topics: one by us, one by another session.
+    callbacks[0]!([
+      topicRow({ topicId: 'mine', name: 'My own topic', creatorSessionId: 'sessionB' }),
+      topicRow({ topicId: 'theirs', name: 'Their topic', creatorSessionId: 'sessionA' }),
+    ])
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({ sender: 'sessionA', text: 'New topic in "product": "Their topic"' })
+  })
+
+  it('a prior list_topics call does NOT suppress a later real notification (dedup set is NOT knownTopicIds — Trap 2)', async () => {
+    const { stub, callbacks } = makeCapturingStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' })
+
+    const delivered: Array<{ text: string }> = []
+    transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+
+    callbacks[0]!([]) // empty baseline — nothing seen yet
+
+    // Simulate the user calling list_topics, which populates knownTopicIds
+    // with the id of a topic that is ABOUT to be created. If the notification
+    // dedup set were knownTopicIds, this would silently swallow the event.
+    // (populate via listTopics against the stub, which returns rows.)
+    stub.query.mockImplementationOnce(async () => [
+      { topicId: 'about-to-be-created', name: 'Preview', state: 'active', creatorSessionId: 'sessionA', createdAt: 1 },
+    ])
+    await transport.listTopics({ channel: 'product' })
+    expect(transport.hasTopic('about-to-be-created')).toBe(true) // knownTopicIds now holds it
+
+    // Now that exact topic shows up on the reactive feed. It MUST still notify.
+    callbacks[0]!([topicRow({ topicId: 'about-to-be-created', name: 'Preview', creatorSessionId: 'sessionA' })])
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.text).toBe('New topic in "product": "Preview"')
+  })
+
+  it('the returned unsubscribe stops further delivery', async () => {
+    const { stub, callbacks } = makeCapturingStub()
+    let rawUnsubscribed = false
+    stub.onUpdate = vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+      void args
+      callbacks.push(cb)
+      return () => {
+        rawUnsubscribed = true
+      }
+    })
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' })
+
+    const delivered: unknown[] = []
+    const unsub = transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+    callbacks[0]!([]) // baseline
+    unsub()
+    expect(rawUnsubscribed).toBe(true)
+  })
+})
+
 describe('RemoteTransport read-history methods', () => {
   it('readChannelMessages forwards sessionId and maps the page', async () => {
     const { client, queryMock } = makeStubClient(
