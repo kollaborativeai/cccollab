@@ -146,6 +146,20 @@ describe('ActiveContext', () => {
     })
   })
 
+  describe('clearActiveTopic', () => {
+    it('un-focuses the active topic while staying joined to it', () => {
+      ctx.joinChannel('default', 'fallback')
+      ctx.joinTopic('uuid-1', 'Auth refactor', 'default')
+      ctx.clearActiveTopic()
+      expect(ctx.hasTopic()).toBe(false)
+      // A stale name here is user-visible: getTopicName feeds whoami.
+      expect(ctx.getTopicName()).toBeUndefined()
+      // The whole point of the primitive, and all that separates it from
+      // clearTopic: the subscription survives being un-focused.
+      expect(ctx.isTopicJoined('uuid-1')).toBe(true)
+    })
+  })
+
   describe('findJoinedTopic', () => {
     it('returns match with channel in the result', () => {
       ctx.joinChannel('default', 'fallback')
