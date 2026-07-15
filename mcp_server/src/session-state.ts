@@ -80,9 +80,10 @@ export type PersistedTopic = SessionState['topics'][number]
  * Throws on an id that could escape the sessions dir. Throwing (rather
  * than sanitising to some "safe" fallback) is deliberate: a fallback
  * would silently key two different sessions to one file, which is the
- * cross-contamination this design exists to prevent. Callers on the
- * startup path treat a throw as "no persistence for this session" and
- * carry on — the floor is today's behaviour, never a crash.
+ * cross-contamination this design exists to prevent. `loadSessionState`
+ * — the one caller that runs on the startup path, before the server
+ * exists — turns that throw into `null` so a hostile id costs the
+ * session its persistence and nothing more.
  */
 export function sessionStateFile(sessionId: string): string {
   if (!SAFE_SESSION_ID.test(sessionId)) {
@@ -119,14 +120,26 @@ export function saveSessionState(state: SessionState): void {
  * Read a session's persisted state, or `null` when there is nothing
  * usable there.
  *
- * Absent (a fresh session), corrupt, or written by a schema this build
- * doesn't understand all collapse to `null` — i.e. "restore nothing",
- * which degrades to exactly today's behaviour. A bad file must never
- * take the server's startup down with it; that would turn a cosmetic
- * persistence miss into a session the user cannot start at all.
+ * Absent (a fresh session), corrupt, written by a schema this build
+ * doesn't understand, or keyed by an id that cannot be a filename all
+ * collapse to `null` — i.e. "restore nothing", which degrades to exactly
+ * today's behaviour. A bad file or a bad id must never take the server's
+ * startup down with it; that would turn a cosmetic persistence miss into
+ * a session the user cannot start at all (cf. KAI-368, where an erroring
+ * remote bricked the whole plugin).
+ *
+ * This is the only unguarded call on the startup path — it runs at
+ * `server.ts:80`, before the context and before stdio is bound — so the
+ * "never a crash" floor has to hold HERE, not at the call site.
  */
 export function loadSessionState(sessionId: string): SessionState | null {
-  const file = sessionStateFile(sessionId)
+  let file: string
+  try {
+    file = sessionStateFile(sessionId)
+  } catch {
+    // An id that cannot address a file has no file to load.
+    return null
+  }
   if (!existsSync(file)) return null
   try {
     const parsed = SessionStateSchema.safeParse(JSON.parse(readFileSync(file, 'utf-8')))
