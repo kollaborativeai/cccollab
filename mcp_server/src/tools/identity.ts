@@ -2,7 +2,7 @@ import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
-import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
+import { LOCAL_LOCATION, OrganizationRejectedError, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
@@ -99,7 +99,18 @@ export async function handleIdentityTool(
       for (const transport of deps.router.enabled()) {
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
-        } catch {
+        } catch (err) {
+          // A refused organization is the one failure we must not swallow:
+          // the session never binds, and reporting success would leave the
+          // caller believing it did (KAI-407). It is also permanent —
+          // unlike a dropped connection, no later introduce recovers it.
+          // The backend's message is forwarded as-is; it is deliberately
+          // vague so `introduce` cannot be used to probe for org slugs.
+          if (err instanceof OrganizationRejectedError) {
+            return JSON.stringify({
+              error: `Could not join organization "${organization}" at "${transport.source}": ${err.message}`,
+            })
+          }
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.
         }

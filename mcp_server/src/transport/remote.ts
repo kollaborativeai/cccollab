@@ -5,6 +5,7 @@ import { anyApi } from 'convex/server'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
+  OrganizationRejectedError,
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
@@ -383,6 +384,13 @@ export class RemoteTransport implements Transport {
       }
     } catch (err) {
       this.registerFailure('introduce', err)
+      // A refused organization is the caller's argument being wrong, not
+      // the transport being unhealthy. Re-throw it as a distinct type so
+      // the tool layer can report it instead of swallowing it as
+      // "transient, a later introduce will re-register" (KAI-407).
+      if (args.organizationId !== undefined && isOrganizationRejection(err)) {
+        throw new OrganizationRejectedError(extractConvexErrorMessage(err))
+      }
       throw err
     }
   }
@@ -1195,6 +1203,29 @@ function extractConvexErrorMessage(err: unknown): string {
     }
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Detect whether an introduce failure is the backend refusing the
+ * `organizationId` argument, as opposed to a transient transport fault.
+ *
+ * Two shapes reach us, one per backend generation:
+ *  - `ConvexError({code: 'ORGANIZATION_NOT_FOUND'})` — the slug-resolving
+ *    backend's own refusal (unknown slug/id, non-member, archived; all
+ *    collapsed into that one code on purpose).
+ *  - `ArgumentValidationError` — a backend whose `introduce` validator is
+ *    still `v.id('organizations')`, which rejects any slug before the
+ *    handler runs. Convex raises this by name; the string check is a
+ *    fallback for clients that only surface it in the message.
+ *
+ * Callers must additionally confirm an `organizationId` was actually sent
+ * before treating an ArgumentValidationError as an org rejection — the
+ * same error covers every other argument too.
+ */
+function isOrganizationRejection(err: unknown): boolean {
+  if (extractConvexErrorCode(err) === 'ORGANIZATION_NOT_FOUND') return true
+  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
+  return err instanceof Error && /ArgumentValidationError/i.test(err.message)
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {
