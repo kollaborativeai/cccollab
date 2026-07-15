@@ -596,11 +596,16 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
     const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
     session.setName('orchestrator')
     const bus = createMockMessageBus()
+    const context = new ActiveContext()
+    // A subscribed local channel so the warning has a destination. F6 dropped
+    // the hardcoded 'cccollab' fallback: an unsubscribed session still records
+    // the gap for whoami but has no channel to speak into.
+    context.joinChannel('default', 'manual', 'local')
     const listener = new BrokerEventListener({
       brokerUrl: `http://127.0.0.1:${port}`,
       messageBus: bus as never,
       sessionManager: session,
-      context: new ActiveContext(),
+      context,
     })
 
     try {
@@ -611,7 +616,11 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       // that has to run whoami to discover it went deaf is still blind.
       await vi.waitFor(() =>
         expect(bus.push).toHaveBeenCalledWith(
-          expect.objectContaining({ sender: 'cccollab', text: expect.stringContaining('WARNING') }),
+          expect.objectContaining({
+            sender: 'cccollab',
+            channel: 'default',
+            text: expect.stringContaining('WARNING'),
+          }),
         ),
       )
     } finally {
@@ -619,4 +628,54 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       await new Promise<void>((r) => server.close(() => r()))
     }
   }, 10_000)
+
+  // The comment on `missedEvents` states the property this test pins: once a
+  // gap is known, no LATER reconnect makes that untrue. Every other test in
+  // this file observes the flag on the same connection that reported the gap.
+  // Revert stickiness (clear on any 200 response, clear inside dropStream) and
+  // this test goes RED; the others stay green. That's the guard.
+  it('keeps mayHaveMissedEvents() true across a subsequent reconnect', async () => {
+    let connections = 0
+    const server = http.createServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      if (connections === 1) {
+        // First connection: broker announces a gap it cannot fill, then closes.
+        res.write(
+          'data: ' +
+            JSON.stringify({ source: 'local', type: 'stream_gap', reason: 'buffer overflow' }) +
+            '\n\n',
+        )
+        setTimeout(() => res.destroy(), 30)
+        return
+      }
+      // Subsequent reconnects: a clean, cursorless hello. Nothing here should
+      // clear the flag from the earlier connection.
+      res.write('id: b1:0\ndata: ' + JSON.stringify({ source: 'local', type: 'stream_hello' }) + '\n\n')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.mayHaveMissedEvents()).toBe(true), { timeout: 5000 })
+      // Wait for the RECONNECT — the reviewer's second attack cleared the flag
+      // here. It must survive.
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 5000 })
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000 })
+      expect(listener.mayHaveMissedEvents()).toBe(true)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
 })

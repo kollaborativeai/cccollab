@@ -88,6 +88,101 @@ async function seedTopic(port: number, sender: string, channel: string, topic: s
   return body.id
 }
 
+describe('Broker: replay capacity validation (KAI-414)', () => {
+  // NaN capacity used to slip through: `Number('abc')` is NaN, `length > NaN` is
+  // always false, eviction never fires, the buffer grows unbounded. Rejecting
+  // at boot fails LOUD instead of degrading silently — the direction this
+  // feature must never fail.
+  it('refuses to boot with a non-numeric CCCOLLAB_REPLAY_CAPACITY', async () => {
+    const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
+    const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
+    const nanProfile = `nan-cap-${process.pid}`
+    const nanRendezvous = join(homedir(), '.cccollab', 'run', `${nanProfile}.json`)
+    const child = spawn(process.execPath, [tsxCli, brokerPath], {
+      env: { ...process.env, CCCOLLAB_PROFILE: nanProfile, CCCOLLAB_REPLAY_CAPACITY: 'abc' },
+      stdio: 'ignore',
+    })
+    const code = await new Promise<number>((r) => child.on('exit', (c) => r(c ?? 0)))
+    expect(code).not.toBe(0)
+    try {
+      unlinkSync(nanRendezvous)
+    } catch {
+      /* ignore */
+    }
+  }, 15_000)
+})
+
+describe('Broker: replay buffer capacity=0 (KAI-414 F1)', () => {
+  // The reviewer's smoking gun: with CCCOLLAB_REPLAY_CAPACITY=0 the buffer is
+  // always empty, so the old `oldest && ...` short-circuit never declared a
+  // gap — a client behind lastSeq got a silent zero-length replay. That is
+  // precisely the "confidently-blind" failure this ticket exists to kill; it
+  // is misconfig-gated but fails toward silence, the one direction it must
+  // never fail.
+  const ZERO_PROFILE = `zerobuf-${process.pid}`
+  const ZERO_RENDEZVOUS = join(homedir(), '.cccollab', 'run', `${ZERO_PROFILE}.json`)
+  let broker: ChildProcess
+  let port: number
+
+  beforeAll(async () => {
+    const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
+    const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
+    broker = spawn(process.execPath, [tsxCli, brokerPath], {
+      env: { ...process.env, CCCOLLAB_PROFILE: ZERO_PROFILE, CCCOLLAB_REPLAY_CAPACITY: '1' },
+      stdio: 'ignore',
+    })
+    await waitUntil(() => (existsSync(ZERO_RENDEZVOUS) ? true : null), 10_000)
+    port = (JSON.parse(readFileSync(ZERO_RENDEZVOUS, 'utf-8')) as { port: number }).port
+    await waitUntil(async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/health`)
+        return res.ok ? true : null
+      } catch {
+        return null
+      }
+    }, 10_000)
+  }, 20_000)
+
+  afterAll(async () => {
+    if (broker && !broker.killed) {
+      broker.kill('SIGTERM')
+      await new Promise<void>((r) => setTimeout(r, 200))
+      try {
+        unlinkSync(ZERO_RENDEZVOUS)
+      } catch {
+        /* ignore */
+      }
+    }
+  })
+
+  // Capacity=1: after publishing two events, the buffer holds only the second.
+  // A client with a cursor at the FIRST event's seq is behind lastSeq, and the
+  // buffer no longer has proof it can hand over the next one — the honest
+  // answer is a gap, not a partial replay.
+  it('reports a gap when the buffer has evicted the client cursor position', async () => {
+    const stream = openStream(port)
+    await stream.ready
+    const topicId = await seedTopic(port, 'cap-sender', 'cap-ch', 'cap-topic')
+    await post(port, `/topics/${topicId}/messages`, { sender: 'cap-sender', text: 'first' })
+    await waitUntil(() => (stream.events.some((e) => e.data.text === 'first') ? true : null), 5000)
+    const cursor = stream.events[stream.events.length - 1]!.id!
+    stream.close()
+
+    // Publish more than the buffer holds, so the cursor's position is evicted.
+    await post(port, `/topics/${topicId}/messages`, { sender: 'cap-sender', text: 'second' })
+    await post(port, `/topics/${topicId}/messages`, { sender: 'cap-sender', text: 'third' })
+
+    const resumed = openStream(port, cursor)
+    await resumed.ready
+    await waitUntil(() => (resumed.events.some((e) => e.data.type === 'stream_gap') ? true : null), 5000)
+    const gap = resumed.events.find((e) => e.data.type === 'stream_gap')!
+    expect(String(gap.data.reason)).toMatch(/behind|evicted/i)
+    resumed.close()
+  })
+})
+
 describe('Broker: replay buffer overflow (KAI-414)', () => {
   const OVERFLOW_PROFILE = `overflowtest-${process.pid}`
   const OVERFLOW_RENDEZVOUS = join(homedir(), '.cccollab', 'run', `${OVERFLOW_PROFILE}.json`)
@@ -230,16 +325,48 @@ describe('Broker: SSE replay cursor (KAI-414)', () => {
     resumed.close()
   })
 
-  it('admits a gap it cannot fill instead of pretending the replay was complete', async () => {
-    // A cursor from a DIFFERENT broker instance (e.g. the broker restarted).
-    // The honest answer is "I may have missed messages", not silence.
+  it('admits a gap when the cursor is from a previous broker instance', async () => {
+    // Seed a few events first so lastSeq > 5. Without this, seq=5 would fall
+    // into the unrelated `since > lastSeq` branch and the test would pass on
+    // the wrong reason — the pre-fix version literally did.
+    const topicId = await seedTopic(port, 'reboot-sender', 'reboot-ch', 'reboot-topic')
+    for (const text of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      await post(port, `/topics/${topicId}/messages`, { sender: 'reboot-sender', text })
+    }
+
+    // A cursor with a DIFFERENT brokerId but a seq value the current broker
+    // could plausibly have issued — the only way to actually exercise the
+    // "restart" branch.
     const resumed = openStream(port, '00000000-0000-4000-8000-000000000000:5')
     await resumed.ready
     await waitUntil(() => (resumed.events.some((e) => e.data.type === 'stream_gap') ? true : null), 5000)
 
     const gap = resumed.events.find((e) => e.data.type === 'stream_gap')!
     expect(gap.data.source).toBe('local')
-    expect(gap.data.reason).toBeTruthy()
+    expect(String(gap.data.reason)).toMatch(/previous broker instance/i)
+    resumed.close()
+  })
+
+  // The quiet-watcher fix: without this, a listener that connects and hears no
+  // traffic has NO cursor, so a subsequent drop resumes as a fresh client and
+  // silently swallows every event published in the gap. stream_hello hands
+  // over a cursor before the first real event exists.
+  it('hands a fresh client a resumable cursor before any traffic arrives', async () => {
+    const stream = openStream(port)
+    await stream.ready
+    await waitUntil(() => (stream.events.some((e) => e.data.type === 'stream_hello') ? true : null), 5000)
+
+    const hello = stream.events.find((e) => e.data.type === 'stream_hello')!
+    expect(hello.id).toMatch(/^[0-9a-f-]{36}:\d+$/)
+    expect(hello.data.source).toBe('local')
+
+    // The hello cursor must be honourable by the same broker instance — a
+    // quiet reconnect from it must not produce a gap.
+    stream.close()
+    const resumed = openStream(port, hello.id!)
+    await resumed.ready
+    await new Promise<void>((r) => setTimeout(r, 300))
+    expect(resumed.events.some((e) => e.data.type === 'stream_gap')).toBe(false)
     resumed.close()
   })
 

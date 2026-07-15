@@ -64,6 +64,11 @@ export class BrokerEventListener {
    *  `whoami`'s `watchingActive`. Not a heartbeat: it tracks the socket we
    *  already hold, nothing more. */
   private connected = false
+  /** True while a reconnect timer is already queued. Without this, a single
+   *  socket teardown can fan out into multiple reconnects — req.on('error')
+   *  and res.on('end') can both fire, each scheduling its own — and we end
+   *  up with two live streams delivering every event twice. */
+  private reconnectPending = false
   /** Cursor into the broker's event sequence: the id of the last event we
    *  actually processed. Sent as `Last-Event-ID` on reconnect so the broker can
    *  replay the gap. Without it, a dropped stream silently swallows every event
@@ -105,14 +110,13 @@ export class BrokerEventListener {
   /** Drop the SSE connection; the listener reconnects on its own and resumes
    *  from its cursor. Exists so the reconnect gap — the failure mode that hid
    *  behind an always-healthy stream — can actually be exercised, in tests and
-   *  by a caller who suspects a wedged socket. */
+   *  by a caller who suspects a wedged socket. Destroy alone: the socket
+   *  teardown fires res.on('error')/req.on('error'), each of which already
+   *  schedules the reconnect. Calling scheduleReconnect() here in addition
+   *  would open TWO sockets (proven: connections:3 for 2 sessions, message
+   *  delivered twice). */
   dropStream(): void {
-    this.connected = false
-    if (this.currentRequest) {
-      this.currentRequest.destroy()
-      this.currentRequest = null
-    }
-    this.scheduleReconnect()
+    this.currentRequest?.destroy()
   }
 
   stop(): void {
@@ -161,8 +165,11 @@ export class BrokerEventListener {
             } catch {
               this.log(`SSE parse error: ${json}`)
             }
-            // Advance the cursor only AFTER the event is handled, so a crash
-            // mid-handling re-reads it rather than skipping it.
+            // Advance the cursor after dispatching. `processLocalEvent` is
+            // fire-and-forget (the handler runs async and its errors are
+            // logged, not awaited) so this is dispatch-not-handling: on the
+            // next reconnect we will not re-read an event we already dispatched
+            // even if its async handler had not yet finished.
             if (pendingId) this.lastEventId = pendingId
             pendingId = undefined
           }
@@ -193,8 +200,13 @@ export class BrokerEventListener {
 
   private scheduleReconnect(): void {
     if (this.stopped) return
+    if (this.reconnectPending) return
+    this.reconnectPending = true
     this.log(`Reconnecting in ${RECONNECT_DELAY_MS}ms...`)
-    setTimeout(() => this.connect(), RECONNECT_DELAY_MS)
+    setTimeout(() => {
+      this.reconnectPending = false
+      this.connect()
+    }, RECONNECT_DELAY_MS)
   }
 
   processLocalEvent(event: BrokerLocalEvent): void {
@@ -243,10 +255,15 @@ export class BrokerEventListener {
         // able to say "I may have missed messages") AND tell the session
         // outright — an orchestrator that has to run whoami to discover it is
         // deaf is exactly the confidently-blind user this ticket exists for.
+        //
+        // Push once per LOCAL subscribed channel — a session with joined
+        // topics but no channel-wide watch has the same silent hole. If the
+        // session sits in zero local channels there is nowhere honest to push
+        // to; whoami still reports mayHaveMissedMessages, so no info is lost.
         this.missedEvents = true
         this.log(`STREAM GAP: ${event.reason ?? 'unknown reason'}`)
-        const watched = this.context.getSubscribedChannels().filter((c) => c.watching && c.location === 'local')
-        for (const channel of watched.length > 0 ? watched : [{ name: 'cccollab' }]) {
+        const localChannels = this.context.getSubscribedChannels().filter((c) => c.location === 'local')
+        for (const channel of localChannels) {
           await this.bus.push({
             sender: 'cccollab',
             text:

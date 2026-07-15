@@ -24,8 +24,17 @@ const clients = new Set<SSEResponse>()
 const BROKER_ID = crypto.randomUUID()
 /** Events retained for replay to a reconnecting client. Bounded: a client that
  *  falls further behind than this gets an explicit `stream_gap`, never a
- *  quietly-incomplete replay. */
-const REPLAY_CAPACITY = Number(process.env.CCCOLLAB_REPLAY_CAPACITY ?? 1000)
+ *  quietly-incomplete replay. Rejects garbage/<1 rather than silently coercing
+ *  to NaN (which would defeat eviction: `length > NaN` is false forever). */
+const REPLAY_CAPACITY = ((): number => {
+  const raw = process.env.CCCOLLAB_REPLAY_CAPACITY
+  if (raw === undefined) return 1000
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error(`CCCOLLAB_REPLAY_CAPACITY must be an integer >= 1, got ${JSON.stringify(raw)}`)
+  }
+  return Math.floor(n)
+})()
 const replayBuffer: Array<{ seq: number; data: string }> = []
 let lastSeq = 0
 
@@ -65,8 +74,13 @@ function resumeFrom(lastEventId: string | undefined): { replay: typeof replayBuf
   if (!Number.isFinite(since) || since < 0 || since > lastSeq) {
     return { replay: [], gap: `cursor "${lastEventId}" is not a position this broker ever issued` }
   }
+  // A client behind lastSeq needs proof we still hold its next event. An empty
+  // buffer holds nothing, so the ONLY safe answer is "gap" — the `oldest &&`
+  // short-circuit that used to sit here fell through to a silent zero-length
+  // replay whenever REPLAY_CAPACITY was 0, i.e. the confidently-blind failure
+  // this ticket exists to kill, one env-var away.
   const oldest = replayBuffer[0]
-  if (oldest && since < oldest.seq - 1) {
+  if (since < lastSeq && (!oldest || since < oldest.seq - 1)) {
     return {
       replay: [],
       gap: `client fell more than ${REPLAY_CAPACITY} events behind; the missed events have been evicted`,

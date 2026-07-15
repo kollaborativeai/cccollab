@@ -387,9 +387,18 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       await waitUntil(() => (ORCH.listener.isConnected() ? true : null), 10_000)
       await waitUntil(() => (ORCH.received.some((m) => m.text === 'published INTO the gap') ? true : null), 10_000)
 
-      const recovered = ORCH.received.find((m) => m.text === 'published INTO the gap')
-      expect(recovered).toBeDefined()
-      expect(recovered?.topicName).toBe('KAI-GAP')
+      const recovered = ORCH.received.filter((m) => m.text === 'published INTO the gap')
+      // Exactly-once, not at-least-once: dropStream() used to open a SECOND
+      // socket (destroy + explicit scheduleReconnect), which delivered every
+      // subsequent event twice. MessageBus dedup absorbed it in production but
+      // this integration test would have proved success through a doubled
+      // stream. The count assertion is the guard rail.
+      expect(recovered).toHaveLength(1)
+      expect(recovered[0]?.topicName).toBe('KAI-GAP')
+      // And the broker sees ONE connection per session, not two — the socket
+      // leak the reviewer proved shows up here as connections:3 for 2 sessions.
+      const health = (await (await fetch(`http://127.0.0.1:${brokerPort}/health`)).json()) as { connections: number }
+      expect(health.connections).toBe(2)
       // Nothing was lost, so the session must NOT claim it may have missed anything.
       expect(ORCH.listener.mayHaveMissedEvents()).toBe(false)
       const who = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
