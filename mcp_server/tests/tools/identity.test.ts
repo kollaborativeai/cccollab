@@ -287,6 +287,41 @@ describe('Identity Tools', () => {
           degradation: 'introduce() failed for "personal": Server Error',
         })
       })
+
+      /**
+       * KAI-401: a location that took the session but refused its identity
+       * must SAY SO. This is the end of the silence chain — the transport
+       * records the rejection, and whoami is where a human/session can
+       * actually see it. Without this the drop is invisible: introduce
+       * reports success and the identity is simply gone.
+       */
+      it('surfaces a location that registered the session but rejected its declared identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote(undefined, {
+          identityRejected: 'Remote backend rejected the declared identity and it was NOT stored: Server Error',
+        } as never)
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        // Healthy transport — this is NOT degradation. The session works,
+        // it just isn't identifiable there.
+        expect(result.locations.remote.enabled).toBe(true)
+        expect(result.locations.remote.degradation).toBeUndefined()
+        expect(result.locations.remote.identityRejected).toMatch(/identity/i)
+      })
+
+      it('omits identityRejected from a location that accepted the identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote()
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        expect(result.locations.remote).not.toHaveProperty('identityRejected')
+      })
     })
 
     describe('introduce — organization argument', () => {
