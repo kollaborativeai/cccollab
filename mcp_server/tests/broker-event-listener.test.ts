@@ -642,9 +642,7 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       if (connections === 1) {
         // First connection: broker announces a gap it cannot fill, then closes.
         res.write(
-          'data: ' +
-            JSON.stringify({ source: 'local', type: 'stream_gap', reason: 'buffer overflow' }) +
-            '\n\n',
+          'data: ' + JSON.stringify({ source: 'local', type: 'stream_gap', reason: 'buffer overflow' }) + '\n\n',
         )
         setTimeout(() => res.destroy(), 30)
         return
