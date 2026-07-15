@@ -127,6 +127,13 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
       warn(`active channel "${state.activeChannel.name}"`, err)
     }
   }
+  // Clear BEFORE re-pointing, never merely re-point: `joinTopic` focuses
+  // as a side effect, so the loop above always leaves SOME topic active.
+  // Re-pointing alone would leave the last-restored one active for a
+  // session that had no active topic, or whose active topic was archived —
+  // inventing focus the session never had. A restore that recovers nothing
+  // is a no-op; a restore that invents state is a bug.
+  deps.context.clearActiveTopic()
   if (state.activeTopic !== undefined) {
     const active = state.topics.find((t) => t.id === state.activeTopic)
     // Only re-point at a topic that actually restored — `isTopicJoined`

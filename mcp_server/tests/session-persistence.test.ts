@@ -278,12 +278,39 @@ describe('restoreSubscriptions (KAI-415)', () => {
       expect(context.getTopicName()).toBe('Auth')
     })
 
+    // The surviving topic is the whole point of this fixture. With only
+    // the gone one, nothing restores and `hasTopic()` is false trivially —
+    // the test cannot tell "cleared correctly" from "nothing to clear".
+    // `topic-live` restores and `joinTopic` focuses it as a side effect,
+    // so this now fails unless restore actively clears.
     it('leaves no active topic when the persisted active one is gone', async () => {
+      transport.addTopic({ id: 'topic-live', topic: 'Billing' })
       const state = stateOf({
-        topics: [{ id: 'topic-gone', name: 'Auth', channel: 'dev', location: 'local' }],
+        topics: [
+          { id: 'topic-gone', name: 'Auth', channel: 'dev', location: 'local' },
+          { id: 'topic-live', name: 'Billing', channel: 'dev', location: 'local' },
+        ],
         activeTopic: 'topic-gone',
       })
       await restoreSubscriptions(state, deps())
+      expect(context.isTopicJoined('topic-live')).toBe(true)
+      expect(context.hasTopic()).toBe(false)
+    })
+
+    // A session that deliberately had no active topic (`leaveTopic` clears
+    // the pointer but keeps other topics joined) must not come back with an
+    // arbitrary one invented for it.
+    it('leaves no active topic when the session had none, rather than inventing one', async () => {
+      transport.addTopic({ id: 'topic-1', topic: 'Auth' })
+      transport.addTopic({ id: 'topic-2', topic: 'Billing' })
+      const state = stateOf({
+        topics: [
+          { id: 'topic-1', name: 'Auth', channel: 'dev', location: 'local' },
+          { id: 'topic-2', name: 'Billing', channel: 'dev', location: 'local' },
+        ],
+      })
+      await restoreSubscriptions(state, deps())
+      expect(context.getJoinedTopics()).toHaveLength(2)
       expect(context.hasTopic()).toBe(false)
     })
 

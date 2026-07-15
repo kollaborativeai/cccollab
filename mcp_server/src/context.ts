@@ -202,6 +202,17 @@ export class ActiveContext {
     this.changed()
   }
 
+  /** Un-focus the active topic while STAYING in it. Distinct from
+   *  `clearTopic`, which leaves the topic as well. Restore needs this
+   *  because `joinTopic` focuses as a side effect, so rebuilding N topics
+   *  always ends with one of them arbitrarily active — including for a
+   *  session that had none (KAI-415). */
+  clearActiveTopic(): void {
+    this.activeThreadTs = undefined
+    this.activeTopicName = undefined
+    this.changed()
+  }
+
   clearTopic(): void {
     if (this.activeThreadTs) {
       this.joinedTopics.delete(this.activeThreadTs)

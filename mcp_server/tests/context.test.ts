@@ -263,6 +263,14 @@ describe('ActiveContext', () => {
       expect(fired).toBe(1)
     })
 
+    it('fires on clearActiveTopic', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      fired = 0
+      ctx2.clearActiveTopic()
+      expect(fired).toBe(1)
+    })
+
     it('does not fire on reads - persisting on every whoami would be pure churn', () => {
       ctx2.joinChannel('dev', 'manual')
       ctx2.joinTopic('uuid-1', 'Auth', 'dev')
