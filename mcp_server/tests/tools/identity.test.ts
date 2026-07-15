@@ -268,7 +268,9 @@ describe('Identity Tools', () => {
             throw new OrganizationRejectedError('Organization not found.')
           },
         })
-        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps))
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
         expect(result.name).toBeUndefined()
         expect(result.error).toContain('acme')
         expect(result.error).toContain('Organization not found.')
@@ -282,7 +284,9 @@ describe('Identity Tools', () => {
             throw new Error('WebSocket closed')
           },
         })
-        const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps))
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
         expect(result.name).toBe('reviewer')
         expect(result.error).toBeUndefined()
       })

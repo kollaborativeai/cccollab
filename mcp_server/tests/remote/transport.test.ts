@@ -396,11 +396,14 @@ describe('RemoteTransport — organizations', () => {
     // The slug-resolving backend collapses unknown/non-member/archived into
     // one ConvexError so `introduce` cannot be used to probe which slugs
     // exist. Its message must reach the caller verbatim.
-    const { client } = makeStubClient(async () => [], async () => {
-      throw Object.assign(new Error('Uncaught ConvexError'), {
-        data: { code: 'ORGANIZATION_NOT_FOUND', message: 'Organization not found.' },
-      })
-    })
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'ORGANIZATION_NOT_FOUND', message: 'Organization not found.' },
+        })
+      },
+    )
     const transport = new RemoteTransport({ client, log: () => {} })
     await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toThrow(
       new OrganizationRejectedError('Organization not found.'),
@@ -410,19 +413,25 @@ describe('RemoteTransport — organizations', () => {
   it('introduce raises OrganizationRejectedError when the backend validator refuses a slug', async () => {
     // A backend whose introduce validator is still `v.id('organizations')`
     // rejects any slug before the handler runs. Deterministic, not transient.
-    const { client } = makeStubClient(async () => [], async () => {
-      throw Object.assign(new Error('Invalid argument `organizationId`'), { name: 'ArgumentValidationError' })
-    })
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Invalid argument `organizationId`'), { name: 'ArgumentValidationError' })
+      },
+    )
     const transport = new RemoteTransport({ client, log: () => {} })
-    await expect(
-      transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }),
-    ).rejects.toBeInstanceOf(OrganizationRejectedError)
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
   })
 
   it('introduce rethrows a transient failure as-is, so the tool layer keeps treating it as non-fatal', async () => {
-    const { client } = makeStubClient(async () => [], async () => {
-      throw new Error('WebSocket closed')
-    })
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw new Error('WebSocket closed')
+      },
+    )
     const transport = new RemoteTransport({ client, log: () => {} })
     const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e) => e)
     expect(err).not.toBeInstanceOf(OrganizationRejectedError)
