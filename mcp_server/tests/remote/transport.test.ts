@@ -208,6 +208,36 @@ describe('RemoteTransport self-declared identity (KAI-401)', () => {
     expect(introduceArgs[1]).not.toHaveProperty('identity')
   })
 
+  it('does NOT swallow a non-ArgumentValidationError during the with-identity attempt: it propagates and counts toward degradation', async () => {
+    // Locks the over-catch boundary of the auto-fallback. A generic failure
+    // (network blip, etc.) on the WITH-identity attempt must NOT be mistaken
+    // for "backend rejected the field" — it must propagate (introduce rethrows,
+    // so attach.ts's abort-before-register contract holds) and feed the
+    // degradation/failure-window logic. Only ArgumentValidationError triggers
+    // the retry-without-identity.
+    let calls = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        calls += 1
+        void call
+        throw new Error(`network blip ${calls}`)
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // Each attempt propagates (rejects), and is NOT retried without identity.
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 1')
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 2')
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 3')
+
+    // One mutation call per introduce — no swallow, no fallback retry.
+    expect(calls).toBe(3)
+    // The failures reached the rolling-window logic and tripped degradation.
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/3 failures/)
+  })
+
   it('reads identity back from listSessions when the row carries it', async () => {
     const { client } = makeStubClient(async (_ref: unknown, _args: unknown) => [
       { _id: 's1', sessionName: 'architect', createdAt: 1_700_000_000_000, identity },
