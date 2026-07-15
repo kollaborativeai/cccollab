@@ -1,6 +1,6 @@
 import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
-import type { SessionManager } from '../session.js'
+import { mergeIdentity, type SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type SessionIdentity, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
@@ -92,7 +92,14 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
-      deps.session.setIdentity(identity)
+      // MERGE, never replace. The session already carries an env-derived
+      // identity (`identityFromEnv` at startup), and its `sessionId` is the
+      // key everything in KAI-415 is filed under. A self-declaration is a
+      // partial statement — `introduce({identity: {repo}})` must not erase
+      // the sessionId and silently disable restore for the rest of the
+      // session. Declared fields still win; omitted ones fall through.
+      const merged = mergeIdentity(deps.session.getIdentity(), identity)
+      deps.session.setIdentity(merged)
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Each
@@ -100,7 +107,12 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization, identity })
+          await transport.introduce({
+            sessionName: displayName,
+            objective,
+            organizationId: organization,
+            identity: merged,
+          })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.

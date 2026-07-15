@@ -1,6 +1,10 @@
 import { LOCAL_LOCATION, type ChannelLocation } from './transport/index.js'
 
-export type ChannelSource = 'manual' | 'fallback' | 'env' | 'cccollab.json'
+/** Where a subscription came from. `restored` means it was rebuilt at boot
+ *  from the session's persisted state (KAI-415) rather than joined in this
+ *  process's lifetime — `whoami` surfaces it verbatim, which is how a user
+ *  tells "came back with its memory" apart from "started fresh". */
+export type ChannelSource = 'manual' | 'fallback' | 'env' | 'cccollab.json' | 'restored'
 
 /** Identifies a channel by name AND location. A "dev" local channel and a
  *  "dev" remote channel are two distinct entities. Channel state (session
@@ -40,6 +44,33 @@ export class ActiveContext {
   private readonly subscribed = new Map<string, SubscribedChannel>()
   private readonly joinedTopics = new Map<string, JoinedTopic>()
 
+  /**
+   * Fired after any mutation. `server.ts` wires this to the session-state
+   * writer (KAI-415), which is what lets subscriptions survive a restart.
+   *
+   * The hook lives HERE, on the single owner of this state, rather than
+   * at each of the ~8 tool call sites that mutate it. Per-call-site
+   * persistence would work right up until someone adds a ninth tool and
+   * forgets — reintroducing "subscription silently doesn't survive a
+   * restart" one method at a time. This way the mutators are the only
+   * thing that need to be exhaustive, and they're all in this file.
+   */
+  constructor(private readonly onChange?: () => void) {}
+
+  /** Notify the persistence hook. Called only AFTER a mutation has
+   *  actually taken effect (never on a throw — nothing changed, so there
+   *  is nothing to write). A throwing hook is swallowed: persistence is a
+   *  safety net, and a full disk must not turn `join_channel` into an
+   *  error for the user. */
+  private changed(): void {
+    if (!this.onChange) return
+    try {
+      this.onChange()
+    } catch (err) {
+      console.error(`[cccollab] Could not persist session state: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   joinChannel(
     name: string,
     source: ChannelSource,
@@ -56,6 +87,7 @@ export class ActiveContext {
       this.activeChannel = { name: channel, location }
       becameActive = true
     }
+    this.changed()
     return { channel, location, becameActive }
   }
 
@@ -83,6 +115,7 @@ export class ActiveContext {
         }
       }
     }
+    this.changed()
     return { channel, location, removed, newActive: this.activeChannel }
   }
 
@@ -93,6 +126,7 @@ export class ActiveContext {
       throw new Error(`Not subscribed to channel "${channel}" (${location}). Use join_channel first.`)
     }
     this.activeChannel = { name: channel, location }
+    this.changed()
   }
 
   /** Active channel name (pre-breaking-change getter). Returns the name
@@ -156,6 +190,7 @@ export class ActiveContext {
     this.joinedTopics.set(threadTs, { topicName, channel: normalized, location })
     this.activeThreadTs = threadTs
     this.activeTopicName = topicName
+    this.changed()
   }
 
   leaveTopic(threadTs: string): void {
@@ -164,6 +199,7 @@ export class ActiveContext {
       this.activeThreadTs = undefined
       this.activeTopicName = undefined
     }
+    this.changed()
   }
 
   clearTopic(): void {
@@ -172,6 +208,7 @@ export class ActiveContext {
     }
     this.activeThreadTs = undefined
     this.activeTopicName = undefined
+    this.changed()
   }
 
   isTopicJoined(threadTs: string): boolean {
