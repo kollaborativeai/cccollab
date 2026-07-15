@@ -552,7 +552,9 @@ async function leaveUnderPreviousName(
  *  nameless session), but a silent swallow hides the very ghost-membership
  *  outcome the migration exists to prevent - so it gets a trace. */
 function logMigrationWarning(what: string, err: unknown): void {
-  process.stderr.write(`[cccollab] identity migration: ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`)
+  process.stderr.write(
+    `[cccollab] identity migration: ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+  )
 }
 
 /**

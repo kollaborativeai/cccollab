@@ -118,11 +118,7 @@ interface RecordedCall {
  * leaves must reach the wire before the new name's introduce — so these
  * tests assert on a single ordered call log rather than on per-method spies.
  */
-function makeRecordingTransport(
-  source: string,
-  calls: RecordedCall[],
-  overrides: Partial<Transport> = {},
-): Transport {
+function makeRecordingTransport(source: string, calls: RecordedCall[], overrides: Partial<Transport> = {}): Transport {
   const record =
     <T>(method: string, result: T) =>
     async (args: Record<string, unknown>): Promise<T> => {
@@ -442,7 +438,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -569,7 +571,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -660,7 +668,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -747,7 +761,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -827,7 +847,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -864,7 +890,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_a' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -937,9 +969,7 @@ describe('Identity Tools', () => {
           const result = await handleIdentityTool('introduce', { name: 'kai-408', organization: 'org_a' }, deps)
 
           // LOCAL is migrated fully, under the new name.
-          expect(
-            localCalls.some((c) => c.method === 'joinChannel' && c.args.sessionName === 'kai-408'),
-          ).toBe(true)
+          expect(localCalls.some((c) => c.method === 'joinChannel' && c.args.sessionName === 'kai-408')).toBe(true)
           expect(localCalls.some((c) => c.method === 'joinTopic' && c.args.sessionName === 'kai-408')).toBe(true)
 
           // REMOTE gets nothing after its failed introduce — no join under the
@@ -1050,7 +1080,13 @@ describe('Identity Tools', () => {
           deps.context.joinChannel('kai', 'cccollab.json', 'remote')
           await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
           deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
-          ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'kai', messageBus, map: channelMap })
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
           ensureTopicSubscription({
             transport,
             locationName: 'remote',
@@ -1307,7 +1343,6 @@ describe('Identity Tools', () => {
           // org is meaningless there — and must never make local look "changed".
           expect(deps.session.getOrganizationFor('local')).toBeUndefined()
         })
-
       })
 
       /**
