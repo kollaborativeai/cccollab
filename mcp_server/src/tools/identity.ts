@@ -181,6 +181,13 @@ export async function handleIdentityTool(
  * transport carries it for auth / function-not-found / repeated-failure
  * cases). The local transport has no degradation surface.
  *
+ * `identityRejected` is set on a location that accepted the session but
+ * refused its declared identity (KAI-401). It is deliberately distinct
+ * from `degradation`: the transport is healthy and `enabled` stays true —
+ * the session simply isn't identifiable there. Without this the drop is
+ * invisible, which is the failure mode that let a broken identity path
+ * pass review: the fallback swallowed it and nothing ever said so.
+ *
  * `organization` is `"local"` for the local broker, the bound
  * organization name for a remote transport (via `getBoundOrganizationName`),
  * or omitted when a remote transport has no session yet.
@@ -191,14 +198,24 @@ export async function handleIdentityTool(
  * A location that is live in the router takes precedence over a stale
  * diagnostics entry for the same name.
  */
+/** Per-location state as reported by `whoami`. */
+interface LocationState {
+  enabled: boolean
+  degradation?: string
+  identityRejected?: string
+  organization?: string
+}
+
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<Record<string, LocationState>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+      const identityRejected =
+        typeof maybeDegraded.identityRejected === 'string' ? maybeDegraded.identityRejected : null
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -207,16 +224,16 @@ async function buildLocationStates(
         organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: LocationState = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
+        ...(identityRejected ? { identityRejected } : {}),
         ...(organization ? { organization } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<string, LocationState> = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

@@ -541,7 +541,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `identity` is present only when the session self-declared it at introduce. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `identity` is present only when the session self-declared it at introduce. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). `identityRejected` is set on a location that registered the session but refused its declared `identity` — the location still works, but this session is not identifiable there (grouping and stable-key restart will not work until that backend accepts the optional `identity` arg).',
       inputSchema: {},
     },
     async () => {

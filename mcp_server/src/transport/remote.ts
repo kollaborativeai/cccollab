@@ -255,6 +255,11 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /** Why the last introduce's declared identity did not land on the
+   *  backend, or null if it landed (or none was declared). Surfaced by
+   *  `whoami` so a silently-dropped identity is inspectable rather than
+   *  buried in a stderr log line. */
+  private identityRejectedReason: string | null = null
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -316,6 +321,16 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /**
+   * Human-readable reason the declared identity was not stored on this
+   * location, or null when it was stored / none was declared. Unlike
+   * `degradation` this does NOT disable the transport: the session is
+   * fully functional, it just isn't identifiable. Reported by `whoami`.
+   */
+  get identityRejected(): string | null {
+    return this.identityRejectedReason
   }
 
   /**
@@ -396,17 +411,28 @@ export class RemoteTransport implements Transport {
 
   /**
    * Call the introduce mutation with declared identity, auto-falling-back
-   * to a no-identity call if KAI's backend validator doesn't yet accept the
-   * `identity` arg (KAI-401 Option D).
+   * to a no-identity call when the backend won't accept the `identity` arg
+   * (KAI-401 Option D).
    *
-   * Convex validates mutation args strictly: an unknown field throws an
-   * `ArgumentValidationError`. If we let that propagate, `introduce`'s
-   * caller (`attach.ts`) aborts before registering the transport and the
-   * session goes silently local-only — the KAI-413 divergence this ticket
-   * exists to prevent. So on that SPECIFIC error we retry once without
-   * identity: no regression on a not-yet-updated backend, and identity
-   * flows automatically the moment the backend adds the optional arg. Any
-   * OTHER error is a genuine failure and rethrows as before.
+   * We deliberately do NOT try to recognise "backend doesn't know this
+   * field" by inspecting the error. That was the original design and it
+   * does not survive contact with a real deployment: production Convex
+   * redacts every backend-side rejection to an unnamed
+   * `Error: [CONVEX M(...)] [Request ID: ...] Server Error`. No
+   * `ArgumentValidationError` ever reaches the client, so a name/message
+   * matcher is calibrated against an error that only exists in tests — it
+   * never fires in production, the fallback never runs, and declaring
+   * identity turns introduce into a hard failure that leaves the session
+   * unregistered on remote (verified live, 2026-07-15).
+   *
+   * Instead the retry IS the discriminator: re-run the identical call
+   * minus identity. If that succeeds, identity was the cause — proven by
+   * experiment rather than guessed from a string. If it fails too, this
+   * was never about identity: rethrow the ORIGINAL error so the
+   * failure-window/degradation logic sees the real cause unchanged.
+   *
+   * Safe to retry: Convex mutations are transactions, so the failed
+   * attempt committed nothing to roll back over.
    */
   private async introduceWithIdentityFallback(
     base: { sessionName: string; objective?: string; organizationId?: string },
@@ -417,14 +443,26 @@ export class RemoteTransport implements Transport {
       return this.client.mutation(ref, base)
     }
     try {
-      return await this.client.mutation(ref, { ...base, identity })
+      const accepted = await this.client.mutation(ref, { ...base, identity })
+      this.identityRejectedReason = null
+      return accepted
     } catch (err) {
-      if (!isArgumentValidationError(err)) throw err
-      this.log(
-        `introduce: backend rejected the identity field (${err instanceof Error ? err.message : String(err)}); ` +
-          `retrying without it. Identity will flow once the backend accepts it.`,
-      )
-      return this.client.mutation(ref, base)
+      const withIdentityError = err instanceof Error ? err.message.split('\n')[0] : String(err)
+      let result: unknown
+      try {
+        result = await this.client.mutation(ref, base)
+      } catch {
+        // Fails with AND without identity → not an identity problem.
+        // Propagate the original error untouched.
+        throw err
+      }
+      // Succeeded without identity, failed with it → identity is the cause.
+      this.identityRejectedReason =
+        `Remote backend rejected the declared identity and it was NOT stored: ${withIdentityError}. ` +
+        `The session registered without it — grouping and stable-key restart (KAI-415) will not work ` +
+        `on this location until the backend accepts the optional \`identity\` arg on sessions:introduce.`
+      this.log(this.identityRejectedReason)
+      return result
     }
   }
 
@@ -1228,20 +1266,6 @@ function extractConvexErrorMessage(err: unknown): string {
     }
   }
   return err instanceof Error ? err.message : String(err)
-}
-
-/**
- * Detect Convex's strict-arg-validation rejection. When a mutation receives
- * a field its validator doesn't declare, Convex throws an
- * `ArgumentValidationError` whose message names the extra field. We match
- * the error name (the stable signal) and fall back to the message pattern.
- * Used to gate KAI-401's identity auto-fallback: only this specific error
- * triggers a retry-without-identity; anything else is a real failure.
- */
-function isArgumentValidationError(err: unknown): boolean {
-  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
-  const msg = err instanceof Error ? err.message : String(err)
-  return /ArgumentValidationError|extra field .* (?:that is )?not in the validator/i.test(msg)
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {
