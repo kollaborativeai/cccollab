@@ -152,6 +152,16 @@ describe('restoreSubscriptions (KAI-415)', () => {
       await restoreSubscriptions(stateOf(), deps())
       expect(context.isChannelSubscribed('dev', 'local')).toBe(false)
     })
+
+    it('skips a location whose transport is attached but disabled', async () => {
+      // A disabled transport is present but must not be spoken to. Distinct
+      // from the "vanished" case above, which never resolves a transport at
+      // all and so cannot prove we check `enabled`.
+      transport.enabled = false
+      await restoreSubscriptions(stateOf(), deps())
+      expect(transport.joinedChannels).toEqual([])
+      expect(context.isChannelSubscribed('dev', 'local')).toBe(false)
+    })
   })
 
   describe('topics: never create (HAZARD a)', () => {
@@ -370,6 +380,23 @@ describe('restoreSubscriptions (KAI-415)', () => {
 
       expect(snap.activeTopic).toBeUndefined()
       expect(snap.topics).toEqual([])
+    })
+
+    it('omits the active topic when topics are joined but none is active - the write-side twin of the restore bug', () => {
+      // The test above leaves ZERO topics, so `activeTopic` is undefined
+      // trivially. This is the state that actually matters and that restore
+      // itself now produces (clearActiveTopic): joined, but un-focused.
+      // Snapshot inventing an active topic here is defect 2 in reverse.
+      context.joinChannel('dev', 'manual', 'local')
+      context.joinTopic('topic-1', 'Auth', 'dev', 'local')
+      context.joinTopic('topic-2', 'Billing', 'dev', 'local')
+      context.clearActiveTopic()
+
+      const snap = snapshotSessionState('uuid-a', context)
+
+      expect(snap.activeTopic).toBeUndefined()
+      // ...and the un-focusing must not have cost us the subscriptions.
+      expect(snap.topics.map((t) => t.id)).toEqual(['topic-1', 'topic-2'])
     })
 
     it('round-trips through restore: what a session had is what it gets back', async () => {
