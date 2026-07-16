@@ -97,7 +97,7 @@ describe('LocalTransport: message history reads', () => {
     it('returns the broker topic history mapped onto the history-page contract', async () => {
       const id = await seedTopic(port, 'lt-topic-a', 'lt-ch-a', 'lt-topic-read', ['first', 'second'])
       const transport = new LocalTransport(port)
-      const page = await transport.readTopicMessages({ topicId: id })
+      const page = await transport.readTopicMessages({ sessionName: 'lt-topic-a', topicId: id })
 
       expect(page.messages.map((m) => m.text)).toEqual(['first', 'second'])
       // Local broker is single-tenant: sender name doubles as the session name.
@@ -111,12 +111,17 @@ describe('LocalTransport: message history reads', () => {
       const id = await seedTopic(port, 'lt-topic-b', 'lt-ch-b', 'lt-topic-page', ['p1', 'p2', 'p3'], 2)
       const transport = new LocalTransport(port)
 
-      const first = await transport.readTopicMessages({ topicId: id, limit: 2 })
+      const first = await transport.readTopicMessages({ sessionName: 'lt-topic-b', topicId: id, limit: 2 })
       expect(first.messages.map((m) => m.text)).toEqual(['p2', 'p3'])
       expect(first.hasMore).toBe(true)
       expect(first.oldestTs).toBe(first.messages[0]!.ts)
 
-      const second = await transport.readTopicMessages({ topicId: id, limit: 2, before: first.oldestTs })
+      const second = await transport.readTopicMessages({
+        sessionName: 'lt-topic-b',
+        topicId: id,
+        limit: 2,
+        before: first.oldestTs,
+      })
       expect(second.messages.map((m) => m.text)).toEqual(['p1'])
       expect(second.hasMore).toBe(false)
     })

@@ -139,7 +139,19 @@ export interface Transport {
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
-  readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  /**
+   * `sessionName` identifies the reading session, exactly as every other topic
+   * method here does (KAI-446). The local broker gates read-history on the
+   * session's channel subscription; the remote backend gates on its own
+   * `sessionId` and ignores this. Without it, read-history was the one topic
+   * route with no caller identity — and so the one that could not be gated.
+   */
+  readTopicMessages(args: {
+    sessionName: string
+    topicId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage>
 
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */

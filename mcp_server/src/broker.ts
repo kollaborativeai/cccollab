@@ -144,6 +144,41 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
   return { pathname: parsed.pathname, searchParams: parsed.searchParams }
 }
 
+/**
+ * The single channel-subscription rule for topic routes (KAI-446).
+ *
+ * Every route that reads or mutates a topic gates on it. It used to be
+ * copy-pasted into some routes and simply missing from their siblings — so
+ * `GET /topics/:id` 403'd an unsubscribed session while `GET /topics/:id/messages`
+ * handed the same session that topic's full text. Keeping the rule in one place
+ * is what stops the two drifting apart again.
+ *
+ * Returns the validated session id, or null when it has already answered `res`
+ * and the caller must stop. Mirrors the order `GET /topics/:id` already used —
+ * topic-existence (404) is checked by the caller first, then missing id (400),
+ * then subscription (403) — so an unknown topic still 404s regardless of session.
+ *
+ * NOTE: this is not authentication. The broker is loopback-only and any local
+ * process may name any session, which is the documented honor-system model.
+ * This only enforces that routes on the same resource agree on the same rule.
+ */
+function requireSubscribed(
+  res: ServerResponse,
+  topic: LocalTopic,
+  sessionId: string | undefined | null,
+): string | null {
+  if (!sessionId) {
+    jsonResponse(res, 400, { error: 'sessionId is required' })
+    return null
+  }
+  const info = sessions.get(sessionId)
+  if (!info || !info.channels.has(topic.channel)) {
+    jsonResponse(res, 403, { error: `Not subscribed to channel "${topic.channel}".` })
+    return null
+  }
+  return sessionId
+}
+
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
 const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
 const TOPIC_MESSAGES_ROUTE = /^\/topics\/([^/]+)\/messages$/
@@ -403,16 +438,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    const sessionId = searchParams.get('sessionId')
-    if (!sessionId) {
-      jsonResponse(res, 400, { error: 'sessionId query parameter is required' })
-      return
-    }
-    const info = sessions.get(sessionId)
-    if (!info || !info.channels.has(t.channel)) {
-      jsonResponse(res, 403, { error: `Not subscribed to channel "${t.channel}".` })
-      return
-    }
+    if (!requireSubscribed(res, t, searchParams.get('sessionId'))) return
     jsonResponse(res, 200, {
       topic: {
         id: t.id,
@@ -432,11 +458,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   // history newest-page-first via `before`/`limit` and normalizes `ts` to
   // epoch-ms so it matches the shared TransportHistoryPage contract.
   //
-  // Deliberately NOT subscription-gated: the read-history transport contract
-  // carries no session identity, and the broker is loopback-only and
-  // single-tenant, so there is nothing to authorize against. If per-session
-  // gating is ever wanted, `readTopicMessages` must first grow a `sessionName`
-  // across the Transport interface (local + remote + tool layer).
+  // Subscription-gated exactly like GET /topics/:id (KAI-446). This route used
+  // to be ungated on the grounds that the read-history transport contract
+  // carried no session identity — so `readTopicMessages` grew a `sessionName`
+  // across the Transport interface (local + remote + tool layer) and the
+  // asymmetry is gone: both routes on this resource now answer to the same rule.
   const historyMatch = TOPIC_MESSAGES_ROUTE.exec(pathname)
   if (historyMatch && method === 'GET') {
     const id = historyMatch[1]!
@@ -445,6 +471,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
+    if (!requireSubscribed(res, t, searchParams.get('sessionId'))) return
     const limit = clampHistoryLimit(searchParams.get('limit'))
     const beforeRaw = searchParams.get('before')
     const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
@@ -519,39 +546,42 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'leave': {
-            const sessionId = body.sessionId as string | undefined
-            if (sessionId) t.joinedSessions.delete(sessionId)
-            log(`LEAVE: ${sessionId ?? 'unknown'} left topic ${id}`)
+            const sessionId = requireSubscribed(res, t, body.sessionId as string | undefined)
+            if (!sessionId) return
+            t.joinedSessions.delete(sessionId)
+            log(`LEAVE: ${sessionId} left topic ${id}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'archive': {
-            const archivedBy = body.archivedBy as string | undefined
+            const archivedBy = requireSubscribed(res, t, body.archivedBy as string | undefined)
+            if (!archivedBy) return
             t.state = 'archived'
             const event = {
               source: 'local' as const,
               type: 'topic_archived' as const,
               channel: t.channel,
               topicId: id,
-              archivedBy: archivedBy ?? 'unknown',
+              archivedBy,
             }
             broadcast(JSON.stringify(event))
-            log(`TOPIC ARCHIVED: ${id} by ${archivedBy ?? 'unknown'}`)
+            log(`TOPIC ARCHIVED: ${id} by ${archivedBy}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'unarchive': {
-            const unarchivedBy = body.unarchivedBy as string | undefined
+            const unarchivedBy = requireSubscribed(res, t, body.unarchivedBy as string | undefined)
+            if (!unarchivedBy) return
             t.state = 'active'
             const event = {
               source: 'local' as const,
               type: 'topic_unarchived' as const,
               channel: t.channel,
               topicId: id,
-              unarchivedBy: unarchivedBy ?? 'unknown',
+              unarchivedBy,
             }
             broadcast(JSON.stringify(event))
-            log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy ?? 'unknown'}`)
+            log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy}`)
             jsonResponse(res, 200, { ok: true })
             return
           }

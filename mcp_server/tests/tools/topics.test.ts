@@ -33,6 +33,16 @@ describe('Topic Tools', () => {
       expect(result.error).toContain('No name set')
     })
 
+    // KAI-446: read-history is subscription-gated on the reading session, so
+    // the tool must carry a name rather than reaching the broker anonymously.
+    it('returns error when session has no name and tries to read_topic_messages', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, depsNoName))
+      expect(result.error).toContain('No name set')
+    })
+
     it('allows list_topics without name', async () => {
       const deps = createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
@@ -604,6 +614,12 @@ describe('Topic Tools', () => {
       const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, stubDeps))
       expect(result.messages[0].text).toBe('topic msg')
       expect(result.hasMore).toBe(false)
+      // KAI-446: the reading session's name must reach the transport — it is
+      // what the local broker gates read-history on. Without it the call is
+      // anonymous and the broker rejects it (400).
+      expect(stubTransport.readTopicMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionName: 'architect', topicId: 'uuid-hist' }),
+      )
     })
   })
 })

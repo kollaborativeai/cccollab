@@ -69,6 +69,10 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
+  // KAI-446: read-history is subscription-gated on the reading session, so it
+  // needs a name like every other topic tool. Without one the tool used to
+  // reach the broker's ungated read route anonymously.
+  'read_topic_messages',
 ])
 
 export async function handleTopicTool(
@@ -201,7 +205,12 @@ export async function handleTopicTool(
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
-      const page = await transport.readTopicMessages({ topicId, limit, before })
+      const page = await transport.readTopicMessages({
+        sessionName: deps.session.displayName,
+        topicId,
+        limit,
+        before,
+      })
       return JSON.stringify(page)
     }
 

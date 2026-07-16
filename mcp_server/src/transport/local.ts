@@ -164,8 +164,14 @@ export class LocalTransport implements Transport {
 
   // Topic history lives in the broker's memory; page it through the broker's
   // read-history endpoint and map it onto the shared history-page contract.
-  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+  async readTopicMessages(args: {
+    sessionName: string
+    topicId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
     const params = new URLSearchParams()
+    params.set('sessionId', args.sessionName)
     if (args.limit !== undefined) params.set('limit', String(args.limit))
     if (args.before !== undefined) params.set('before', String(args.before))
     const qs = params.toString() ? `?${params.toString()}` : ''

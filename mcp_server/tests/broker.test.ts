@@ -307,14 +307,18 @@ describe('Broker: isolation guards and invariants', () => {
   })
 
   describe('paged topic history (GET /topics/:id/messages)', () => {
+    /** `sessionId` identifies the reading session — read-history is
+     *  subscription-gated (KAI-446), so these paging tests read as the
+     *  subscribed session that seeded the topic. */
     async function readHistory(
       topicId: string,
-      query: { limit?: number; before?: number } = {},
+      query: { sessionId?: string; limit?: number; before?: number } = {},
     ): Promise<{
       status: number
       body: { messages: Array<{ sender: string; text: string; ts: number }>; hasMore: boolean }
     }> {
       const params = new URLSearchParams()
+      if (query.sessionId !== undefined) params.set('sessionId', query.sessionId)
       if (query.limit !== undefined) params.set('limit', String(query.limit))
       if (query.before !== undefined) params.set('before', String(query.before))
       const qs = params.toString() ? `?${params.toString()}` : ''
@@ -341,7 +345,7 @@ describe('Broker: isolation guards and invariants', () => {
 
     it('returns all messages oldest-first with epoch-ms numeric timestamps', async () => {
       const id = await seed('hist-a', 'hist-ch', 'hist-topic-a', ['one', 'two', 'three'])
-      const { status, body } = await readHistory(id)
+      const { status, body } = await readHistory(id, { sessionId: 'hist-a' })
       expect(status).toBe(200)
       expect(body.messages.map((m) => m.text)).toEqual(['one', 'two', 'three'])
       expect(body.messages.every((m) => typeof m.ts === 'number' && Number.isFinite(m.ts))).toBe(true)
@@ -354,7 +358,7 @@ describe('Broker: isolation guards and invariants', () => {
 
     it('returns an empty page (not an error) for a topic with no messages', async () => {
       const id = await seed('hist-empty', 'hist-empty-ch', 'hist-empty-topic', [])
-      const { status, body } = await readHistory(id)
+      const { status, body } = await readHistory(id, { sessionId: 'hist-empty' })
       expect(status).toBe(200)
       expect(body.messages).toEqual([])
       expect(body.hasMore).toBe(false)
@@ -362,7 +366,7 @@ describe('Broker: isolation guards and invariants', () => {
 
     it('caps the page to `limit`, returns the newest page, and sets hasMore', async () => {
       const id = await seed('hist-b', 'hist-b-ch', 'hist-topic-b', ['m1', 'm2', 'm3', 'm4', 'm5'], 2)
-      const { body } = await readHistory(id, { limit: 2 })
+      const { body } = await readHistory(id, { sessionId: 'hist-b', limit: 2 })
       // Newest two, still oldest-first within the page.
       expect(body.messages.map((m) => m.text)).toEqual(['m4', 'm5'])
       expect(body.hasMore).toBe(true)
@@ -370,12 +374,12 @@ describe('Broker: isolation guards and invariants', () => {
 
     it('pages backwards with the `before` cursor until hasMore is false', async () => {
       const id = await seed('hist-c', 'hist-c-ch', 'hist-topic-c', ['a', 'b', 'c', 'd'], 2)
-      const first = await readHistory(id, { limit: 2 })
+      const first = await readHistory(id, { sessionId: 'hist-c', limit: 2 })
       expect(first.body.messages.map((m) => m.text)).toEqual(['c', 'd'])
       expect(first.body.hasMore).toBe(true)
 
       const cursor = first.body.messages[0]!.ts
-      const second = await readHistory(id, { limit: 2, before: cursor })
+      const second = await readHistory(id, { sessionId: 'hist-c', limit: 2, before: cursor })
       expect(second.body.messages.map((m) => m.text)).toEqual(['a', 'b'])
       expect(second.body.hasMore).toBe(false)
     })
@@ -429,6 +433,109 @@ describe('Broker: isolation guards and invariants', () => {
       expect(evt).not.toBeNull()
       // Mirrors topic_archived's archivedBy so the event isn't attributed to "system".
       expect(evt!.unarchivedBy).toBe('attrib-a')
+    })
+  })
+
+  /**
+   * KAI-446: every topic route that reads or mutates a topic must apply the
+   * same channel-subscription check. `GET /topics/:id`, `POST .../messages`
+   * and `POST .../join` enforced it; read-history, archive, unarchive and
+   * leave did not. These assert the UNSUBSCRIBED identity is REJECTED, so
+   * deleting the guard turns them red (a test that only asserted the
+   * subscribed session succeeds would stay green with the hole reopened).
+   */
+  describe('KAI-446: topic route authorization parity', () => {
+    async function readHistory(
+      topicId: string,
+      query: { sessionId?: string; limit?: number; before?: number } = {},
+    ): Promise<{ status: number; body: Record<string, unknown> }> {
+      const params = new URLSearchParams()
+      if (query.sessionId !== undefined) params.set('sessionId', query.sessionId)
+      if (query.limit !== undefined) params.set('limit', String(query.limit))
+      if (query.before !== undefined) params.set('before', String(query.before))
+      const qs = params.toString() ? `?${params.toString()}` : ''
+      const res = await fetch(`http://127.0.0.1:${port}/topics/${topicId}/messages${qs}`)
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> }
+    }
+
+    async function leaveTopic(topicId: string, sessionId: string): Promise<Response> {
+      return fetch(`http://127.0.0.1:${port}/topics/${topicId}/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      })
+    }
+
+    /** Victim owns a topic in `secret` holding one sensitive message; the
+     *  attacker is registered but has never joined `secret`. */
+    async function setup(tag: string): Promise<{ topicId: string; victim: string; attacker: string }> {
+      const victim = `k446-victim-${tag}`
+      const attacker = `k446-attacker-${tag}`
+      const channel = `k446-secret-${tag}`
+      await registerSession(port, victim)
+      await joinChannel(port, victim, channel)
+      const { id } = (await (await createTopic(port, victim, `k446-topic-${tag}`, channel)).json()) as {
+        id: string
+      }
+      await postTopicMessage(port, id, victim, 'TOP SECRET: launch codes 1234')
+      await registerSession(port, attacker)
+      return { topicId: id, victim, attacker }
+    }
+
+    it('rejects read-history from a session not subscribed to the channel', async () => {
+      const { topicId, attacker } = await setup('read')
+      const { status, body } = await readHistory(topicId, { sessionId: attacker })
+      expect(status).toBe(403)
+      expect(JSON.stringify(body)).not.toContain('launch codes')
+    })
+
+    it('rejects read-history that supplies no sessionId at all', async () => {
+      const { topicId } = await setup('nosid')
+      const { status, body } = await readHistory(topicId)
+      expect(status).toBe(400)
+      expect(JSON.stringify(body)).not.toContain('launch codes')
+    })
+
+    it('still serves read-history to a subscribed session (guard does not over-block)', async () => {
+      const { topicId, victim } = await setup('ok')
+      const { status, body } = await readHistory(topicId, { sessionId: victim })
+      expect(status).toBe(200)
+      expect(JSON.stringify(body)).toContain('launch codes')
+    })
+
+    it('rejects archive from a session not subscribed to the channel', async () => {
+      const { topicId, attacker } = await setup('arch')
+      const res = await archiveTopic(port, topicId, attacker)
+      expect(res.status).toBe(403)
+      // and the topic is still active for its owner
+      const { body } = await readHistory(topicId, { sessionId: `k446-victim-arch` })
+      expect(body.messages).toBeDefined()
+    })
+
+    it('rejects unarchive from a session not subscribed to the channel', async () => {
+      const { topicId, victim, attacker } = await setup('unarch')
+      expect((await archiveTopic(port, topicId, victim)).status).toBe(200)
+      const res = await unarchiveTopic(port, topicId, attacker)
+      expect(res.status).toBe(403)
+    })
+
+    /**
+     * Parity with `join`, which 403s an unsubscribed session. NOT a claim that
+     * one session cannot evict another: `leave`'s body carries only the session
+     * to remove and the loopback broker has no caller identity, so "attacker
+     * evicts victim" is indistinguishable from "victim leaves". That is the
+     * documented honor-system model and is out of scope here.
+     */
+    it('rejects leave from a session not subscribed to the channel', async () => {
+      const { topicId, attacker } = await setup('leave')
+      const res = await leaveTopic(topicId, attacker)
+      expect(res.status).toBe(403)
+    })
+
+    it('still allows a subscribed session to archive and unarchive', async () => {
+      const { topicId, victim } = await setup('happy')
+      expect((await archiveTopic(port, topicId, victim)).status).toBe(200)
+      expect((await unarchiveTopic(port, topicId, victim)).status).toBe(200)
     })
   })
 })
