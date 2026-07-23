@@ -463,9 +463,9 @@ describe('RemoteTransport.createTopic skip state', () => {
 
     // 4th call is short-circuited: never reaches the mutation again.
     const callsBeforeSkip = createCalls
-    await expect(
-      transport.createTopic({ sessionName: 'laptop', channel: 'dev', topic: 'plan-2' }),
-    ).rejects.toThrow(/skipped/i)
+    await expect(transport.createTopic({ sessionName: 'laptop', channel: 'dev', topic: 'plan-2' })).rejects.toThrow(
+      /skipped/i,
+    )
     expect(createCalls).toBe(callsBeforeSkip)
 
     // A different tool on the same transport is unaffected.
