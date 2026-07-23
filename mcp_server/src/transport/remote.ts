@@ -184,10 +184,13 @@ function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): Functio
 }
 
 /**
- * Degradation policy: flip the `enabled` switch when three operations
- * fail within this window, or immediately on a "function not found"
- * error (schema drift) from a long-lived subscription. Short window so
- * a transient blip recovers fast but doesn't cascade.
+ * Degradation policy: after three failures of the SAME op within this
+ * window, that op alone is skipped (short-circuited on its own — see
+ * `recordOpFailure`). The transport-wide `enabled` switch flips only on
+ * a structured auth failure, or immediately on a "function not found"
+ * error (schema drift) from a long-lived subscription — both are
+ * genuinely transport-wide signals. Short window so a transient blip
+ * recovers fast but doesn't cascade.
  */
 const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
@@ -239,16 +242,24 @@ class BoundedIdSet {
  * ids are Convex `Id<'topics'>` strings (base32-ish). `hasTopic` uses
  * that shape distinction to dispatch topic-addressed tools.
  *
- * Graceful degradation: we set `enabled = false` and record the reason on
- * a structured auth failure, on a `FunctionNotFoundError` from a long-lived
- * subscription (structural schema drift), or after 3+ failed operations
- * within `DEGRADATION_WINDOW_MS`. A single `FunctionNotFoundError` from a
- * one-shot op (query/mutation) does NOT disable the transport — it fails
- * just that op and counts toward the window, so one stale tool bound to a
- * removed backend function can't brick the whole transport (KAI-333).
- * Callers in `server.ts` check `enabled` before dispatching. The transport
- * does NOT auto-recover; a session restart or successful `authenticate` is
- * required.
+ * Graceful degradation operates at two levels:
+ *
+ * - Transport-wide: we set `enabled = false` and record the reason ONLY on
+ *   a structured auth failure, or on a `FunctionNotFoundError` from a
+ *   long-lived subscription (structural schema drift on a core reactive
+ *   feed) — both are genuinely transport-wide signals: every other op
+ *   would fail the same way too.
+ * - Per-tool: everything else — 3+ failures of the SAME op within
+ *   `DEGRADATION_WINDOW_MS` (including a `FunctionNotFoundError` from a
+ *   one-shot op) — SKIPS just that op (see `recordOpFailure`): future
+ *   calls to it short-circuit with its usual fallback without reaching the
+ *   backend, while every other op on this transport keeps working
+ *   normally. One dead/misbehaving tool, or one a caller keeps retrying,
+ *   can no longer brick the whole remote transport (KAI-333).
+ *
+ * Callers in `server.ts` check `enabled` before dispatching. Neither the
+ * transport nor an individual skipped op auto-recovers; a session restart
+ * or successful `authenticate` is required.
  */
 export class RemoteTransport implements Transport {
   readonly source: string
@@ -257,9 +268,18 @@ export class RemoteTransport implements Transport {
   private readonly client: ConvexClient
   private readonly refs: Refs
   private sessionId: string | null = null
-  private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
   private readonly log: (message: string) => void
+  /** Rolling failure-timestamp window PER op name (KAI-333 finding #2):
+   *  each op is tracked independently so a tool that keeps failing skips
+   *  only itself, never the whole transport. Keyed by the same `op`
+   *  string passed to `registerFailure` / `registerSubscriptionFailure`. */
+  private readonly opFailures = new Map<string, number[]>()
+  /** Ops that crossed the per-op failure threshold and are now skipped
+   *  for the remaining lifetime of this transport instance: future calls
+   *  short-circuit with the op's usual fallback instead of reaching the
+   *  backend. Keyed by `op`; value is the log-friendly reason. */
+  private readonly skippedOps = new Map<string, string>()
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
   private shutdownStarted = false
@@ -366,6 +386,7 @@ export class RemoteTransport implements Transport {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
+    this.assertNotSkipped('introduce')
     try {
       const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
         sessionName: args.sessionName,
@@ -395,7 +416,7 @@ export class RemoteTransport implements Transport {
   // ─── Channels ─────────────────────────────────────────────────────────
   async joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
+    if (!this.enabled || this.sessionId === null || this.isSkipped('joinChannel')) return { subscriberCount: 0 }
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
@@ -421,7 +442,7 @@ export class RemoteTransport implements Transport {
 
   async leaveChannel(args: { sessionName: string; channel: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('leaveChannel')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.leave), {
         sessionId: this.sessionId,
@@ -434,7 +455,7 @@ export class RemoteTransport implements Transport {
 
   async listChannels(args: { sessionName?: string }): Promise<TransportChannel[]> {
     void args
-    if (!this.enabled) return []
+    if (!this.enabled || this.isSkipped('listChannels')) return []
     try {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.channels.queries.listAll),
@@ -465,7 +486,7 @@ export class RemoteTransport implements Transport {
    * Backs the `list_organizations` tool.
    */
   async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
-    if (!this.enabled) return []
+    if (!this.enabled || this.isSkipped('listOrganizations')) return []
     try {
       return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
@@ -501,7 +522,7 @@ export class RemoteTransport implements Transport {
 
   async broadcast(args: { sessionName: string; channel: string; text: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('broadcast')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToChannel), {
         sessionId: this.sessionId,
@@ -519,6 +540,7 @@ export class RemoteTransport implements Transport {
     if (!this.enabled || this.sessionId === null) {
       throw new Error('Remote transport not ready; cannot create topic.')
     }
+    this.assertNotSkipped('createTopic')
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.start), {
         sessionId: this.sessionId,
@@ -550,7 +572,7 @@ export class RemoteTransport implements Transport {
     includeArchived?: boolean
   }): Promise<TransportTopic[]> {
     void args.sessionName
-    if (!this.enabled) return []
+    if (!this.enabled || this.isSkipped('listTopics')) return []
     // Without a channel we have no efficient way to enumerate all
     // topics server-side: `listByChannel` needs a channel name. The
     // router always passes a channel for remote topic listings, so
@@ -591,7 +613,7 @@ export class RemoteTransport implements Transport {
 
   async getTopicById(args: { sessionName: string; topicId: string }): Promise<TransportTopic | null> {
     void args.sessionName
-    if (!this.enabled) return null
+    if (!this.enabled || this.isSkipped('getTopicById')) return null
     if (BROKER_UUID_PATTERN.test(args.topicId)) return null
     try {
       const doc = (await this.client.query(
@@ -646,7 +668,7 @@ export class RemoteTransport implements Transport {
     topicId: string
   }): Promise<{ channel?: string; history: TransportTopicMessage[] }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return { history: [] }
+    if (!this.enabled || this.sessionId === null || this.isSkipped('joinTopic')) return { history: [] }
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.join), {
         sessionId: this.sessionId,
@@ -672,7 +694,7 @@ export class RemoteTransport implements Transport {
 
   async leaveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('leaveTopic')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.leave), {
         sessionId: this.sessionId,
@@ -685,7 +707,7 @@ export class RemoteTransport implements Transport {
 
   async archiveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('archiveTopic')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.archive), {
         sessionId: this.sessionId,
@@ -698,7 +720,7 @@ export class RemoteTransport implements Transport {
 
   async unarchiveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('unarchiveTopic')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.unarchive), {
         sessionId: this.sessionId,
@@ -715,7 +737,7 @@ export class RemoteTransport implements Transport {
 
   async sendTopicMessage(args: { sessionName: string; topicId: string; text: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return
+    if (!this.enabled || this.sessionId === null || this.isSkipped('sendTopicMessage')) return
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToTopic), {
         sessionId: this.sessionId,
@@ -729,7 +751,7 @@ export class RemoteTransport implements Transport {
 
   // ─── Sessions & DMs ───────────────────────────────────────────────────
   async listSessions(args: { channel?: string }): Promise<TransportSession[]> {
-    if (!this.enabled) return []
+    if (!this.enabled || this.isSkipped('listSessions')) return []
     try {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.sessions.queries.listByChannel),
@@ -777,6 +799,7 @@ export class RemoteTransport implements Transport {
   private async resolveChannelId(channelName: string): Promise<string | null> {
     const cached = this.channelIdsByName.get(channelName)
     if (cached !== undefined) return cached
+    if (this.isSkipped('resolveChannelId')) return null
     try {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.channels.queries.listAll),
@@ -793,7 +816,7 @@ export class RemoteTransport implements Transport {
   }
 
   async readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
-    if (!this.enabled) return { messages: [], hasMore: false }
+    if (!this.enabled || this.isSkipped('readChannelMessages')) return { messages: [], hasMore: false }
     const channelId = await this.resolveChannelId(args.channel)
     if (channelId === null) return { messages: [], hasMore: false }
     try {
@@ -812,7 +835,7 @@ export class RemoteTransport implements Transport {
   }
 
   async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
-    if (!this.enabled) return { messages: [], hasMore: false }
+    if (!this.enabled || this.isSkipped('readTopicMessages')) return { messages: [], hasMore: false }
     try {
       const raw = (await this.client.query(
         fn<'query'>(this.refs.messages.queries.readTopicHistory),
@@ -853,7 +876,7 @@ export class RemoteTransport implements Transport {
     args: { topicId: string; channelName: string },
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
-    if (!this.enabled || this.shutdownStarted) return () => {}
+    if (!this.enabled || this.shutdownStarted || this.isSkipped('subscribeTopicMessages')) return () => {}
     // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
     // cursor: the backend returns messages strictly after it. `topicMaxTs`
     // is primed (via primeTopicCursor) to the last history ts already shown
@@ -911,7 +934,7 @@ export class RemoteTransport implements Transport {
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
   subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
-    if (!this.enabled || this.shutdownStarted) return () => {}
+    if (!this.enabled || this.shutdownStarted || this.isSkipped('subscribeChannelMessages')) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
 
     // Resolve the channel id. If we have it cached from a prior
@@ -1014,7 +1037,16 @@ export class RemoteTransport implements Transport {
             register(match.channelId)
           }
         } catch (err) {
-          this.registerFailure('subscribeChannelMessages.lookup', err)
+          // KAI-333 finding #3: route through the SAME subscription-aware
+          // mechanism (and the SAME op name) as the reactive `listByChannel`
+          // subscription below, not the lenient one-shot-op path. This
+          // bootstrap lookup is part of the same "subscribe to channel
+          // messages" capability, so a genuinely removed `listAll`
+          // function must get the same structural-drift severity as a
+          // removed `listByChannel` — not silently degrade to "just count
+          // toward a window" while the reactive path would have tripped
+          // immediately for the equivalent drift.
+          this.registerSubscriptionFailure('subscribeChannelMessages', err)
         }
       })()
     }
@@ -1106,9 +1138,11 @@ export class RemoteTransport implements Transport {
    * error callback. Unlike `registerFailure`, this variant does NOT
    * immediately disable the transport on UNAUTHENTICATED because the
    * underlying `ConvexClient` routinely retries with a refreshed token
-   * during the auth handshake window at startup. Only
-   * function-not-found (structural schema drift) and the sustained
-   * count-in-window path trip the breaker here.
+   * during the auth handshake window at startup. Function-not-found
+   * (structural schema drift on a core reactive feed) is the one signal
+   * here that still trips the whole transport, not just this op — see the
+   * class doc. Any other error counts toward `op`'s own rolling window
+   * (KAI-333 finding #2 / #3): repeated failures skip only `op`.
    */
   private registerSubscriptionFailure(op: string, err: unknown): void {
     const msg = err instanceof Error ? err.message : String(err)
@@ -1123,30 +1157,12 @@ export class RemoteTransport implements Transport {
     // UNAUTHENTICATED during startup auth-refresh must not kill the
     // whole transport. Persistent auth failures still surface via the
     // mutation/query paths which use `registerFailure`.
-    const now = Date.now()
-    this.recentFailures.push(now)
-    while (this.recentFailures.length > 0 && now - this.recentFailures[0]! > DEGRADATION_WINDOW_MS) {
-      this.recentFailures.shift()
-    }
-    if (this.recentFailures.length >= DEGRADATION_THRESHOLD) {
-      this.enabled = false
-      this.degradationReason = `Remote sync disabled: ${this.recentFailures.length} subscription failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
-      this.log(this.degradationReason)
-    }
+    this.recordOpFailure(op, msg)
   }
 
   private registerFailure(op: string, err: unknown): void {
     const msg = err instanceof Error ? err.message : String(err)
     this.log(`op ${op} failed: ${msg}`)
-
-    // A single missing function on a one-shot op (query/mutation) must NOT
-    // disable the whole transport — it fails just that op and counts toward
-    // the rolling window like any other failure. This keeps one stale tool
-    // bound to a removed backend function from bricking the entire remote
-    // transport (KAI-333). Genuine schema drift still trips the breaker: the
-    // core reactive subscriptions fail structurally (see
-    // `registerSubscriptionFailure`, which stays strict), and 3+ such op
-    // failures within the window trip the count path below.
 
     if (isAuthError(err)) {
       this.enabled = false
@@ -1155,15 +1171,52 @@ export class RemoteTransport implements Transport {
       return
     }
 
+    // Every other failure — including a missing function on a one-shot op
+    // (query/mutation) — is tracked per op-name, never globally: it skips
+    // only `op`, so one stale tool bound to a removed backend function (or
+    // one a caller keeps retrying) can't brick the entire remote transport
+    // (KAI-333). Genuine structural drift still trips the whole transport
+    // via the core reactive subscriptions (see `registerSubscriptionFailure`,
+    // which stays strict on function-not-found).
+    this.recordOpFailure(op, msg)
+  }
+
+  /**
+   * Record a failure against `op`'s own rolling window. Once `op` crosses
+   * `DEGRADATION_THRESHOLD` within `DEGRADATION_WINDOW_MS`, `op` (and ONLY
+   * `op`) is marked skipped: every call site for that op checks
+   * `skippedOps` up front and short-circuits with its usual fallback
+   * instead of reaching the backend again. Every other op is unaffected —
+   * this is the per-tool half of the KAI-333 degradation policy.
+   */
+  private recordOpFailure(op: string, msg: string): void {
+    if (this.skippedOps.has(op)) return
     const now = Date.now()
-    this.recentFailures.push(now)
-    while (this.recentFailures.length > 0 && now - this.recentFailures[0]! > DEGRADATION_WINDOW_MS) {
-      this.recentFailures.shift()
+    const failures = this.opFailures.get(op) ?? []
+    failures.push(now)
+    while (failures.length > 0 && now - failures[0]! > DEGRADATION_WINDOW_MS) {
+      failures.shift()
     }
-    if (this.recentFailures.length >= DEGRADATION_THRESHOLD) {
-      this.enabled = false
-      this.degradationReason = `Remote sync disabled: ${this.recentFailures.length} failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
-      this.log(this.degradationReason)
+    this.opFailures.set(op, failures)
+    if (failures.length >= DEGRADATION_THRESHOLD) {
+      const reason = `"${op}" skipped: ${failures.length} failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
+      this.skippedOps.set(op, reason)
+      this.log(`Remote sync: ${reason}`)
+    }
+  }
+
+  /** True once `op` has crossed its own failure threshold and is being
+   *  short-circuited. Used by fallback-returning call sites. */
+  private isSkipped(op: string): boolean {
+    return this.skippedOps.has(op)
+  }
+
+  /** Throws if `op` has been skipped. Used by call sites (like `introduce`)
+   *  whose contract is to throw rather than silently return a fallback. */
+  private assertNotSkipped(op: string): void {
+    const reason = this.skippedOps.get(op)
+    if (reason !== undefined) {
+      throw new Error(`remote transport op "${op}" is skipped (${reason})`)
     }
   }
 }
