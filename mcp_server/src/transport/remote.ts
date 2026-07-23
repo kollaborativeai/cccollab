@@ -185,9 +185,9 @@ function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): Functio
 
 /**
  * Degradation policy: flip the `enabled` switch when three operations
- * fail within this window, or immediately on any "function not found"
- * error (schema drift). Short window so a transient blip recovers fast
- * but doesn't cascade.
+ * fail within this window, or immediately on a "function not found"
+ * error (schema drift) from a long-lived subscription. Short window so
+ * a transient blip recovers fast but doesn't cascade.
  */
 const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
