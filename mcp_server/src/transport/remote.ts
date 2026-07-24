@@ -741,7 +741,8 @@ export class RemoteTransport implements Transport {
       // row: `channels.listForUser` resolves memberships for the
       // authenticated caller, which is this session. Other sessions' rows
       // stay empty until the backend denormalizes membership per session.
-      const ownChannels = this.sessionId !== null ? await this.listOwnChannelNames() : []
+      const hasOwnRow = this.sessionId !== null && rows.some((r) => r._id === this.sessionId)
+      const ownChannels = hasOwnRow ? await this.listOwnChannelNames() : []
       return rows.map((r) => ({
         name: r.sessionName,
         objective: r.objective,
@@ -755,9 +756,17 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  /** Channel names the authenticated caller (this session) is subscribed
-   *  to, per `channels.listForUser`. Used to fill in the caller's own row
-   *  in `listSessions`. */
+  /**
+   * Channel names the authenticated caller (this session) is subscribed
+   * to, per `channels.listForUser`. Used to fill in the caller's own row
+   * in `listSessions`.
+   *
+   * Best-effort and isolated from the degradation circuit breaker: this is
+   * an enrichment on top of `listByChannel`'s data, not the data itself, so
+   * a failure here (including a missing function on an older backend)
+   * must not trip `registerFailure` and disable the entire transport over
+   * a nice-to-have.
+   */
   private async listOwnChannelNames(): Promise<string[]> {
     try {
       const rows = (await this.client.query(
@@ -765,8 +774,7 @@ export class RemoteTransport implements Transport {
         this.orgScopedArgs({}),
       )) as Array<{ name: string }>
       return rows.map((r) => r.name)
-    } catch (err) {
-      this.registerFailure('listOwnChannels', err)
+    } catch {
       return []
     }
   }
