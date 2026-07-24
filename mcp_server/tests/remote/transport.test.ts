@@ -546,7 +546,7 @@ describe('RemoteTransport read-history methods', () => {
 })
 
 describe('RemoteTransport.listSessions', () => {
-  it('fills in the caller\'s own row from channels.listForUser; other rows stay empty', async () => {
+  it("fills in the caller's own row from channels.listForUser; other rows stay empty", async () => {
     // KAI-516: `sessions.listByChannel` doesn't denormalize channel
     // membership per session, so every row it reports comes back with
     // no channels — including the caller's own. The transport can at
