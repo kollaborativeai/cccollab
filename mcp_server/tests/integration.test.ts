@@ -33,6 +33,7 @@ interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  eventListener?: BrokerEventListener
 }
 
 interface SessionHarness {
@@ -68,7 +69,7 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router }
+  const deps: HarnessDeps = { session, context, router, eventListener: listener }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {
@@ -335,6 +336,97 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
     } finally {
       LEFT.listener.stop()
       RIGHT.listener.stop()
+    }
+  }, 15_000)
+
+  /**
+   * KAI-514 end-to-end: a 1:1 message reaches only the addressed
+   * session - never the channel they happen to share, or a bystander
+   * in the same channel - wakes the recipient's listener, and delivery
+   * is reported honestly against the recipient's live SSE connection.
+   */
+  it('send_message_to_session delivers privately and wakes only the addressed recipient', async () => {
+    const LEFT = await makeSession('dm-e2e-left', brokerPort)
+    const RIGHT = await makeSession('dm-e2e-right', brokerPort)
+    const BYSTANDER = await makeSession('dm-e2e-bystander', brokerPort)
+    try {
+      // list_sessions only surfaces peers sharing a channel with us
+      // (pre-existing, unrelated to KAI-514) - join one so all three are
+      // mutually discoverable, the realistic orchestration-fleet setup.
+      await handleChannelTool('join_channel', { name: 'dm-e2e-ch' }, LEFT.channelDeps)
+      await handleChannelTool('join_channel', { name: 'dm-e2e-ch' }, RIGHT.channelDeps)
+      await handleChannelTool('join_channel', { name: 'dm-e2e-ch' }, BYSTANDER.channelDeps)
+
+      const sessions = JSON.parse(await handleTopicTool('list_sessions', {}, LEFT.topicDeps)) as Array<{
+        name: string
+        id: string
+      }>
+      const rightId = sessions.find((s) => s.name === 'dm-e2e-right')?.id
+      expect(rightId).toBeTruthy()
+
+      LEFT.received.length = 0
+      RIGHT.received.length = 0
+      BYSTANDER.received.length = 0
+
+      const sendResult = JSON.parse(
+        await handleTopicTool('send_message_to_session', { sessionId: rightId, text: 'private ping' }, LEFT.topicDeps),
+      ) as { delivered: boolean }
+      expect(sendResult.delivered).toBe(true)
+
+      await waitUntil(() => (RIGHT.received.some((m) => m.text === 'private ping') ? true : null), 3000)
+      const match = RIGHT.received.find((m) => m.text === 'private ping')
+      expect(match?.sender).toBe('dm-e2e-left')
+      expect(match?.kind).toBe('dm')
+
+      // Never leaks to an unaddressed session.
+      await new Promise<void>((r) => setTimeout(r, 300))
+      expect(BYSTANDER.received.some((m) => m.text === 'private ping')).toBe(false)
+      expect(LEFT.received.some((m) => m.text === 'private ping')).toBe(false)
+
+      // Both parties can read the exchange back.
+      const leftId = sessions.find((s) => s.name === 'dm-e2e-left')?.id
+      const asLeft = JSON.parse(
+        await handleTopicTool('read_session_messages', { sessionId: rightId }, LEFT.topicDeps),
+      ) as { messages: unknown[] }
+      const asRight = JSON.parse(
+        await handleTopicTool('read_session_messages', { sessionId: leftId }, RIGHT.topicDeps),
+      ) as { messages: unknown[] }
+      expect(asLeft.messages).toHaveLength(1)
+      expect(asRight.messages).toHaveLength(1)
+    } finally {
+      LEFT.listener.stop()
+      RIGHT.listener.stop()
+      BYSTANDER.listener.stop()
+    }
+  }, 15_000)
+
+  /**
+   * KAI-514 regression: introduce (which re-tags the SSE connection via
+   * reconnectForIdentity) must not leak a second live connection. A
+   * naive `destroy(); connect()` fires the old request's error handler,
+   * which would schedule a reconnect ~2s later and orphan a parallel
+   * connection - causing every subsequent event to be processed twice.
+   */
+  it('reconnectForIdentity leaves exactly one live SSE connection (no leak)', async () => {
+    const connections = async (): Promise<number> => {
+      const health = (await (await fetch(`http://127.0.0.1:${brokerPort}/health`)).json()) as { connections: number }
+      return health.connections
+    }
+    // Let any teardown from prior tests settle, then baseline.
+    await waitUntil(async () => true, 1)
+    await new Promise<void>((r) => setTimeout(r, 300))
+    const before = await connections()
+
+    const S = await makeSession('dm-noleak', brokerPort)
+    try {
+      // start() opened one connection; introduce() re-tagged it. Wait
+      // past RECONNECT_DELAY_MS so a stray scheduled reconnect (the bug)
+      // would have fired and shown up as a second, orphaned connection.
+      await new Promise<void>((r) => setTimeout(r, 2500))
+      // Exactly one net new connection for this one session - not two.
+      expect(await connections()).toBe(before + 1)
+    } finally {
+      S.listener.stop()
     }
   }, 15_000)
 })

@@ -1,4 +1,5 @@
 import type { ActiveContext } from '../context.js'
+import type { BrokerEventListener } from '../broker-event-listener.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
@@ -25,6 +26,13 @@ export interface IdentityToolDeps {
    *  that don't exercise the hot-attach path can continue to construct
    *  deps without a bus. */
   messageBus?: MessageBus
+  /** The local broker's SSE listener for this session. `introduce` uses
+   *  this to re-tag the connection with the newly-set display name so
+   *  DM delivery (KAI-514) can see this session as attached; the
+   *  connection opened at process startup predates `introduce` in the
+   *  common case, so it initially carries no tag. Optional so legacy
+   *  unit tests that build deps by hand keep compiling. */
+  eventListener?: BrokerEventListener
   /** Shared map of topic-message subscription unsubscribe callbacks,
    *  keyed by `${location}::${topicId}`. Threaded into `attachLocation`
    *  on the hot-attach path so auto-subscribe to configured topics wires
@@ -114,6 +122,8 @@ export async function handleIdentityTool(
           // Non-fatal.
         }
       }
+
+      deps.eventListener?.reconnectForIdentity()
 
       return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
     }

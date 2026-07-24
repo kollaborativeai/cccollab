@@ -3,6 +3,8 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportDmMessage,
+  type TransportDmResult,
   type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
@@ -146,6 +148,26 @@ export class LocalTransport implements Transport {
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.brokerGet<{ sessions: TransportSession[] }>(`/sessions${qs}`)
     return data.sessions
+  }
+
+  // ─── Direct messages (KAI-514) ──────────────────────────────────────────
+  async sendSessionMessage(args: {
+    sessionName: string
+    toSessionId: string
+    text: string
+  }): Promise<TransportDmResult> {
+    return this.brokerPost<TransportDmResult>(`/sessions/${encodeURIComponent(args.toSessionId)}/dm`, {
+      from: args.sessionName,
+      text: args.text,
+    })
+  }
+
+  async readSessionMessages(args: { sessionName: string; withSessionId: string }): Promise<TransportDmMessage[]> {
+    const qs = `?asName=${encodeURIComponent(args.sessionName)}`
+    const data = await this.brokerGet<{ messages: TransportDmMessage[] }>(
+      `/sessions/${encodeURIComponent(args.withSessionId)}/dm${qs}`,
+    )
+    return data.messages
   }
 
   // ─── Message history ──────────────────────────────────────────────────

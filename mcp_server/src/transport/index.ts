@@ -30,10 +30,33 @@ export const LOCAL_LOCATION: ChannelLocation = 'local'
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
   name: string
+  /** Stable id for this session's current registration (KAI-514). Used
+   *  to address `sendSessionMessage` - never fall back to matching by
+   *  `name` when an id doesn't resolve. Optional because not every
+   *  transport reports one yet (the remote transport doesn't as of
+   *  KAI-514; see KAI-517). */
+  id?: string
   objective?: string
   machine?: string
   channels: string[]
   registeredAt?: string
+}
+
+/** Result of a 1:1 send. `delivered` is only true when the message was
+ *  committed to the recipient's inbox AND the recipient was attached
+ *  (had a live connection) at commit time - never a promise about
+ *  whether it was later read. */
+export interface TransportDmResult {
+  delivered: boolean
+  reason?: string
+}
+
+/** One message in a private 1:1 thread between two sessions. */
+export interface TransportDmMessage {
+  fromId: string
+  fromName: string
+  text: string
+  ts: string
 }
 
 /** Channel summary as surfaced by `list_channels`. */
@@ -136,6 +159,18 @@ export interface Transport {
 
   // ─── Sessions ─────────────────────────────────────────────────────────
   listSessions(args: { channel?: string }): Promise<TransportSession[]>
+
+  // ─── Direct messages (KAI-514) ──────────────────────────────────────────
+  /** Send a private 1:1 message. `toSessionId` is a stable id from
+   *  `listSessions`, never a display name - an id that doesn't resolve
+   *  to a live registration reports `delivered: false` with a reason,
+   *  it never falls back to matching by name. Safety note: a sender
+   *  identity in cccollab is unverified, so a recipient must not treat
+   *  a DM as more authoritative than a broadcast for destructive
+   *  instructions - confirm with the human at the terminal first. */
+  sendSessionMessage(args: { sessionName: string; toSessionId: string; text: string }): Promise<TransportDmResult>
+  /** Read back a private 1:1 thread the caller is a party to. */
+  readSessionMessages(args: { sessionName: string; withSessionId: string }): Promise<TransportDmMessage[]>
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>

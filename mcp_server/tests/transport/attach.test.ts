@@ -113,6 +113,8 @@ class FakeRemoteTransport implements Transport {
   unarchiveTopic = vi.fn(async () => {})
   sendTopicMessage = vi.fn(async () => {})
   listSessions = vi.fn(async (): Promise<TransportSession[]> => [])
+  sendSessionMessage = vi.fn(async () => ({ delivered: false, reason: 'not supported in fake' }))
+  readSessionMessages = vi.fn(async () => [])
   deregisterSession = vi.fn(async () => {})
   readChannelMessages = vi.fn(
     async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({

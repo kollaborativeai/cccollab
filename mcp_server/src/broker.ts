@@ -34,6 +34,32 @@ function broadcast(data: string): void {
   }
 }
 
+/**
+ * Write an event to only the SSE connection(s) tagged with the given
+ * session name - never the global `clients` set. A DM is private (KAI-514
+ * AC6): fanning it through `broadcast()` would hand its text to every
+ * other connected session's event listener, even though each listener
+ * currently self-filters what it surfaces to its own Claude session.
+ *
+ * Returns whether at least one connection received the write, which also
+ * doubles as the "recipient attached at commit time" signal (AC3).
+ */
+function sendToSessionConnections(sessionName: string, event: unknown): boolean {
+  const conns = sseBySession.get(sessionName)
+  if (!conns || conns.size === 0) return false
+  const payload = `data: ${JSON.stringify(event)}\n\n`
+  let wrote = false
+  for (const conn of conns) {
+    try {
+      conn.write(payload)
+      wrote = true
+    } catch {
+      conns.delete(conn)
+    }
+  }
+  return wrote
+}
+
 interface LocalTopicMessage {
   sender: string
   text: string
@@ -53,14 +79,51 @@ interface LocalTopic {
 
 interface SessionInfo {
   name: string
+  /** Stable id for this *registration*. Reused across repeated `introduce`
+   *  calls while the session stays registered; a fresh id is minted only
+   *  when a new SessionInfo is created (first introduce, or introduce
+   *  after a prior deregister). Never derived from `name` - two
+   *  registrations sharing a display name still get distinct ids. */
+  id: string
   objective?: string
   registeredAt: string
   channels: Set<string>
 }
 
+interface DmMessage {
+  fromId: string
+  fromName: string
+  toId: string
+  text: string
+  ts: string
+}
+
 const topics = new Map<string, LocalTopic>()
 const sessions = new Map<string, SessionInfo>()
 const channels = new Map<string, Set<string>>()
+
+/** SSE connections tagged with the session name that opened them (via
+ *  `/events?sessionId=`), used only to answer "is this session currently
+ *  attached" for DM delivery honesty. Distinct from the untargeted
+ *  `clients` set that channel/topic broadcasts fan out to. */
+const sseBySession = new Map<string, Set<SSEResponse>>()
+
+/** Private 1:1 message threads, keyed by the two participants' sorted
+ *  stable ids joined with `|`. Deliberately separate from `topics` /
+ *  channel broadcasts (KAI-514 AC6): a DM must never surface in channel
+ *  or topic history. */
+const dmThreads = new Map<string, DmMessage[]>()
+
+function dmPairKey(idA: string, idB: string): string {
+  return [idA, idB].sort().join('|')
+}
+
+function findSessionById(id: string): SessionInfo | undefined {
+  for (const info of sessions.values()) {
+    if (info.id === id) return info
+  }
+  return undefined
+}
 
 /** Normalize channel name: trim + lowercase. Returns null if empty. */
 function normalizeChannel(raw: unknown): string | null {
@@ -72,7 +135,7 @@ function normalizeChannel(raw: unknown): string | null {
 function ensureSession(name: string): SessionInfo {
   let info = sessions.get(name)
   if (!info) {
-    info = { name, registeredAt: new Date().toISOString(), channels: new Set() }
+    info = { name, id: crypto.randomUUID(), registeredAt: new Date().toISOString(), channels: new Set() }
     sessions.set(name, info)
   }
   return info
@@ -148,6 +211,7 @@ const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
 const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
 const TOPIC_MESSAGES_ROUTE = /^\/topics\/([^/]+)\/messages$/
 const SESSION_NAME_ROUTE = /^\/sessions\/([^/]+)$/
+const SESSION_DM_ROUTE = /^\/sessions\/([^/]+)\/dm$/
 
 const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   const { pathname, searchParams } = parseUrl(req.url ?? '/')
@@ -167,6 +231,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     const sseRes = res as SSEResponse
     clients.add(sseRes)
+    // Optional session tag: lets DM delivery know this session is
+    // currently attached (KAI-514). Untagged connections (sessionId
+    // omitted) still receive channel/topic broadcasts as before.
+    const sessionId = searchParams.get('sessionId') ?? undefined
+    if (sessionId) {
+      let conns = sseBySession.get(sessionId)
+      if (!conns) {
+        conns = new Set()
+        sseBySession.set(sessionId, conns)
+      }
+      conns.add(sseRes)
+    }
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
     // broadcast, so they don't miss events that fire right after connecting.
@@ -175,6 +251,13 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     req.on('close', () => {
       clients.delete(sseRes)
+      if (sessionId) {
+        const conns = sseBySession.get(sessionId)
+        if (conns) {
+          conns.delete(sseRes)
+          if (conns.size === 0) sseBySession.delete(sessionId)
+        }
+      }
       log(`SSE client disconnected (total: ${clients.size})`)
     })
     return
@@ -565,10 +648,16 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (pathname === '/sessions' && method === 'GET') {
     const channelFilter = normalizeChannel(searchParams.get('channel'))
-    const result: Array<{ name: string; objective?: string; registeredAt: string; channels: string[] }> = []
+    const result: Array<{ name: string; id: string; objective?: string; registeredAt: string; channels: string[] }> = []
     for (const s of sessions.values()) {
       if (channelFilter && !s.channels.has(channelFilter)) continue
-      result.push({ name: s.name, objective: s.objective, registeredAt: s.registeredAt, channels: [...s.channels] })
+      result.push({
+        name: s.name,
+        id: s.id,
+        objective: s.objective,
+        registeredAt: s.registeredAt,
+        channels: [...s.channels],
+      })
     }
     jsonResponse(res, 200, { sessions: result })
     return
@@ -585,14 +674,92 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         const existing = sessions.get(body.name)
         const info: SessionInfo = existing
           ? { ...existing, objective: body.objective ?? existing.objective }
-          : { name: body.name, objective: body.objective, registeredAt: new Date().toISOString(), channels: new Set() }
+          : {
+              name: body.name,
+              id: crypto.randomUUID(),
+              objective: body.objective,
+              registeredAt: new Date().toISOString(),
+              channels: new Set(),
+            }
         sessions.set(body.name, info)
         log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
-        jsonResponse(res, 200, { ok: true })
+        jsonResponse(res, 200, { ok: true, id: info.id })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
       }
     })()
+    return
+  }
+
+  const sessionDmMatch = SESSION_DM_ROUTE.exec(pathname)
+  if (sessionDmMatch && method === 'POST') {
+    const toId = decodeURIComponent(sessionDmMatch[1]!)
+    void (async () => {
+      try {
+        const body = JSON.parse(await readBody(req)) as { from?: string; text?: string }
+        if (!body.from || !body.text) {
+          jsonResponse(res, 400, { error: 'from and text are required' })
+          return
+        }
+        const sender = sessions.get(body.from)
+        if (!sender) {
+          jsonResponse(res, 400, { error: `Unknown sender session "${body.from}".` })
+          return
+        }
+        // AC2: an unknown/stale id is a normal outcome, never a name
+        // fallback - report it the same way as "recipient not attached"
+        // rather than a 4xx, so callers get one honest result shape.
+        const recipient = findSessionById(toId)
+        if (!recipient) {
+          jsonResponse(res, 200, { delivered: false, reason: `Unknown recipient id "${toId}".` })
+          return
+        }
+        if (recipient.id === sender.id) {
+          jsonResponse(res, 400, { error: 'Cannot send a message to yourself.' })
+          return
+        }
+
+        const ts = new Date().toISOString()
+        const msg: DmMessage = { fromId: sender.id, fromName: sender.name, toId: recipient.id, text: body.text, ts }
+        const pairKey = dmPairKey(sender.id, recipient.id)
+        const thread = dmThreads.get(pairKey) ?? []
+        thread.push(msg)
+        dmThreads.set(pairKey, thread)
+
+        const delivered = sendToSessionConnections(recipient.name, {
+          source: 'local' as const,
+          type: 'dm' as const,
+          fromId: sender.id,
+          fromName: sender.name,
+          toId: recipient.id,
+          text: body.text,
+          ts,
+        })
+        log(`DM ${sender.name} -> ${recipient.name}: ${body.text}${delivered ? '' : ' (recipient not attached)'}`)
+        jsonResponse(res, 200, delivered ? { delivered: true } : { delivered: false, reason: 'recipient not attached' })
+      } catch {
+        jsonResponse(res, 400, { error: 'invalid JSON' })
+      }
+    })()
+    return
+  }
+
+  if (sessionDmMatch && method === 'GET') {
+    const withId = decodeURIComponent(sessionDmMatch[1]!)
+    const asName = searchParams.get('asName')
+    if (!asName) {
+      jsonResponse(res, 400, { error: 'asName query parameter is required' })
+      return
+    }
+    const self = sessions.get(asName)
+    if (!self) {
+      jsonResponse(res, 400, { error: `Unknown session "${asName}".` })
+      return
+    }
+    const thread = dmThreads.get(dmPairKey(self.id, withId)) ?? []
+    jsonResponse(res, 200, {
+      messages: thread.map((m) => ({ fromId: m.fromId, fromName: m.fromName, text: m.text, ts: m.ts })),
+    })
     return
   }
 
@@ -601,6 +768,13 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const name = decodeURIComponent(sessionNameMatch[1]!)
     removeSessionFromAllChannels(name)
     sessions.delete(name)
+    // DM delivery tags SSE connections by session name; drop this name's
+    // tag on deregister so a later registration reusing the same display
+    // name (a fresh id, per AC2) can't have its private DMs fan out to
+    // this now-departed session's still-closing connection (KAI-514 AC6).
+    // Channel/topic broadcasts are unaffected - they use the global
+    // `clients` set, which the connection's own close handler prunes.
+    sseBySession.delete(name)
     log(`SESSION UNREGISTERED: ${name}`)
     jsonResponse(res, 200, { ok: true })
     return

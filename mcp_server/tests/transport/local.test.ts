@@ -121,4 +121,53 @@ describe('LocalTransport: message history reads', () => {
       expect(second.hasMore).toBe(false)
     })
   })
+
+  describe('sendSessionMessage / readSessionMessages (KAI-514)', () => {
+    it('resolves the recipient id from listSessions and reports delivered:false when offline', async () => {
+      await post(port, '/sessions', { name: 'lt-dm-recipient' })
+      await post(port, '/sessions', { name: 'lt-dm-sender' })
+      const transport = new LocalTransport(port)
+      const sessions = await transport.listSessions({})
+      const recipient = sessions.find((s) => s.name === 'lt-dm-recipient')
+      expect(recipient?.id).toBeTruthy()
+
+      const result = await transport.sendSessionMessage({
+        sessionName: 'lt-dm-sender',
+        toSessionId: recipient!.id!,
+        text: 'hello via transport',
+      })
+      expect(result.delivered).toBe(false)
+      expect(result.reason).toBeTruthy()
+    })
+
+    it('reports a reason (not a fallback match) for an unresolvable id', async () => {
+      await post(port, '/sessions', { name: 'lt-dm-sender-2' })
+      const transport = new LocalTransport(port)
+      const result = await transport.sendSessionMessage({
+        sessionName: 'lt-dm-sender-2',
+        toSessionId: 'nonexistent-id',
+        text: 'hi',
+      })
+      expect(result.delivered).toBe(false)
+      expect(result.reason).toMatch(/unknown/i)
+    })
+
+    it('round-trips a message through readSessionMessages for both parties', async () => {
+      await post(port, '/sessions', { name: 'lt-dm-a' })
+      await post(port, '/sessions', { name: 'lt-dm-b' })
+      const transport = new LocalTransport(port)
+      const sessions = await transport.listSessions({})
+      const bId = sessions.find((s) => s.name === 'lt-dm-b')!.id!
+
+      await transport.sendSessionMessage({ sessionName: 'lt-dm-a', toSessionId: bId, text: 'transport dm' })
+
+      const aId = sessions.find((s) => s.name === 'lt-dm-a')!.id!
+      const asA = await transport.readSessionMessages({ sessionName: 'lt-dm-a', withSessionId: bId })
+      const asB = await transport.readSessionMessages({ sessionName: 'lt-dm-b', withSessionId: aId })
+      expect(asA).toHaveLength(1)
+      expect(asB).toHaveLength(1)
+      expect(asA[0]!.text).toBe('transport dm')
+      expect(asA[0]!.fromName).toBe('lt-dm-a')
+    })
+  })
 })

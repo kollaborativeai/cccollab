@@ -21,7 +21,7 @@ interface BrokerEventListenerOptions {
 
 export interface BrokerLocalEvent {
   source: 'local'
-  type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast'
+  type: 'message' | 'topic_created' | 'topic_archived' | 'topic_unarchived' | 'broadcast' | 'dm'
   channel?: string
   topicId?: string
   topic?: { id: string; topic: string; channel?: string; creator: string; state?: string; createdAt?: string }
@@ -30,6 +30,13 @@ export interface BrokerLocalEvent {
   archivedBy?: string
   unarchivedBy?: string
   ts?: string
+  /** `dm` events only (KAI-514): the broker only ever sends a `dm` event
+   *  down the SSE connection(s) tagged with the addressed session's own
+   *  name, so every listener that receives one is the intended recipient
+   *  - there is no channel/topic gate to check. */
+  fromId?: string
+  fromName?: string
+  toId?: string
 }
 
 function isLocalEvent(data: unknown): data is BrokerLocalEvent {
@@ -65,10 +72,30 @@ export class BrokerEventListener {
     }
   }
 
+  /**
+   * Re-open the SSE connection tagged with the session's current
+   * display name. The connection opened at `start()` predates
+   * `introduce` in the common case (see `server.ts`), so it carries no
+   * session tag and the broker can't yet answer "is this session
+   * attached" for DM delivery (KAI-514 AC3). Call this once `introduce`
+   * has set a name; a no-op if the connection is already tagged with
+   * that same name.
+   */
+  reconnectForIdentity(): void {
+    if (this.stopped || !this.session.hasName()) return
+    if (this.taggedSessionName === this.session.displayName) return
+    if (this.currentRequest) this.currentRequest.destroy()
+    this.connect()
+  }
+
+  private taggedSessionName: string | undefined
+
   private connect(): void {
     if (this.stopped) return
 
-    const url = `${this.brokerUrl}/events`
+    this.taggedSessionName = this.session.hasName() ? this.session.displayName : undefined
+    const qs = this.taggedSessionName ? `?sessionId=${encodeURIComponent(this.taggedSessionName)}` : ''
+    const url = `${this.brokerUrl}/events${qs}`
     this.log(`Connecting to broker at ${url}`)
 
     const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
@@ -97,21 +124,33 @@ export class BrokerEventListener {
 
       res.on('end', () => {
         this.log('SSE connection ended')
-        this.scheduleReconnect()
+        this.reconnectIfCurrent(req)
       })
 
       res.on('error', (err) => {
         this.log(`SSE response error: ${err.message}`)
-        this.scheduleReconnect()
+        this.reconnectIfCurrent(req)
       })
     })
 
     req.on('error', (err) => {
       this.log(`SSE request error: ${err.message}`)
-      this.scheduleReconnect()
+      this.reconnectIfCurrent(req)
     })
 
     this.currentRequest = req
+  }
+
+  /**
+   * Reconnect only if `req` is still the live connection. When
+   * `reconnectForIdentity` (or `stop`) deliberately destroys a request,
+   * its `error`/`end` events still fire; without this guard that stale
+   * event would schedule a reconnect and orphan a parallel connection -
+   * a leak that also doubles every subsequent event (KAI-514 review).
+   */
+  private reconnectIfCurrent(req: http.ClientRequest): void {
+    if (this.currentRequest !== req) return
+    this.scheduleReconnect()
   }
 
   private scheduleReconnect(): void {
@@ -243,6 +282,28 @@ export class BrokerEventListener {
           threadTs: event.topicId,
         }
         this.log(`PUSHING topic_unarchived to Claude`)
+        await this.bus.push(msg)
+        return
+      }
+      case 'dm': {
+        // No channel/topic gate: the broker only sends `dm` events down
+        // the SSE connection(s) tagged with the addressed session's own
+        // name (KAI-514), so every listener that sees one is the
+        // intended recipient. The self-check is defense in depth only.
+        if (event.fromName && this.session.isExactSelf(event.fromName)) {
+          this.log(`DROPPED: self dm from ${event.fromName}`)
+          return
+        }
+        const msg: ParsedMessage = {
+          sender: event.fromName ?? 'unknown',
+          text: event.text ?? '',
+          ts: event.ts ?? new Date().toISOString(),
+          channel: `dm:${event.fromId ?? 'unknown'}|${event.toId ?? 'unknown'}`,
+          channelName: undefined,
+          threadTs: undefined,
+          kind: 'dm',
+        }
+        this.log(`PUSHING dm to Claude: from=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
         return
       }

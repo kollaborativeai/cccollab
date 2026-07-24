@@ -69,6 +69,8 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
+  'send_message_to_session',
+  'read_session_messages',
 ])
 
 export async function handleTopicTool(
@@ -177,6 +179,34 @@ export async function handleTopicTool(
     case 'list_sessions': {
       const { channel, location } = args as { channel?: string; location?: ChannelLocation }
       return handleListSessions(deps, channel, location)
+    }
+    case 'send_message_to_session': {
+      const { sessionId, text } = args as { sessionId?: string; text?: string }
+      if (!sessionId || !text) {
+        return JSON.stringify({ error: 'sessionId and text are required.' })
+      }
+      // KAI-514 ships direct messages on the local transport only
+      // (KAI-517 tracks remote). Addressed strictly by the stable id
+      // from list_sessions - never a display name.
+      const transport = deps.router.get(LOCAL_LOCATION)
+      const result = await transport.sendSessionMessage({
+        sessionName: deps.session.displayName,
+        toSessionId: sessionId,
+        text,
+      })
+      return JSON.stringify(result)
+    }
+    case 'read_session_messages': {
+      const { sessionId } = args as { sessionId?: string }
+      if (!sessionId) {
+        return JSON.stringify({ error: 'sessionId is required.' })
+      }
+      const transport = deps.router.get(LOCAL_LOCATION)
+      const messages = await transport.readSessionMessages({
+        sessionName: deps.session.displayName,
+        withSessionId: sessionId,
+      })
+      return JSON.stringify({ messages })
     }
     case 'read_topic_messages': {
       const { topic, limit, before } = args as {
@@ -607,6 +637,7 @@ async function handleListSessions(
     string,
     {
       name: string
+      id?: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
@@ -659,6 +690,7 @@ async function handleListSessions(
 
   const result = visible.map((s) => ({
     name: s.name,
+    ...(s.id ? { id: s.id } : {}),
     ...(s.objective ? { objective: s.objective } : {}),
     channels: s.channels,
     registeredAt: s.registeredAt,
@@ -671,13 +703,14 @@ function mergeSessions(
     string,
     {
       name: string
+      id?: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
       scopedLocations: Set<ChannelLocation>
     }
   >,
-  rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string }>,
+  rows: Array<{ name: string; id?: string; objective?: string; channels?: string[]; registeredAt?: string }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
    *  server-side to peers sharing a channel with the caller. */
@@ -687,6 +720,7 @@ function mergeSessions(
     const existing = merged.get(r.name)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
+      existing.id = existing.id ?? r.id
       existing.objective = existing.objective ?? r.objective
       // Union channels; same (name, location) tuples dedupe themselves
       // because this stage runs per-location.
@@ -703,6 +737,7 @@ function mergeSessions(
     } else {
       merged.set(r.name, {
         name: r.name,
+        id: r.id,
         objective: r.objective,
         channels: tagged,
         registeredAt: r.registeredAt,

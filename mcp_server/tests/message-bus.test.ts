@@ -80,6 +80,22 @@ describe('MessageBus', () => {
       })
     })
 
+    it('tags a dm message with kind:dm and omits the synthetic channel fields', async () => {
+      await bus.push(createMessage({ kind: 'dm', channel: 'dm:id-a|id-b', channelName: undefined }))
+      expect(mockMcp.notification).toHaveBeenCalledWith({
+        method: 'notifications/claude/channel',
+        params: {
+          content: 'hello world',
+          meta: {
+            sender: 'stefan | dispatcher',
+            kind: 'dm',
+            ts: '2026-04-19T05:00:00.000Z',
+            source: 'local',
+          },
+        },
+      })
+    })
+
     it('tags remote source when passed', async () => {
       await bus.push(createMessage(), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledWith(

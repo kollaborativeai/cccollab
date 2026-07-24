@@ -81,10 +81,17 @@ export class MessageBus extends EventEmitter {
 
     const meta: Record<string, string> = {
       sender: msg.sender,
-      channel: msg.channelName ?? msg.channel,
-      channel_id: msg.channel,
       ts: msg.ts,
       source,
+    }
+    if (msg.kind === 'dm') {
+      // A DM has no real channel - `msg.channel` is a synthetic dedup
+      // partition key (see broker-event-listener.ts), not something to
+      // surface to the client.
+      meta.kind = 'dm'
+    } else {
+      meta.channel = msg.channelName ?? msg.channel
+      meta.channel_id = msg.channel
     }
     if (msg.threadTs) {
       meta.thread_ts = msg.threadTs

@@ -549,16 +549,21 @@ describe('Topic Tools', () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
     })
 
-    // Direct messaging was removed from the backend and the mcp_server.
-    // These tool names must no longer be handled - they fall through to
-    // the unknown-tool guard rather than silently doing anything.
-    it('no longer handles the removed direct-message tools', async () => {
-      await expect(handleTopicTool('send_message_to_session', { to: 'bob', text: 'hi' }, deps)).rejects.toThrow(
-        'Unknown topic tool',
-      )
-      await expect(handleTopicTool('read_dm_thread', { sessionName: 'bob' }, deps)).rejects.toThrow(
-        'Unknown topic tool',
-      )
+    // Direct messaging was removed once (feat(mcp)!: remove direct
+    // messaging) because the *remote* transport's DM subscription called
+    // a Convex function that no longer existed, and a missing function
+    // used to disable the entire remote transport. KAI-333 fixed that
+    // root cause (a missing remote function now only skips that one
+    // tool), and KAI-514 reintroduces direct messaging on the local
+    // transport only, addressed by stable id rather than by name.
+    it('send_message_to_session requires sessionId and text', async () => {
+      const result = JSON.parse(await handleTopicTool('send_message_to_session', { text: 'hi' }, deps))
+      expect(result.error).toMatch(/sessionId/i)
+    })
+
+    it('read_session_messages requires sessionId', async () => {
+      const result = JSON.parse(await handleTopicTool('read_session_messages', {}, deps))
+      expect(result.error).toMatch(/sessionId/i)
     })
 
     it('read_topic_messages returns paged topic history from the transport', async () => {

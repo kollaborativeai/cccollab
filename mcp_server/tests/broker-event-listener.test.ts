@@ -246,4 +246,35 @@ describe('BrokerEventListener (channel-aware)', () => {
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
   })
+
+  it('pushes a dm event addressed to us regardless of channel subscription', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-sender',
+      fromName: 'other-session',
+      toId: 'id-us',
+      text: 'private hello',
+    }
+    listener.processLocalEvent(event)
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'other-session', text: 'private hello', kind: 'dm' }),
+      )
+    })
+  })
+
+  it('drops a dm event whose fromName is our own name (defense in depth)', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-us',
+      fromName: 'architect',
+      toId: 'id-us',
+      text: 'should not surface',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
 })
