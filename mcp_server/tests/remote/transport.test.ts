@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
+import { getFunctionName } from 'convex/server'
 
 import { RemoteTransport } from '../../src/transport/remote.js'
 
@@ -541,6 +542,88 @@ describe('RemoteTransport read-history methods', () => {
     expect(page.hasMore).toBe(false)
     expect(typeof page.messages[0]!.ts).toBe('number')
     expect(page.oldestTs).toBe(1_700_000_000_000)
+  })
+})
+
+describe('RemoteTransport.listSessions', () => {
+  it('fills in the caller\'s own row from channels.listForUser; other rows stay empty', async () => {
+    // KAI-516: `sessions.listByChannel` doesn't denormalize channel
+    // membership per session, so every row it reports comes back with
+    // no channels — including the caller's own. The transport can at
+    // least resolve its own memberships via `channels.listForUser`
+    // (Clerk-identity-scoped) and patch them onto its own row.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        return [{ name: 'kai' }, { name: 'product' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toEqual([
+      {
+        name: 'laptop',
+        objective: undefined,
+        machine: undefined,
+        channels: ['kai', 'product'],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+      },
+      {
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+      },
+    ])
+  })
+
+  it('returns no channels for anyone before introduce (no sessionId yet)', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toEqual([
+      {
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+      },
+    ])
+    // channels.listForUser must not be called when we have no sessionId.
+    expect(queryMock).toHaveBeenCalledTimes(1)
   })
 })
 

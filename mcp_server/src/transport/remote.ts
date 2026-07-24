@@ -736,17 +736,37 @@ export class RemoteTransport implements Transport {
         machine?: string
         createdAt: number
       }>
+      // `listByChannel` doesn't denormalize channel memberships per session,
+      // so every row comes back with none. We can at least fill in our own
+      // row: `channels.listForUser` resolves memberships for the
+      // authenticated caller, which is this session. Other sessions' rows
+      // stay empty until the backend denormalizes membership per session.
+      const ownChannels = this.sessionId !== null ? await this.listOwnChannelNames() : []
       return rows.map((r) => ({
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
-        // listByChannel doesn't denormalize channel memberships per
-        // session today; leave empty so the shape stays stable.
-        channels: [],
+        channels: r._id === this.sessionId ? ownChannels : [],
         registeredAt: new Date(r.createdAt).toISOString(),
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
+      return []
+    }
+  }
+
+  /** Channel names the authenticated caller (this session) is subscribed
+   *  to, per `channels.listForUser`. Used to fill in the caller's own row
+   *  in `listSessions`. */
+  private async listOwnChannelNames(): Promise<string[]> {
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listForUser),
+        this.orgScopedArgs({}),
+      )) as Array<{ name: string }>
+      return rows.map((r) => r.name)
+    } catch (err) {
+      this.registerFailure('listOwnChannels', err)
       return []
     }
   }
