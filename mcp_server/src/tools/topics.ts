@@ -617,6 +617,15 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel, location: match.location })
 }
 
+/**
+ * A remote session with no fresher liveness signal than this is dropped
+ * from `list_sessions` (KAI-515) — a registration that hasn't reported
+ * `lastSeen` within 5 heartbeat-ish intervals is presumed dead. Sessions
+ * whose transport doesn't report `lastSeen` at all are unaffected: absence
+ * means "unknown", not "stale", so they're kept (see the `visible` filter).
+ */
+const SESSION_STALE_MS = 5 * 60_000
+
 async function handleListSessions(
   deps: TopicToolDeps,
   channelArg?: string,
@@ -625,8 +634,15 @@ async function handleListSessions(
   await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
-  // Merged by session name. Channels union across transports, each
-  // tagged by the location it came from.
+  // Merged by session id when the transport provides one (every non-local
+  // transport does), falling back to `location::name` for transports that
+  // don't (the local broker has no stable id — see `TransportSession.id`).
+  // Keying by id (KAI-515) keeps a dead and a live registration that
+  // happen to share a display name as distinct entries instead of
+  // silently collapsing them into one.
+  //
+  // Channels union across transports, each tagged by the location it
+  // came from.
   //
   // `scopedLocations` records locations whose transport already scopes
   // `listSessions` server-side to peers sharing a channel with this
@@ -636,11 +652,12 @@ async function handleListSessions(
   const merged = new Map<
     string,
     {
-      name: string
       id?: string
+      name: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      lastSeen?: string
       scopedLocations: Set<ChannelLocation>
     }
   >()
@@ -688,12 +705,27 @@ async function handleListSessions(
         return s.channels.some((ch) => mySubs.has(`${ch.location}::${ch.name}`))
       })
 
-  const result = visible.map((s) => ({
-    name: s.name,
+  // Drop registrations with a known, stale `lastSeen` (KAI-515). No
+  // `lastSeen` means the transport hasn't reported liveness yet, which is
+  // "unknown", not "dead" — those are kept unfiltered.
+  const alive = visible.filter((s) => {
+    if (s.lastSeen === undefined) return true
+    const seenAt = Date.parse(s.lastSeen)
+    // An unparseable timestamp is "unknown", not "definitely dead" —
+    // treat it the same as absent rather than silently dropping the
+    // session (NaN comparisons are always false, so `Date.now() - NaN <=
+    // threshold` would otherwise filter it out with no diagnostic).
+    if (Number.isNaN(seenAt)) return true
+    return Date.now() - seenAt <= SESSION_STALE_MS
+  })
+
+  const result = alive.map((s) => ({
     ...(s.id ? { id: s.id } : {}),
+    name: s.name,
     ...(s.objective ? { objective: s.objective } : {}),
     channels: s.channels,
     registeredAt: s.registeredAt,
+    ...(s.lastSeen ? { lastSeen: s.lastSeen } : {}),
   }))
   return JSON.stringify(result)
 }
@@ -702,22 +734,40 @@ function mergeSessions(
   merged: Map<
     string,
     {
-      name: string
       id?: string
+      name: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      lastSeen?: string
       scopedLocations: Set<ChannelLocation>
     }
   >,
-  rows: Array<{ name: string; id?: string; objective?: string; channels?: string[]; registeredAt?: string }>,
+  rows: Array<{
+    id?: string
+    name: string
+    objective?: string
+    channels?: string[]
+    registeredAt?: string
+    lastSeen?: string
+  }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
    *  server-side to peers sharing a channel with the caller. */
   serverScoped: boolean,
 ): void {
   for (const r of rows) {
-    const existing = merged.get(r.name)
+    // Keying by id (scoped by location — Convex ids are only unique
+    // per-deployment, so two different remote locations could otherwise
+    // collide on the same id string) keeps distinct registrations from
+    // the SAME transport (e.g. a dead one and a live one under the same
+    // display name) from being collapsed into a single merged entry.
+    // Transports with no stable id (local) fall back to a plain name key,
+    // same as before KAI-515 — that's what lets one session attached via
+    // both the local broker and a remote transport still merge into a
+    // single row.
+    const key = r.id !== undefined ? `${location}::${r.id}` : r.name
+    const existing = merged.get(key)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
       existing.id = existing.id ?? r.id
@@ -726,21 +776,26 @@ function mergeSessions(
       // because this stage runs per-location.
       const seen = new Set(existing.channels.map((c) => `${c.location}::${c.name}`))
       for (const t of tagged) {
-        const key = `${t.location}::${t.name}`
-        if (!seen.has(key)) {
+        const tKey = `${t.location}::${t.name}`
+        if (!seen.has(tKey)) {
           existing.channels.push(t)
-          seen.add(key)
+          seen.add(tKey)
         }
       }
       existing.registeredAt = existing.registeredAt ?? r.registeredAt
+      // Newest lastSeen wins across merged rows for the same id.
+      if (r.lastSeen && (!existing.lastSeen || Date.parse(r.lastSeen) > Date.parse(existing.lastSeen))) {
+        existing.lastSeen = r.lastSeen
+      }
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
-      merged.set(r.name, {
-        name: r.name,
+      merged.set(key, {
         id: r.id,
+        name: r.name,
         objective: r.objective,
         channels: tagged,
         registeredAt: r.registeredAt,
+        lastSeen: r.lastSeen,
         scopedLocations: serverScoped ? new Set([location]) : new Set(),
       })
     }

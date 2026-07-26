@@ -563,6 +563,146 @@ describe('Topic Tools', () => {
       expect(result[0]).toMatchObject({ name: 'reviewer', objective: 'Review', channels: [] })
     })
 
+    // KAI-515: dead remote registrations sharing a display name with a
+    // live one were previously indistinguishable and could be silently
+    // collapsed into one entry by mergeSessions's name-keyed dedup.
+    function makeRemoteTransportWithSessions(
+      sessions: Array<{
+        id?: string
+        name: string
+        objective?: string
+        channels?: string[]
+        registeredAt?: string
+        lastSeen?: string
+      }>,
+    ) {
+      return {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics: async () => [],
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => sessions,
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages: async () => ({ messages: [], hasMore: false }),
+      } as unknown as import('../../src/transport/index.js').Transport
+    }
+
+    function makeRemoteDeps(transport: import('../../src/transport/index.js').Transport): TopicToolDeps {
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      return { session, context, router: new TransportRouter([transport]) }
+    }
+
+    it('list_sessions keeps a dead and a live registration with the same name as distinct entries', async () => {
+      const remoteTransport = makeRemoteTransportWithSessions([
+        { id: 'session_dead', name: 'product-manager', channels: [], registeredAt: '2026-05-01T00:00:00Z' },
+        { id: 'session_live', name: 'product-manager', channels: [], registeredAt: '2026-07-24T00:00:00Z' },
+      ])
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
+      expect(result).toHaveLength(2)
+      expect(result.map((s: { id?: string }) => s.id).sort()).toEqual(['session_dead', 'session_live'])
+    })
+
+    it('list_sessions filters out sessions stale by lastSeen while keeping fresh ones', async () => {
+      const now = Date.parse('2026-07-24T12:00:00Z')
+      vi.useFakeTimers()
+      vi.setSystemTime(now)
+      try {
+        const remoteTransport = makeRemoteTransportWithSessions([
+          {
+            id: 'session_stale',
+            name: 'ghost',
+            channels: [],
+            registeredAt: '2026-05-23T19:56:53.500Z',
+            lastSeen: new Date(now - 30 * 60_000).toISOString(), // 30 min ago
+          },
+          {
+            id: 'session_fresh',
+            name: 'active',
+            channels: [],
+            registeredAt: '2026-07-24T03:04:17.846Z',
+            lastSeen: new Date(now - 30_000).toISOString(), // 30s ago
+          },
+        ])
+        const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
+        expect(result).toHaveLength(1)
+        expect(result[0]).toMatchObject({ id: 'session_fresh', name: 'active' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('list_sessions keeps sessions from two locations with colliding ids as distinct entries', async () => {
+      // KAI-515 review follow-up: Convex ids are only unique per-deployment,
+      // not globally. Two different remote locations could in principle
+      // issue the same id string to unrelated sessions; the merge key must
+      // be scoped by location, not bare id, or they'd wrongly collapse.
+      const remoteA = makeRemoteTransportWithSessions([
+        { id: 'session_abc', name: 'alice', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
+      ])
+      ;(remoteA as { source: string }).source = 'remote-a'
+      const remoteB = makeRemoteTransportWithSessions([
+        { id: 'session_abc', name: 'bob', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
+      ])
+      ;(remoteB as { source: string }).source = 'remote-b'
+      const context = new ActiveContext()
+      context.joinChannel('default', 'fallback', 'remote-a')
+      context.joinChannel('default', 'fallback', 'remote-b')
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const deps: TopicToolDeps = { session, context, router: new TransportRouter([remoteA, remoteB]) }
+
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+      expect(result).toHaveLength(2)
+      expect(result.map((s: { name: string }) => s.name).sort()).toEqual(['alice', 'bob'])
+    })
+
+    it('list_sessions keeps sessions with no lastSeen (backend not yet reporting it)', async () => {
+      const remoteTransport = makeRemoteTransportWithSessions([
+        { id: 'session_unknown', name: 'reviewer', channels: [], registeredAt: '2026-01-01T00:00:00Z' },
+      ])
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ id: 'session_unknown', name: 'reviewer' })
+    })
+
+    it('list_sessions keeps a session whose lastSeen is not a parseable timestamp', async () => {
+      // KAI-515 review follow-up: Date.parse('garbage') is NaN, and
+      // `Date.now() - NaN <= threshold` is false, so an unparseable
+      // lastSeen would silently filter the session out as "stale" with
+      // no diagnostic. Malformed data should mean "unknown", same as
+      // absent data — not "definitely dead".
+      const remoteTransport = makeRemoteTransportWithSessions([
+        {
+          id: 'session_bad_ts',
+          name: 'reviewer',
+          channels: [],
+          registeredAt: '2026-01-01T00:00:00Z',
+          lastSeen: 'not-a-timestamp',
+        },
+      ])
+      const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({ id: 'session_bad_ts', name: 'reviewer' })
+    })
+
     it('throws on unknown tool', async () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
     })

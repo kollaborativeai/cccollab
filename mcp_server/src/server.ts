@@ -863,7 +863,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_sessions',
     {
       description:
-        'Return visible sessions as JSON array: [{name, id?, objective?, channels: [{name, location}], registeredAt}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` (local transport only for now) is the stable identifier to pass to send_message_to_session - never address a session by `name`.',
+        'Return visible sessions as JSON array: [{id?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one - use it (never `name`, which can collide) to address a session via `send_message_to_session`, which currently accepts only local ids. Registrations with a known-stale `lastSeen` are dropped.',
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
         location: z

@@ -29,17 +29,24 @@ export const LOCAL_LOCATION: ChannelLocation = 'local'
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
-  name: string
-  /** Stable id for this session's current registration (KAI-514). Used
-   *  to address `sendSessionMessage` - never fall back to matching by
-   *  `name` when an id doesn't resolve. Optional because not every
-   *  transport reports one yet (the remote transport doesn't as of
-   *  KAI-514; see KAI-517). */
+  /** Stable per-registration id, when the transport's backend issues one.
+   *  Used to (a) tell two registrations with the same display name apart,
+   *  (b) dedupe a session's rows across transports without collapsing
+   *  distinct registrations into one, and (c) address `sendSessionMessage`
+   *  unambiguously - never fall back to matching by `name` when an id
+   *  doesn't resolve. Optional because not every transport reports one:
+   *  the local broker mints ids (KAI-514) and remote transports do too
+   *  (KAI-515); remote DM addressing is still pending (KAI-517). */
   id?: string
+  name: string
   objective?: string
   machine?: string
   channels: string[]
   registeredAt?: string
+  /** ISO timestamp of the last liveness signal received for this
+   *  registration (e.g. a heartbeat). Absent when the backend doesn't
+   *  report it yet, in which case liveness is unknown rather than false. */
+  lastSeen?: string
 }
 
 /** Result of a 1:1 send. `delivered` is only true when the message was
