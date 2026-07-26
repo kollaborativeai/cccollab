@@ -799,11 +799,12 @@ export class RemoteTransport implements Transport {
         objective?: string
         machine?: string
         createdAt: number
-        /** Not returned by the backend yet as of KAI-515; read
-         *  opportunistically so this passthrough activates automatically
-         *  once `listByChannel` starts reporting it (see the heartbeat
-         *  this transport now sends via `updateLastSeen`). */
-        lastSeen?: number
+        /** Backend field is `lastSeenAt` (see the cccollab Convex
+         *  sessions.listByChannel handler); we normalise it to `lastSeen`
+         *  on the transport-facing shape so the tool layer's staleness
+         *  filter has a signal to bite on. Optional because a session
+         *  pre-dating the field would have it null. */
+        lastSeenAt?: number
       }>
       return rows.map((r) => ({
         id: r._id,
@@ -814,7 +815,7 @@ export class RemoteTransport implements Transport {
         // session today; leave empty so the shape stays stable.
         channels: [],
         registeredAt: new Date(r.createdAt).toISOString(),
-        lastSeen: typeof r.lastSeen === 'number' ? new Date(r.lastSeen).toISOString() : undefined,
+        lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)

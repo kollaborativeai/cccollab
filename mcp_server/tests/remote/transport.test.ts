@@ -698,13 +698,18 @@ describe('RemoteTransport.listSessions id/lastSeen passthrough', () => {
     expect(sessions[0]!.id).toBe('session_live')
   })
 
-  it('passes through lastSeen as an ISO string when the backend reports it', async () => {
+  // Backend field on `sessions.listByChannel` is `lastSeenAt` (see the
+  // cccollab Convex handler). The transport must normalise it to
+  // `lastSeen` on TransportSession; getting the field name wrong makes
+  // the tool-layer staleness filter a permanent no-op in production
+  // even though every other piece of KAI-515 is wired up.
+  it('normalises the backend row lastSeenAt into TransportSession.lastSeen', async () => {
     const { client } = makeStubClient(async () => [
       {
         _id: 'session_live',
         sessionName: 'architect',
         createdAt: 1_700_000_000_000,
-        lastSeen: 1_700_000_500_000,
+        lastSeenAt: 1_700_000_500_000,
       },
     ])
     const transport = new RemoteTransport({ client })
