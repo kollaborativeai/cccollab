@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
 
-import { RemoteTransport } from '../../src/transport/remote.js'
+import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
 
 /**
  * Self-disable transition test.
@@ -838,5 +838,179 @@ describe('RemoteTransport subscription resilience (KAI-438)', () => {
     // The subscription is dead, not transient — the old wording is a
     // large part of why this read as harmless.
     expect(log.join('\n')).not.toMatch(/\(transient\)/)
+  })
+})
+
+/**
+ * KAI-515: `listSessions` must pass through the backend's stable
+ * per-registration `_id` (already returned by `listByChannel`, previously
+ * discarded) as `TransportSession.id`, and opportunistically pass through
+ * `lastSeen` when the backend reports it. Without an `id`, two dead and
+ * live registrations sharing a display name are indistinguishable and get
+ * silently merged by the tool layer; see `tools/topics.ts`'s `mergeSessions`.
+ */
+describe('RemoteTransport.listSessions id/lastSeen passthrough', () => {
+  it('passes through the raw row _id as TransportSession.id', async () => {
+    const { client } = makeStubClient(async () => [
+      { _id: 'session_live', sessionName: 'architect', createdAt: 1_700_000_000_000 },
+    ])
+    const transport = new RemoteTransport({ client })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]!.id).toBe('session_live')
+  })
+
+  // Backend field on `sessions.listByChannel` is `lastSeenAt` (see the
+  // cccollab Convex handler). The transport must normalise it to
+  // `lastSeen` on TransportSession; getting the field name wrong makes
+  // the tool-layer staleness filter a permanent no-op in production
+  // even though every other piece of KAI-515 is wired up.
+  it('normalises the backend row lastSeenAt into TransportSession.lastSeen', async () => {
+    const { client } = makeStubClient(async () => [
+      {
+        _id: 'session_live',
+        sessionName: 'architect',
+        createdAt: 1_700_000_000_000,
+        lastSeenAt: 1_700_000_500_000,
+      },
+    ])
+    const transport = new RemoteTransport({ client })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions[0]!.lastSeen).toBe(new Date(1_700_000_500_000).toISOString())
+  })
+
+  it('leaves lastSeen undefined when the backend does not report it', async () => {
+    const { client } = makeStubClient(async () => [
+      { _id: 'session_live', sessionName: 'architect', createdAt: 1_700_000_000_000 },
+    ])
+    const transport = new RemoteTransport({ client })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions[0]!.lastSeen).toBeUndefined()
+  })
+})
+
+/**
+ * KAI-515: `sessions.mutations.updateLastSeen` was declared and wired into
+ * `Refs` but never called by the client, so remote sessions never report
+ * liveness and dead registrations persist indefinitely server-side. Once
+ * `introduce()` has set a `sessionId`, the transport must call
+ * `updateLastSeen` periodically until `shutdown()`.
+ */
+describe('RemoteTransport heartbeat', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('calls updateLastSeen periodically once introduced', async () => {
+    const mutationCalls: Array<{ fn: unknown; args: unknown }> = []
+    const { client } = makeStubClient(
+      async () => [],
+      async (fnRef: unknown, args: unknown) => {
+        mutationCalls.push({ fn: fnRef, args })
+        return 'session_abc'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    mutationCalls.length = 0
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+
+    expect(mutationCalls).toHaveLength(1)
+    expect(mutationCalls[0]!.args).toMatchObject({ sessionId: 'session_abc' })
+  })
+
+  it('stops sending heartbeats after shutdown', async () => {
+    const mutationCalls: unknown[] = []
+    const { client } = makeStubClient(
+      async () => [],
+      async (fnRef: unknown, args: unknown) => {
+        mutationCalls.push(args)
+        return 'session_abc'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+    await transport.shutdown()
+
+    mutationCalls.length = 0
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3)
+
+    expect(mutationCalls).toHaveLength(0)
+  })
+
+  it('does not trip the degradation circuit when a heartbeat call fails transiently', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        throw new Error('transient heartbeat failure')
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 4)
+
+    expect(transport.enabled).toBe(true)
+  })
+
+  // KAI-515 review follow-up: a heartbeat is the ONLY remote call a
+  // long-lived, mostly-idle session makes. If it fails because the
+  // deployment renamed/removed the mutation, or the session's auth
+  // expired, that's a real transport-health signal — swallowing it
+  // unconditionally would leave the transport reporting `enabled: true`
+  // forever while liveness silently never gets reported.
+  it('trips the degradation circuit when a heartbeat call hits a function-not-found error', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        const err = new Error('Could not find function cccollab/sessions:updateLastSeen')
+        err.name = 'FunctionNotFoundError'
+        throw err
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('trips the degradation circuit when a heartbeat call hits an auth error', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        const err = new Error('Sign-in required.') as Error & { data: { code: string } }
+        err.data = { code: 'UNAUTHENTICATED' }
+        throw err
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/authentication failed/i)
   })
 })
