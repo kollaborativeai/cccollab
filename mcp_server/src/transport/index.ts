@@ -47,12 +47,22 @@ export interface SessionIdentity {
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
+  /** Stable per-registration id, when the transport's backend issues one
+   *  (remote transports do; the local broker does not). Used to tell two
+   *  registrations with the same display name apart, and to dedupe a
+   *  session's rows across transports without collapsing distinct
+   *  registrations into one. */
+  id?: string
   name: string
   objective?: string
   machine?: string
   channels: string[]
   registeredAt?: string
   identity?: SessionIdentity
+  /** ISO timestamp of the last liveness signal received for this
+   *  registration (e.g. a heartbeat). Absent when the backend doesn't
+   *  report it yet, in which case liveness is unknown rather than false. */
+  lastSeen?: string
 }
 
 /** Channel summary as surfaced by `list_channels`. */
