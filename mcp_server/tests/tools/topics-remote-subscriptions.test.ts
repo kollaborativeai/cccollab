@@ -329,7 +329,6 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
   function makeChannelDeps(): {
     deps: ChannelToolDeps
     transport: FakeRemoteTransport
-
   } {
     const session = new SessionManager({ username: 'tester', cwd: '/tmp/p' })
     session.setName('architect')

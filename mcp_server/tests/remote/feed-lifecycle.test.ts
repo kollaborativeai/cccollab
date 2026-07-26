@@ -457,9 +457,7 @@ describe('RemoteTransport feed lifecycle — the negatives', () => {
 describe('RemoteTransport channel feed — attached means genuinely attached', () => {
   /** Subscribe a channel feed WITHOUT a prior joinChannel, so the async
    *  channel-id lookup (not the cached fast path) is what has to resolve it. */
-  async function subscribeWithoutCachedId(
-    t: RemoteTransport,
-  ): Promise<{ msgs: string[] }> {
+  async function subscribeWithoutCachedId(t: RemoteTransport): Promise<{ msgs: string[] }> {
     const msgs: string[] = []
     await t.introduce({ sessionName: 'a' })
     t.subscribeChannelMessages({ channelName: 'dev' }, (m: ParsedMessage) => msgs.push(m.text))

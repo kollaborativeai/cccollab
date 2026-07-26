@@ -246,8 +246,7 @@ function makeRecordingRemoteTransport(
       boundOrg = organizationId
       if (previousSessionId === null || previousSessionId === sessionId) return
 
-      const orgChanged =
-        previousOrg !== undefined && organizationId !== undefined && previousOrg !== organizationId
+      const orgChanged = previousOrg !== undefined && organizationId !== undefined && previousOrg !== organizationId
       if (orgChanged) {
         for (const [topicId, feed] of [...topicFeeds]) {
           topicFeeds.delete(topicId)
