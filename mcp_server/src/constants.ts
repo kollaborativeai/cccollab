@@ -5,6 +5,12 @@ export const CCCOLLAB_HOME = join(homedir(), '.cccollab')
 export const CCCOLLAB_RUN_DIR = join(CCCOLLAB_HOME, 'run')
 export const CCCOLLAB_LOGS_DIR = join(CCCOLLAB_HOME, 'logs')
 
+/** Per-session subscription state, one `<sessionId>.json` per Claude Code
+ *  session, so a restarted MCP server can rejoin what it was in rather
+ *  than silently dropping the session's topic traffic (KAI-415). Chmod
+ *  600 on write. See `src/session-state.ts`. */
+export const CCCOLLAB_SESSIONS_DIR = join(CCCOLLAB_HOME, 'sessions')
+
 /**
  * Broker-side file-naming prefix. The unified config has no
  * user-facing profile concept anymore (one broker per user by default),

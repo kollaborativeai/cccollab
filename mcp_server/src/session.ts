@@ -15,6 +15,65 @@ export function sessionKey(identity: SessionIdentity | undefined): string | null
   return identity?.sessionId ?? null
 }
 
+/**
+ * Env var Claude Code exports into every MCP server it spawns, carrying
+ * the UUID of the owning Claude Code session. This is what makes KAI-415
+ * persistence zero-configuration: the session does not have to declare
+ * anything at introduce for its state to survive a restart.
+ */
+const SESSION_ID_ENV_VAR = 'CLAUDE_CODE_SESSION_ID'
+
+/**
+ * Derive the baseline identity from the process environment at startup.
+ *
+ * Only fields we genuinely have are set. In particular an unset — or
+ * blank — `CLAUDE_CODE_SESSION_ID` must yield NO `sessionId` rather than
+ * an empty string: `sessionKey` maps absent-sessionId to `null`, which
+ * is what disables persistence entirely. An empty string would instead
+ * key every un-identified session on this machine to the SAME state file
+ * and cross-contaminate them.
+ */
+export function identityFromEnv(env: NodeJS.ProcessEnv, cwd: string, pid: number): SessionIdentity | undefined {
+  const sessionId = env[SESSION_ID_ENV_VAR]?.trim()
+  return compactIdentity({
+    ...(sessionId ? { sessionId } : {}),
+    cwd,
+    pid,
+  })
+}
+
+/**
+ * Overlay a self-declared identity (KAI-401's `introduce({identity})`)
+ * onto the env-derived base.
+ *
+ * Declared fields win — that is KAI-401's contract, and a session that
+ * knows its own repo/worktree/branch knows better than we do. But a
+ * declaration is a PARTIAL statement, not a replacement: fields it never
+ * mentions fall back to the base. Without that, an
+ * `introduce({identity: {repo: 'x'}})` would erase the env-derived
+ * `sessionId` and silently switch persistence off for the rest of the
+ * session — the exact failure KAI-415 exists to prevent.
+ *
+ * Returns `undefined` when the result carries nothing, so a session that
+ * declares nothing and has no env UUID puts no `identity` key on the
+ * wire at all (preserving KAI-401's no-breaking-change guarantee).
+ */
+export function mergeIdentity(
+  base: SessionIdentity | undefined,
+  declared: SessionIdentity | undefined,
+): SessionIdentity | undefined {
+  return compactIdentity({ ...base, ...compactIdentity(declared ?? {}) })
+}
+
+/** Drop keys whose value is undefined, and collapse a fully-empty
+ *  identity to `undefined`. Spreading a partial over a base would
+ *  otherwise let an explicit `{sessionId: undefined}` erase a real base
+ *  value, since spread copies present-but-undefined keys. */
+function compactIdentity(identity: SessionIdentity): SessionIdentity | undefined {
+  const entries = Object.entries(identity).filter(([, value]) => value !== undefined)
+  return entries.length > 0 ? (Object.fromEntries(entries) as SessionIdentity) : undefined
+}
+
 interface SessionManagerOptions {
   username: string
   cwd: string

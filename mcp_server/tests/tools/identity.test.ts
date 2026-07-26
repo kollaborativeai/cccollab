@@ -608,4 +608,54 @@ describe('Identity Tools', () => {
       })
     })
   })
+
+  describe('introduce preserves the env-derived sessionId (KAI-415)', () => {
+    it('does not let a partial self-declared identity erase the env sessionId', async () => {
+      // The regression: introduce() used to bare-replace the identity. The
+      // env-derived sessionId is the key the whole persistence feature is
+      // filed under, so erasing it here silently switches restore off for
+      // the rest of the session - with no error anywhere.
+      const deps = createMockDeps()
+      deps.session.setIdentity({ sessionId: 'uuid-from-env', cwd: '/projects/x', pid: 42 })
+
+      await handleIdentityTool('introduce', { name: 'worker', identity: { repo: 'cccollab' } }, deps)
+
+      expect(deps.session.getIdentity()?.sessionId).toBe('uuid-from-env')
+      expect(deps.session.getIdentity()?.repo).toBe('cccollab')
+    })
+
+    it('still lets a session override an env-derived field it declares explicitly', async () => {
+      const deps = createMockDeps()
+      deps.session.setIdentity({ sessionId: 'uuid-from-env', cwd: '/projects/env' })
+
+      await handleIdentityTool('introduce', { name: 'worker', identity: { cwd: '/projects/declared' } }, deps)
+
+      expect(deps.session.getIdentity()?.cwd).toBe('/projects/declared')
+      expect(deps.session.getIdentity()?.sessionId).toBe('uuid-from-env')
+    })
+
+    it('sends the MERGED identity on the wire, not just the declared part', async () => {
+      const deps = createMockDeps()
+      const seen: Array<Record<string, unknown> | undefined> = []
+      const stub = {
+        source: 'local',
+        enabled: true,
+        introduce: async (args: { identity?: Record<string, unknown> }) => {
+          seen.push(args.identity)
+        },
+      }
+      deps.router = new TransportRouter([stub as unknown as Transport])
+      deps.session.setIdentity({ sessionId: 'uuid-from-env' })
+
+      await handleIdentityTool('introduce', { name: 'worker', identity: { repo: 'cccollab' } }, deps)
+
+      expect(seen[0]).toMatchObject({ sessionId: 'uuid-from-env', repo: 'cccollab' })
+    })
+
+    it('leaves identity undefined when neither env nor the caller supplies one (KAI-401 unchanged)', async () => {
+      const deps = createMockDeps()
+      await handleIdentityTool('introduce', { name: 'worker' }, deps)
+      expect(deps.session.getIdentity()).toBeUndefined()
+    })
+  })
 })

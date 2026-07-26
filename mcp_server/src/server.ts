@@ -10,7 +10,9 @@ import * as z from 'zod'
 import { CCCOLLAB_RUN_DIR } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
-import { SessionManager } from './session.js'
+import { SessionManager, identityFromEnv, sessionKey } from './session.js'
+import { loadSessionState, pruneStaleSessionStates, saveSessionState } from './session-state.js'
+import { restoreSubscriptions, snapshotSessionState } from './session-persistence.js'
 import { MessageBus } from './message-bus.js'
 import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
@@ -60,6 +62,23 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   if (resolved.config.name) session.setName(resolved.config.name)
   if (resolved.config.objective) session.setObjective(resolved.config.objective)
 
+  // Baseline identity from the environment (KAI-415). Claude Code exports
+  // the owning session's UUID into every MCP server it spawns, so we can
+  // key persistence off it here at boot — no waiting for the session to
+  // introduce itself, and nothing for it to forget to declare. `introduce`
+  // later MERGES its self-declared fields over this (see tools/identity).
+  session.setIdentity(identityFromEnv(process.env, process.cwd(), process.pid))
+  const persistKey = sessionKey(session.getIdentity())
+
+  // Read the previous life's state NOW, before anything can touch the
+  // context — because the moment the context exists, its persistence hook
+  // starts overwriting this very file. The config auto-subscribe below
+  // joins channels, which fires the hook, which would replace the saved
+  // snapshot with a config-only one BEFORE the restore ever got to read
+  // it: the session's real topics would be destroyed by its own startup.
+  // Loading up front makes the file's content immune to that ordering.
+  const savedState = persistKey === null ? null : loadSessionState(persistKey)
+
   // Build the router with only the local transport up front. Non-local
   // locations are attached via `attachLocation` below, which is the
   // same code path the `authenticate` tool hits for hot-attach. Going
@@ -67,7 +86,33 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // behaviour in lock-step.
   const localTransport: Transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([localTransport])
-  const context = new ActiveContext()
+
+  // Mirror every context mutation to disk so the next process can rebuild
+  // it (KAI-415). No key (no CLAUDE_CODE_SESSION_ID in the environment)
+  // means no hook at all: without a stable id we cannot tell this session's
+  // file apart from any other's, and guessing would cross-contaminate two
+  // sessions. Falling back to "no persistence" is exactly today's
+  // behaviour, which is the floor for this whole feature.
+  //
+  // DISARMED until startup finishes. Everything before that point (config
+  // auto-subscribe, the active-state cascade, the restore itself) mutates
+  // the context, and each mutation would otherwise write a half-built
+  // snapshot straight over the file the restore has not read yet —
+  // destroying the previous session's topics with the session's own
+  // startup. Arming last means startup reads the file and writes it
+  // exactly once, at the end, when the context is whole. This is a
+  // structural guarantee rather than a rule about statement order: nothing
+  // added to startup later can clobber the file by being written in the
+  // wrong place.
+  let persistArmed = false
+  const context = new ActiveContext(
+    persistKey === null
+      ? undefined
+      : () => {
+          if (!persistArmed) return
+          saveSessionState(snapshotSessionState(persistKey, context))
+        },
+  )
 
   // Records non-local locations whose attach FAILED (KAI-368). The router
   // holds only healthy transports; a bad remote is surfaced from here via
@@ -244,6 +289,64 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // inside the auto-subscribe loop above; if the cascade named a
   // specific topic we don't need to re-set it because joinTopic
   // already put it in the active slot.
+
+  // Rebuild what this session had joined before it restarted (KAI-415).
+  //
+  // LAST, deliberately — after both the config auto-subscribe and the
+  // config active-state cascade. Config is the declarative baseline
+  // ("these channels should always exist"); the restore is this session's
+  // own later history, so where the two disagree on what was ACTIVE, the
+  // session's real last state wins over a static default. Running it
+  // earlier would let the cascade stomp the restored active channel.
+  //
+  // Channels config already joined keep their `cccollab.json` source —
+  // they were not restored — because `context.joinChannel` leaves an
+  // existing subscription's source alone. Only genuinely-restored ones get
+  // tagged `restored`, which is what `whoami` shows.
+  //
+  // Wrapped so a failure here can never stop the server from starting: a
+  // session that boots with no restored subscriptions is today's
+  // behaviour, whereas a session that will not boot is a new outage.
+  if (persistKey !== null) {
+    try {
+      // Housekeeping first, while we hold the only reason the directory
+      // exists. Never reaps the current session's own file.
+      pruneStaleSessionStates({ now: Date.now(), keepSessionId: persistKey })
+    } catch (err) {
+      console.error(`[cccollab] Pruning old session state failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    // `savedState` was read at the top of startup, before the context (and
+    // therefore its hook) existed at all.
+    if (savedState) {
+      try {
+        const result = await restoreSubscriptions(savedState, {
+          sessionName: session.displayName,
+          context,
+          transportFor: (location) => router.all().find((t) => t.source === location),
+        })
+        console.error(
+          `[cccollab] Restored ${result.channels} channel(s) and ${result.topics} topic(s) from previous session` +
+            (result.skippedTopics > 0 ? ` (${result.skippedTopics} topic(s) no longer available)` : ''),
+        )
+      } catch (err) {
+        console.error(`[cccollab] Session restore failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    // Startup is done and the context is whole: arm persistence and take
+    // the one snapshot that startup owes. Unconditional (not just when
+    // something was restored) so a brand-new session writes its starting
+    // state too — otherwise its first restart would have nothing to read.
+    // This write is also what garbage-collects topics that no longer
+    // exist: they aren't in the context we just rebuilt, so they never get
+    // written back.
+    persistArmed = true
+    try {
+      saveSessionState(snapshotSessionState(persistKey, context))
+    } catch (err) {
+      console.error(`[cccollab] Could not persist session state: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
 
   // Lazy attach: a dormant remote (valid tokens, but neither active nor
   // channel-configured, so skipped by planStartupAttachments) is brought

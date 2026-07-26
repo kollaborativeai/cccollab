@@ -146,6 +146,20 @@ describe('ActiveContext', () => {
     })
   })
 
+  describe('clearActiveTopic', () => {
+    it('un-focuses the active topic while staying joined to it', () => {
+      ctx.joinChannel('default', 'fallback')
+      ctx.joinTopic('uuid-1', 'Auth refactor', 'default')
+      ctx.clearActiveTopic()
+      expect(ctx.hasTopic()).toBe(false)
+      // A stale name here is user-visible: getTopicName feeds whoami.
+      expect(ctx.getTopicName()).toBeUndefined()
+      // The whole point of the primitive, and all that separates it from
+      // clearTopic: the subscription survives being un-focused.
+      expect(ctx.isTopicJoined('uuid-1')).toBe(true)
+    })
+  })
+
   describe('findJoinedTopic', () => {
     it('returns match with channel in the result', () => {
       ctx.joinChannel('default', 'fallback')
@@ -201,6 +215,107 @@ describe('ActiveContext', () => {
       const topics = ctx.getJoinedTopics()
       expect(topics).toHaveLength(2)
       expect(topics.map((t) => t.channel).sort()).toEqual(['a', 'b'])
+    })
+  })
+
+  describe('onChange hook (KAI-415 persistence)', () => {
+    // The hook is what mirrors context to disk. It must fire on EVERY
+    // mutation: a mutation that forgets to fire it is a subscription that
+    // silently fails to survive a restart - the exact bug KAI-415 fixes,
+    // reintroduced one method at a time. So this suite enumerates the
+    // mutators rather than spot-checking a couple.
+    let fired: number
+    let ctx2: ActiveContext
+
+    beforeEach(() => {
+      fired = 0
+      ctx2 = new ActiveContext(() => {
+        fired++
+      })
+    })
+
+    it('fires on joinChannel', () => {
+      ctx2.joinChannel('dev', 'manual')
+      expect(fired).toBe(1)
+    })
+
+    it('fires on leaveChannel', () => {
+      ctx2.joinChannel('dev', 'manual')
+      fired = 0
+      ctx2.leaveChannel('dev')
+      expect(fired).toBe(1)
+    })
+
+    it('fires on setActiveChannel', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinChannel('ops', 'manual')
+      fired = 0
+      ctx2.setActiveChannel('ops')
+      expect(fired).toBe(1)
+    })
+
+    it('fires on joinTopic', () => {
+      ctx2.joinChannel('dev', 'manual')
+      fired = 0
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      expect(fired).toBe(1)
+    })
+
+    it('fires on leaveTopic', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      fired = 0
+      ctx2.leaveTopic('uuid-1')
+      expect(fired).toBe(1)
+    })
+
+    it('fires on clearTopic', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      fired = 0
+      ctx2.clearTopic()
+      expect(fired).toBe(1)
+    })
+
+    it('fires on clearActiveTopic', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      fired = 0
+      ctx2.clearActiveTopic()
+      expect(fired).toBe(1)
+    })
+
+    it('does not fire on reads - persisting on every whoami would be pure churn', () => {
+      ctx2.joinChannel('dev', 'manual')
+      ctx2.joinTopic('uuid-1', 'Auth', 'dev')
+      fired = 0
+      ctx2.getSubscribedChannels()
+      ctx2.getJoinedTopics()
+      ctx2.getActiveChannelRef()
+      ctx2.isTopicJoined('uuid-1')
+      ctx2.getTopicName()
+      ctx2.findJoinedTopic('Auth')
+      expect(fired).toBe(0)
+    })
+
+    it('does not fire when a mutation throws - nothing changed, nothing to persist', () => {
+      expect(() => ctx2.setActiveChannel('never-joined')).toThrow()
+      expect(fired).toBe(0)
+    })
+
+    it('works with no hook at all (the hook is optional)', () => {
+      const plain = new ActiveContext()
+      expect(() => plain.joinChannel('dev', 'manual')).not.toThrow()
+    })
+
+    it('never lets a failing hook break the operation the user asked for', () => {
+      // Persistence is a side benefit. A full disk must not make join_channel
+      // fail - the session should still work, just without a safety net.
+      const ctx3 = new ActiveContext(() => {
+        throw new Error('disk full')
+      })
+      expect(() => ctx3.joinChannel('dev', 'manual')).not.toThrow()
+      expect(ctx3.isChannelSubscribed('dev')).toBe(true)
     })
   })
 })
