@@ -51,19 +51,21 @@ async function readDm(
   return body.messages
 }
 
-/** Opens a tagged SSE stream and keeps it open, collecting every event
- *  into `events`. Returns a `close()` to tear it down. Used to assert a
- *  connection does NOT receive a message over a window. */
-function openTaggedStream(
+/** Opens an SSE stream (tagged with a sessionId, or untagged) and keeps it
+ *  open, collecting every event into `events`. Returns a `close()` to tear
+ *  it down. Used to assert a connection does NOT receive a message over a
+ *  window. */
+function openStream(
   port: number,
-  sessionId: string,
+  sessionId: string | undefined,
 ): { events: Array<Record<string, unknown>>; close: () => void } {
   const events: Array<Record<string, unknown>> = []
+  const path = sessionId ? `/events?sessionId=${encodeURIComponent(sessionId)}` : '/events'
   const req = http.get(
     {
       host: '127.0.0.1',
       port,
-      path: `/events?sessionId=${encodeURIComponent(sessionId)}`,
+      path,
       headers: { Accept: 'text/event-stream' },
     },
     (res) => {
@@ -272,7 +274,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     const name = 'dm-reuse-name'
     const idFirst = await registerSession(port, name)
     // The first registration holds an open, tagged SSE connection.
-    const stale = openTaggedStream(port, name)
+    const stale = openStream(port, name)
     // Give the connection a moment to attach at the broker.
     await new Promise<void>((r) => setTimeout(r, 100))
 
@@ -291,5 +293,33 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     await new Promise<void>((r) => setTimeout(r, 200))
     expect(stale.events.some((e) => e.type === 'dm')).toBe(false)
     stale.close()
+  })
+
+  it('never leaks a DM into the untagged /events broadcast lane (AC6)', async () => {
+    // An untagged SSE connection is what channel/topic subscribers use; a
+    // DM must reach ONLY the recipient's tagged connection. This guards
+    // against a future refactor that routes DMs through broadcast().
+    const senderName = 'dm-untagged-sender'
+    const recipientName = 'dm-untagged-recipient'
+    const recipientId = await registerSession(port, recipientName)
+    await registerSession(port, senderName)
+
+    const untagged = openStream(port, undefined)
+    // Also open the recipient's tagged stream so the DM has somewhere
+    // legitimate to land - otherwise `delivered:false` would trivially
+    // starve the leak channel.
+    const recipientTagged = openStream(port, recipientName)
+    await new Promise<void>((r) => setTimeout(r, 100))
+
+    const res = await sendDm(port, recipientId, senderName, 'private for recipient only')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { delivered: boolean }
+    expect(body.delivered).toBe(true)
+
+    await new Promise<void>((r) => setTimeout(r, 200))
+    expect(recipientTagged.events.some((e) => e.type === 'dm')).toBe(true)
+    expect(untagged.events.some((e) => e.type === 'dm')).toBe(false)
+    untagged.close()
+    recipientTagged.close()
   })
 })

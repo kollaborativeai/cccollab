@@ -33,6 +33,24 @@ describe('Topic Tools', () => {
       expect(result.error).toContain('No name set')
     })
 
+    it('returns error when session has no name and tries to send_message_to_session', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(
+        await handleTopicTool('send_message_to_session', { sessionId: 'x', text: 'Hi' }, depsNoName),
+      )
+      expect(result.error).toContain('No name set')
+    })
+
+    it('returns error when session has no name and tries to read_session_messages', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(await handleTopicTool('read_session_messages', { sessionId: 'x' }, depsNoName))
+      expect(result.error).toContain('No name set')
+    })
+
     it('allows list_topics without name', async () => {
       const deps = createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
