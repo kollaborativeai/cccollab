@@ -8,10 +8,9 @@ import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import {
   attachLocation,
-  ensureChannelSubscription,
-  ensureTopicSubscription,
-  teardownChannelSubscription,
-  teardownTopicSubscription,
+  hasBoundOrganization,
+  isLocationDeaf,
+  reconcileFeeds,
   type AttachCtx,
 } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
@@ -32,17 +31,6 @@ export interface IdentityToolDeps {
    *  that don't exercise the hot-attach path can continue to construct
    *  deps without a bus. */
   messageBus?: MessageBus
-  /** Shared map of topic-message subscription unsubscribe callbacks,
-   *  keyed by `${location}::${topicId}`. Threaded into `attachLocation`
-   *  on the hot-attach path so auto-subscribe to configured topics wires
-   *  reactive subscriptions there instead of on the next restart. */
-  remoteTopicUnsubscribes?: Map<string, () => void>
-  /** Shared map of channel-broadcast subscription unsubscribe callbacks,
-   *  keyed by `${location}::${channelName}`. Mirrors
-   *  `remoteTopicUnsubscribes` for channel-level broadcasts so bug B
-   *  (channel messages not delivered to other remote subscribers) is
-   *  covered by the same hot-attach wiring. */
-  remoteChannelUnsubscribes?: Map<string, () => void>
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -127,7 +115,19 @@ export async function handleIdentityTool(
       const orgChangedLocations = new Set<string>()
       for (const location of membershipLocations(deps)) {
         if (location === LOCAL_LOCATION) continue
-        const previousOrg = deps.session.getOrganizationFor(location)
+        // Prefer what the TRANSPORT is actually bound to over what the session
+        // merely recorded: the transport's binding is the one the backend rows —
+        // and the topic ids — actually belong to. They diverge whenever an
+        // introduce failed at one location but succeeded at another.
+        let previousOrg = deps.session.getOrganizationFor(location)
+        try {
+          const transport = deps.router.get(location)
+          if (hasBoundOrganization(transport)) {
+            previousOrg = transport.getBoundOrganizationId() ?? previousOrg
+          }
+        } catch {
+          // Not routable; fall back to the session's record.
+        }
         if (previousOrg !== undefined && organization !== undefined && previousOrg !== organization) {
           orgChangedLocations.add(location)
         }
@@ -135,43 +135,9 @@ export async function handleIdentityTool(
       const rebinds = (location: ChannelLocation): boolean => renamed || orgChangedLocations.has(location)
       const migrating = renamed || orgChangedLocations.size > 0
 
-      // The third trigger: a location that still holds membership but has NO
-      // live subscription. That is the fingerprint of an EARLIER migration that
-      // failed half-way (its feeds were torn down, its introduce then threw, so
-      // it was excluded from the restore). Without this, the natural fix — the
-      // agent retrying under the SAME name — leaves `renamed` false and nothing
-      // marks the location as needing work: the ungated channel re-join
-      // recreates backend membership while no subscription is ever
-      // re-registered, and the tool reports a clean success. The session would
-      // be permanently deaf and told it was fine.
-      //
-      // Computed BEFORE the teardown below, so it sees the breakage left by the
-      // EARLIER attempt rather than the one we are about to create.
-      const availableSubs = remoteSubscriptionDeps(deps)
-      const staleLocations = staleSubscriptionLocations(deps, availableSubs)
-
-      // A location needs its feeds restored if it rebinds (rename / org change)
-      // or if it is stale from a previous failure.
-      const restoresAt = (location: ChannelLocation): boolean => rebinds(location) || staleLocations.has(location)
-      const restoring = migrating || staleLocations.size > 0
-      const subs = restoring ? availableSubs : undefined
-
-      // Teardown and the old-identity leave are gated on `migrating` ALONE: a
-      // heal has nothing to tear down and no previous identity to leave.
+      // The old-identity leave is gated on `migrating` ALONE: a heal has no
+      // previous identity to leave.
       if (migrating) {
-        // Drop the remote reactive subscriptions BEFORE the membership
-        // rows they are gated on disappear. A live Convex `onUpdate` keeps
-        // the sessionId it was registered with in its query args forever,
-        // and the backend's listByTopic ASSERTS channel presence for that
-        // id (ConvexError) while listByChannel returns []. Left running
-        // across the leaves below, the topic subscription would therefore
-        // start erroring - and `registerSubscriptionFailure` disables the
-        // whole transport after three errors in a minute. No messages are
-        // lost across this window: the transport keeps its own high-water
-        // marks, so the re-subscription below re-requests everything with
-        // a ts above what we last delivered.
-        if (subs) teardownRemoteSubscriptions(deps, subs, rebinds)
-
         // Ordering is load-bearing. RemoteTransport ignores `sessionName`
         // and addresses the backend by its bound session row, which the
         // introduce() fan-out below rebinds to the new name/org - so the old
@@ -180,9 +146,13 @@ export async function handleIdentityTool(
         // by `sessionName`, so both transports drop exactly the old identity's
         // memberships. We deliberately do not delete the old session itself:
         // the bootstrap name is shared across the user's concurrently-booting
-        // sessions. Only locations that actually REBIND are torn down — a
-        // location that neither renamed nor changed org keeps its memberships
-        // and its live subscriptions.
+        // sessions. Only locations that actually REBIND are left — a location
+        // that neither renamed nor changed org keeps its memberships.
+        //
+        // Nothing here touches subscriptions: `RemoteTransport.leaveTopic` /
+        // `leaveChannel` suspend their own feeds before issuing the mutation
+        // that would invalidate them, and the re-joins below re-attach them
+        // under the new session row (KAI-418).
         await leaveUnderPreviousName(deps, previousName, rebinds)
       }
 
@@ -222,8 +192,7 @@ export async function handleIdentityTool(
       // A location the session holds membership at but which is NOT in
       // `router.enabled()` (it self-disabled earlier, or never attached) is
       // never even offered an introduce, so it lands in neither `introduced`
-      // nor `failed`. Yet its subscriptions were torn down above (teardown
-      // walks the CONTEXT, not the router) and cannot be restored, and its
+      // nor `failed`. Yet its feeds cannot be restored and its
       // old-name memberships cannot be left (`router.get` throws). We
       // genuinely cannot migrate it and the ghost persists there — so it is
       // degraded too. Reporting a bare success here would be a lie.
@@ -254,28 +223,41 @@ export async function handleIdentityTool(
       // `registerSubscriptionFailure` counts - three of them disable the whole
       // transport). So a foreign-org topic is DROPPED - and reported, never
       // silently discarded.
+      //
+      // The restore set is computed HERE, after the fan-out — never before it.
+      // `introduce` is what suspends the feeds (it rebinds the session row out
+      // from under them), so a snapshot taken earlier structurally cannot see the
+      // breakage this very call just caused. It also catches deafness NO rebind
+      // explains: a transport swapped in place (authenticate) starts with an
+      // empty registry, so the memberships the user joined at runtime have no
+      // feed at all — invisible to `renamed`/`orgChanged`, and invisible to any
+      // check that only looks for SUSPENDED entries.
+      const deafNow = deafLocations(deps)
+      const restoresAt = (location: ChannelLocation): boolean => rebinds(location) || deafNow.has(location)
+
       const droppedTopics: Array<{ topic: string; channel: string; location: ChannelLocation }> = []
-      if (restoring) {
+      {
         for (const topic of deps.context.getJoinedTopics()) {
           if (!introduced.has(topic.location)) continue
-          // Untouched and still subscribed ⇒ nothing to redo.
+          // Untouched and still hearing ⇒ nothing to redo.
           if (!restoresAt(topic.location)) continue
 
           if (orgChangedLocations.has(topic.location)) {
             droppedTopics.push({ topic: topic.topicName, channel: topic.channel, location: topic.location })
-            // Drop from ActiveContext BEFORE `resubscribeRemote`, so its
-            // `getJoinedTopics()` walk skips it naturally and the subscription
-            // torn down above stays down.
+            // Only the ActiveContext bookkeeping is ours to drop: the transport
+            // discarded this topic's feed itself when its introduce rebound the
+            // session into a different org (the topic id belongs to the old one).
             deps.context.leaveTopic(topic.threadTs)
             continue
           }
 
-          // Same org — either renamed, or healing a torn-down feed. Re-join what
-          // was dropped, or the session stays evicted from its own topics.
-          // Strictly after the channel loop - the broker rejects a topic join
-          // from a session that isn't in the topic's channel. The returned
-          // history is discarded rather than re-emitted as fresh messages: we
-          // already have it.
+          // Same org — either renamed, or healing a feed the transport suspended.
+          // Re-join, or the session stays evicted from its own topics. Strictly
+          // after the channel loop: the broker rejects a topic join from a
+          // session that isn't in the topic's channel, and the transport only
+          // re-attaches a suspended feed once its join has SUCCEEDED. The
+          // returned history is discarded rather than re-emitted as fresh
+          // messages: we already have it.
           try {
             const transport = deps.router.get(topic.location)
             await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
@@ -283,21 +265,29 @@ export async function handleIdentityTool(
             // Non-fatal.
           }
         }
-
-        // Re-subscribe last: the reactive queries bind the transport's
-        // CURRENT sessionId into their args, so they must be registered
-        // after introduce() rebound it, and after the re-joins recreated
-        // the membership rows those same queries are gated on. On an
-        // org-changed location the channel subscription re-registers against
-        // the NEW channelId that the joinChannel above just cached.
-        if (subs) resubscribeRemote(deps, subs, introduced)
       }
 
-      // Truthfulness: re-check the same invariant AFTER the restore attempt. A
-      // non-local location that still holds membership with no live
-      // subscription is still deaf — we must never again hand back a clean
-      // success while the session cannot hear.
-      for (const location of staleSubscriptionLocations(deps, availableSubs)) {
+      // Re-join alone only RESTORES feeds the transport still has an entry for.
+      // A membership with no entry at all (the swapped-transport case) needs the
+      // feed CREATED — and only this layer can, because only it holds the
+      // MessageBus callback. Idempotent, so a live feed is left untouched.
+      if (deps.messageBus !== undefined) {
+        const bus = deps.messageBus
+        for (const location of introduced) {
+          if (location === LOCAL_LOCATION) continue
+          try {
+            reconcileFeeds({ transport: deps.router.get(location), location, context: deps.context, messageBus: bus })
+          } catch {
+            // Non-fatal: the deafness re-check below still reports it.
+          }
+        }
+      }
+
+      // Truthfulness: ask the transports AGAIN, after the re-joins and the
+      // reconcile. Any location still holding a membership it cannot hear on is
+      // still deaf — we must never hand back a clean success while the session
+      // cannot hear.
+      for (const location of deafLocations(deps)) {
         if (!failed.includes(location)) failed.push(location)
       }
 
@@ -369,141 +359,44 @@ function membershipLocations(deps: IdentityToolDeps): Set<string> {
 }
 
 /**
- * Locations that hold a membership with NO live reactive subscription behind
- * it — i.e. the session is deaf there. That is the fingerprint of a migration
- * that failed half-way: the feeds were torn down, the introduce then threw, and
- * the restore was skipped. Detecting it is what lets a plain same-name retry
- * HEAL the session instead of silently confirming the deafness.
+ * Locations where the transport is holding a SUSPENDED feed — i.e. it has a
+ * membership it cannot currently deliver on, so the session is deaf there.
  *
- * The expected keys mirror `attach.ts`: `${location}::${channelName}` and
- * `${location}::${topicId}`.
+ * A feed is suspended when the identity or membership behind it went away and
+ * the join that would restore it has not happened (or failed). That is exactly
+ * the fingerprint of a half-failed migration, and detecting it is what lets a
+ * plain same-name retry HEAL the session instead of silently confirming the
+ * deafness.
  *
- * LOCAL is NEVER stale. The broker delivers over one shared SSE stream and
- * holds no per-channel/per-topic subscription entries at all, so every local
- * location would look permanently "missing" and we would churn a pointless
- * re-join on every single introduce.
+ * We ASK THE TRANSPORT, which owns its feeds, driven off the MEMBERSHIPS the
+ * context holds — never off the transport's registry. A registry-driven "is
+ * anything suspended?" question only sees deafness that has an ENTRY; it is
+ * blind to a membership with no feed at all, which is exactly what a
+ * replace-in-place transport swap leaves behind. See `isLocationDeaf`.
  *
- * Returns empty when the caller has no subscription maps (legacy deps that
- * never wired the hot-attach plumbing): with nothing to inspect we cannot
- * conclude anything is stale.
+ * The tool used to keep a parallel copy of this in a pair of `${location}::${key}`
+ * maps and peek at those — and a case mismatch in exactly that key is what made a
+ * channel look permanently un-subscribed (KAI-418). There is no parallel copy to
+ * drift any more.
+ *
+ * The local broker has no per-feed subscriptions (it delivers over one shared
+ * SSE stream), so it exposes no registry and the type guard skips it — it can
+ * never be reported deaf.
  */
-function staleSubscriptionLocations(
-  deps: IdentityToolDeps,
-  subs: RemoteSubscriptionDeps | undefined,
-): Set<ChannelLocation> {
-  const stale = new Set<ChannelLocation>()
-  if (subs === undefined) return stale
-  for (const ch of deps.context.getSubscribedChannels()) {
-    if (ch.location === LOCAL_LOCATION) continue
-    if (!subs.channelMap.has(`${ch.location}::${ch.name}`)) stale.add(ch.location)
-  }
-  for (const topic of deps.context.getJoinedTopics()) {
-    if (topic.location === LOCAL_LOCATION) continue
-    if (!subs.topicMap.has(`${topic.location}::${topic.threadTs}`)) stale.add(topic.location)
-  }
-  return stale
-}
-
-/** The subset of deps needed to move the remote reactive subscriptions
- *  over to a new identity. All three are optional on `IdentityToolDeps`
- *  (the hot-attach path threads them; legacy unit tests don't), so this
- *  narrows them together or not at all. */
-interface RemoteSubscriptionDeps {
-  messageBus: MessageBus
-  topicMap: Map<string, () => void>
-  channelMap: Map<string, () => void>
-}
-
-function remoteSubscriptionDeps(deps: IdentityToolDeps): RemoteSubscriptionDeps | undefined {
-  const { messageBus, remoteTopicUnsubscribes, remoteChannelUnsubscribes } = deps
-  if (messageBus === undefined || remoteTopicUnsubscribes === undefined || remoteChannelUnsubscribes === undefined) {
-    return undefined
-  }
-  return { messageBus, topicMap: remoteTopicUnsubscribes, channelMap: remoteChannelUnsubscribes }
-}
-
-/**
- * Drop the remote reactive subscriptions held under the outgoing identity.
- * A Convex `onUpdate` freezes the sessionId it was registered with into its
- * query args, so these MUST come down before the old identity's membership
- * rows do - the backend gates both feeds on exactly those rows.
- *
- * No-ops for the local broker: its topic/channel messages arrive over the
- * shared SSE stream, and `ensure*` / `teardown*` type-guard that away.
- */
-function teardownRemoteSubscriptions(
-  deps: IdentityToolDeps,
-  subs: RemoteSubscriptionDeps,
-  rebinds: (location: ChannelLocation) => boolean,
-): void {
-  for (const topic of deps.context.getJoinedTopics()) {
-    if (!rebinds(topic.location)) continue
+function deafLocations(deps: IdentityToolDeps): Set<ChannelLocation> {
+  const deaf = new Set<ChannelLocation>()
+  for (const location of membershipLocations(deps)) {
+    let transport: Transport
     try {
-      teardownTopicSubscription({ locationName: topic.location, topicId: topic.threadTs, map: subs.topicMap })
+      transport = deps.router.get(location)
     } catch {
-      // Non-fatal.
+      // Not routable (degraded / unconfigured). Handled by the `failed`
+      // accounting in `introduce`, not here.
+      continue
     }
+    if (isLocationDeaf({ transport, location, context: deps.context })) deaf.add(location)
   }
-  for (const ch of deps.context.getSubscribedChannels()) {
-    if (!rebinds(ch.location)) continue
-    try {
-      teardownChannelSubscription({ locationName: ch.location, channelName: ch.name, map: subs.channelMap })
-    } catch {
-      // Non-fatal.
-    }
-  }
-}
-
-/**
- * Re-register the remote reactive subscriptions so their query args carry
- * the NEW sessionId. Callable only after the introduce fan-out and the
- * re-joins: the args are bound at subscribe time and the queries are
- * membership-gated.
- *
- * Deliberately passes no `sinceTs`. The `RemoteTransport` instance outlives
- * the rename and keeps its own per-topic / per-channel high-water marks, so
- * each subscribe re-primes its own cursor and neither replays history nor
- * drops what arrived during the swap. That matters most on the channel feed:
- * the backend's fallback read cursor is keyed by session NAME, so the newly
- * named session has none, and a subscribe without an explicit `sinceTs`
- * would dump the channel's entire broadcast backlog into the agent.
- */
-function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps, introduced: Set<string>): void {
-  for (const ch of deps.context.getSubscribedChannels()) {
-    // A subscription binds the transport's CURRENT session id; a location
-    // whose introduce did not rebind would subscribe under the stale id and
-    // immediately fail its membership gate, so skip it (see the fan-out).
-    if (!introduced.has(ch.location)) continue
-    try {
-      ensureChannelSubscription({
-        transport: deps.router.get(ch.location),
-        locationName: ch.location,
-        channelName: ch.name,
-        messageBus: subs.messageBus,
-        map: subs.channelMap,
-      })
-    } catch (err) {
-      // Non-fatal, but observable: a throw here (e.g. a degraded location)
-      // leaves the session deaf on this channel with nothing to retry it.
-      logMigrationWarning(`re-subscribe channel "${ch.name}" (${ch.location})`, err)
-    }
-  }
-  for (const topic of deps.context.getJoinedTopics()) {
-    if (!introduced.has(topic.location)) continue
-    try {
-      ensureTopicSubscription({
-        transport: deps.router.get(topic.location),
-        locationName: topic.location,
-        topicId: topic.threadTs,
-        channelName: topic.channel,
-        messageBus: subs.messageBus,
-        map: subs.topicMap,
-      })
-    } catch (err) {
-      // Non-fatal, but observable: see re-subscribe channel above.
-      logMigrationWarning(`re-subscribe topic "${topic.threadTs}" (${topic.location})`, err)
-    }
-  }
+  return deaf
 }
 
 /**
@@ -753,8 +646,6 @@ async function handleAuthenticate(
     // this map on the replace-in-place prefix sweep, so a local map is
     // safe: its lifetime is bounded by the call, and no other code path
     // expects entries to persist across calls in that test scenario.
-    remoteTopicUnsubscribes: deps.remoteTopicUnsubscribes ?? new Map<string, () => void>(),
-    remoteChannelUnsubscribes: deps.remoteChannelUnsubscribes ?? new Map<string, () => void>(),
     resolved: {
       locations: refreshed.locations,
       activeLocation: refreshed.active.activeLocation,

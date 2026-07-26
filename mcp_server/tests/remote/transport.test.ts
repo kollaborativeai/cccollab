@@ -170,7 +170,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const delivered: Array<{ ts: string; text: string }> = []
     const onEvent = (msg: { ts: string; text: string }) => delivered.push(msg)
 
-    const unsub1 = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
     // Simulate Convex delivering two messages.
     callbacks[0]!([
       { _id: 'msg_1', fromSessionId: 'alice', text: 'first', ts: 1_700_000_100_000 },
@@ -179,7 +179,7 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     expect(delivered).toHaveLength(2)
     expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1' })
 
-    unsub1()
+    transport.forgetTopicFeed('t1')
 
     // Resubscribe: sinceTs must be the highest ts seen so far.
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
@@ -785,14 +785,14 @@ describe('RemoteTransport re-subscription after a re-introduce', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     await transport.introduce({ sessionName: 'bootstrap' })
-    const unsubscribe = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
     expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1', sessionId: 'session_bootstrap' })
 
     // Deliver a message so the transport's own high-water mark advances.
     callbacks[0]!([{ _id: 'm1', fromSessionId: 'session_alice', text: 'hi', ts: 1_700_000_200_000 }])
 
     // The rename: tear the old subscription down, re-introduce, re-subscribe.
-    unsubscribe()
+    transport.forgetTopicFeed('t1')
     await transport.introduce({ sessionName: 'kai-408' })
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
 
@@ -819,53 +819,15 @@ describe('RemoteTransport re-subscription after a re-introduce', () => {
  * Mirrors `joinTopic`, which never clobbers `topicMaxTs`.
  */
 describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
-  it('seeds channelMaxTs on the first join but preserves it on a re-join', async () => {
-    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
-    let joinCount = 0
-    const stub = {
-      query: vi.fn(async () => undefined),
-      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
-        if ('sessionName' in args) return 'session_1'
-        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
-          // First join reports latestTs=100; a later re-join reports 500 as
-          // if peer traffic landed in between.
-          joinCount += 1
-          return { channelId: 'chan_dev', latestTs: joinCount === 1 ? 100 : 500 }
-        }
-        return undefined
-      }),
-      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
-        onUpdateCalls.push({ args })
-        callbacks.push(cb)
-        return () => {}
-      }),
-      setAuth: vi.fn(),
-    }
-    const callbacks: Array<(rows: unknown) => void> = []
-    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
-
-    await transport.introduce({ sessionName: 'bootstrap' })
-    await transport.joinChannel({ sessionName: 'bootstrap', channel: 'dev' })
-    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
-    // First subscribe resumes past the seeded cursor.
-    expect(onUpdateCalls[0]!.args).toMatchObject({ sinceTs: 100 })
-
-    // DELIVER a broadcast at ts=300 — strictly greater than the seed — so the
-    // delivered high-water mark ADVANCES to 300. Using a value greater than
-    // the seed (not equal to it) is what makes this pin the delivery-side
-    // cursor advance, not merely the join seed.
-    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
-
-    // The migration re-joins (peer traffic pushed the channel's latestTs to
-    // 500) and re-subscribes. The re-subscribe must resume from the PRESERVED
-    // delivered cursor (300) — neither reset to the seed (100) nor bumped to
-    // the re-join's latestTs (500) — otherwise messages in (300, 500] are lost.
-    await transport.joinChannel({ sessionName: 'kai-408', channel: 'dev' })
-    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
-
-    expect(onUpdateCalls).toHaveLength(2)
-    expect(onUpdateCalls[1]!.args).toMatchObject({ sinceTs: 300 })
-  })
+  // The "seeds on the first join, preserves on a re-join" rule (seed 100,
+  // deliver 300, re-join reports 500, resume at 300) now lives in
+  // tests/remote/feed-lifecycle.test.ts — 'preserves the delivery cursor across
+  // a suspend/restore'. Same numbers, same assertions, but driven through the
+  // real seam (rebind ⇒ suspend, joinChannel ⇒ restore) instead of the manual
+  // double-subscribe it used to use: the feed registry is idempotent now, so a
+  // second subscribeChannelMessages for the same channel is a no-op and the old
+  // mechanism can no longer be expressed. The behaviour is not weakened, only
+  // re-homed to the layer that now owns it.
 
   /**
    * The other half of that rule. Seeding `channelMaxTs` only when absent is what
@@ -901,13 +863,12 @@ describe('RemoteTransport.joinChannel cursor preservation on re-join', () => {
 
     await transport.introduce({ sessionName: 'me' })
     await transport.joinChannel({ sessionName: 'me', channel: 'dev' })
-    const unsub = transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
     // Deliver a broadcast so the delivered cursor advances to 300.
     callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hi', ts: 300 }])
 
-    // Deliberate leave_channel: drop the subscription AND forget the cursor.
-    unsub()
-    transport.forgetChannelCursor('dev')
+    // Deliberate leave_channel: drops the feed AND forgets the cursor (one call).
+    transport.forgetChannelFeed('dev')
 
     // A large backlog accrues while the session is away.
     joinLatestTs = 99_999
@@ -956,6 +917,201 @@ describe('RemoteTransport.introduce failure preserves the previously bound sessi
 
     // Still bound to the OLD row — NOT null, NOT the new name.
     expect((transport as unknown as { sessionId: string | null }).sessionId).toBe('session_1')
+  })
+})
+
+/**
+ * A restore must never re-attach OVER a feed that is still mid-attach.
+ *
+ * Liveness tracks ATTACHMENT (`attached`), not the handle, so `attached === false`
+ * conflates two states: properly SUSPENDED (`inner === null`, old closure already
+ * cancelled — safe to re-attach) and REGISTERED-BUT-NEVER-ATTACHED (`inner` is the
+ * outer closure and its async channel-id lookup is still IN FLIGHT — not safe).
+ *
+ * In the second case `attachChannelFeed` overwrites `feed.inner` with a fresh
+ * closure and never invokes the old one, so the old closure's `unsubscribed` stays
+ * false. When the in-flight lookup lands, its `register()` fires and creates a
+ * SECOND onUpdate on the same channel: every broadcast is delivered twice, and the
+ * orphan is unreachable — `feed.inner` points at the new closure, so no detach,
+ * suspend, rebind or shutdown can ever kill it.
+ *
+ * Ordinary, not exotic: `reconcileFeeds` runs against a swapped-in transport whose
+ * `channelIdsByName` is EMPTY, so every runtime-joined channel takes the async
+ * lookup — and a `joinChannel` landing while that lookup is in flight is just two
+ * overlapping round-trips.
+ */
+describe('RemoteTransport channel-feed restore during a pending attach', () => {
+  it('does not leave a second, unreachable onUpdate behind when the lookup lands after a restore', async () => {
+    const onUpdateArgs: Array<Record<string, unknown>> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    let releaseLookup: (rows: Array<{ channelId: string; name: string }>) => void = () => {}
+    const lookup = new Promise<Array<{ channelId: string; name: string }>>((resolve) => {
+      releaseLookup = resolve
+    })
+
+    // `introduce` issues a best-effort topic preload query first; only the
+    // SUBSEQUENT query is the channel-id lookup we want to hang.
+    let queryCalls = 0
+    const stub = {
+      query: vi.fn(async () => {
+        queryCalls += 1
+        if (queryCalls === 1) return [] // introduce's topic preload
+        return await lookup // channels.listAll — hangs until released
+      }),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 100 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateArgs.push(args)
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+      close: vi.fn(async () => {}),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    // Subscribe with NO cached channel id ⇒ the async listAll lookup is now
+    // in flight, and the feed is registered-but-not-yet-attached.
+    const delivered: string[] = []
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) => delivered.push(msg.text))
+    expect(onUpdateArgs).toHaveLength(0)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+
+    // joinChannel caches the id and restores the feed ⇒ onUpdate #1.
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    expect(onUpdateArgs).toHaveLength(1)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(true)
+
+    // Now the original lookup finally lands. Its register() must NOT fire.
+    releaseLookup([{ channelId: 'chan_dev', name: 'dev' }])
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Guard the stub's own premise: exactly two queries ran (introduce's
+    // preload, then the channel-id lookup). If `introduce` ever stops issuing
+    // the preload, the call-count dispatch above would silently hand the
+    // hanging promise to the wrong caller — fail loudly here instead.
+    expect(queryCalls).toBe(2)
+
+    // EXACTLY ONE live onUpdate for this channel.
+    expect(onUpdateArgs).toHaveLength(1)
+    expect(callbacks).toHaveLength(1)
+
+    // And therefore a broadcast is delivered exactly once, not twice.
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'peer', text: 'hello', ts: 200 }])
+    expect(delivered).toEqual(['hello'])
+  })
+})
+
+/**
+ * A restore must not re-attach a feed onto a transport that degraded WHILE the
+ * join was in flight.
+ *
+ * `joinChannel` / `joinTopic` guard `enabled` on entry, so the already-degraded
+ * case never reaches a restore. The reachable window is degradation DURING the
+ * mutation's await: the join succeeds, the transport self-disables underneath
+ * it, and the restore then runs. Without the guard it would attach a fresh
+ * onUpdate to a transport that has explicitly given up — which is the whole
+ * point of graceful degradation.
+ */
+describe('RemoteTransport feed restore on a transport that degraded mid-join', () => {
+  function makeStub(): {
+    stub: Record<string, unknown>
+    onUpdateCount: () => number
+    degrade: () => void
+    setMutationHook: (fn: () => void) => void
+  } {
+    const errorCallbacks: Array<(err: unknown) => void> = []
+    let onUpdates = 0
+    let hook: () => void = () => {}
+    const stub = {
+      query: vi.fn(async () => []),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        hook() // fires while the join is still awaiting
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 100 }
+        }
+        if ('topicId' in args && 'sessionId' in args && !('text' in args)) {
+          return { channel: 'dev', history: [] }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn(
+        (_q: unknown, _args: Record<string, unknown>, _cb: (rows: unknown) => void, onErr: (e: unknown) => void) => {
+          onUpdates += 1
+          errorCallbacks.push(onErr)
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+      close: vi.fn(async () => {}),
+    }
+    // Schema drift trips degradation on the FIRST error — the transport's own
+    // documented "give up now" signal.
+    const drift = new Error('Could not find function listByChannel on deployment')
+    drift.name = 'FunctionNotFoundError'
+    return {
+      stub,
+      onUpdateCount: () => onUpdates,
+      degrade: () => errorCallbacks.forEach((cb) => cb(drift)),
+      setMutationHook: (fn) => {
+        hook = fn
+      },
+    }
+  }
+
+  it('does not re-attach a channel feed when the transport degrades during joinChannel', async () => {
+    const { stub, onUpdateCount, degrade, setMutationHook } = makeStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(onUpdateCount()).toBe(1)
+
+    // Suspend the feed, then degrade the transport mid-rejoin. The feed must be
+    // SUSPENDED (still in the registry), not forgotten — otherwise the restore
+    // would bail on `feed === undefined` and this test would pass without ever
+    // exercising the guard it exists to pin.
+    await transport.leaveChannel({ sessionName: 'laptop', channel: 'dev' })
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+    expect(transport.suspendedFeeds().channels).toContain('dev')
+    setMutationHook(degrade)
+
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+
+    expect(transport.enabled).toBe(false)
+    // No new onUpdate: the degraded transport must not resurrect the feed.
+    expect(onUpdateCount()).toBe(1)
+    expect(transport.hasLiveChannelFeed('dev')).toBe(false)
+  })
+
+  it('does not re-attach a topic feed when the transport degrades during joinTopic', async () => {
+    const { stub, onUpdateCount, degrade, setMutationHook } = makeStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(onUpdateCount()).toBe(1)
+
+    // Suspended, not forgotten — see the channel test above.
+    await transport.leaveTopic({ sessionName: 'laptop', topicId: 't1' })
+    expect(transport.hasLiveTopicFeed('t1')).toBe(false)
+    expect(transport.suspendedFeeds().topics).toContain('t1')
+    setMutationHook(degrade)
+
+    await transport.joinTopic({ sessionName: 'laptop', topicId: 't1' })
+
+    expect(transport.enabled).toBe(false)
+    expect(onUpdateCount()).toBe(1)
+    expect(transport.hasLiveTopicFeed('t1')).toBe(false)
   })
 })
 

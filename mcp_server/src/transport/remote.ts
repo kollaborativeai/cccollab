@@ -3,6 +3,7 @@ import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
 import type { ParsedMessage } from '../types.js'
+import { normalizeChannelName } from '../context.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
@@ -184,6 +185,50 @@ function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): Functio
 }
 
 /**
+ * A reactive feed the transport owns.
+ *
+ * `inner` is the detach fn for the live Convex `onUpdate`, or null while
+ * suspended. `attached` is the ONLY thing that means "we can actually hear on
+ * this feed": a channel feed's `onUpdate` may be registered asynchronously
+ * (after a `listAll` id lookup), so `inner` is non-null the instant we subscribe
+ * while the real subscription may never attach at all — if the lookup throws or
+ * matches nothing, `register()` never runs. Treating a non-null `inner` as
+ * healthy is how a silently deaf feed passes for a live one.
+ */
+interface FeedState {
+  onEvent: (msg: ParsedMessage) => void
+  inner: (() => void) | null
+  /** True only once the inner `onUpdate` has ACTUALLY been registered. */
+  attached: boolean
+}
+
+interface TopicFeed extends FeedState {
+  /** Normalized name of the channel this topic lives in. The backend's
+   *  `listByTopic` asserts CHANNEL presence, so leaving the channel must
+   *  suspend this feed too. */
+  channelName: string
+}
+
+type ChannelFeed = FeedState
+
+/**
+ * Canonical key for anything addressed by channel NAME.
+ *
+ * Channel names are case-insensitive end to end (the backend resolves a channel
+ * by name within the org, and the `listAll` fallback already matches
+ * case-insensitively). Keying the feed registry, the id cache and the cursors
+ * on the raw string is what let a `Dev` / `dev` mismatch make a channel look
+ * permanently un-subscribed and stack a duplicate feed on every re-introduce.
+ * Normalizing at the single point of entry removes that class outright.
+ *
+ * This is `normalizeChannelName` from the context layer, imported rather than
+ * re-implemented: the invariant "transport key == context key" is what keeps the
+ * duplicate-feed bug dead, and two private copies of `trim().toLowerCase()` are
+ * exactly how it would come back.
+ */
+const channelKey = normalizeChannelName
+
+/**
  * Degradation policy: flip the `enabled` switch when three operations
  * fail within this window, or immediately on any "function not found"
  * error (schema drift). Short window so a transient blip recovers fast
@@ -273,7 +318,6 @@ export class RemoteTransport implements Transport {
    *  flight when the websocket disappears. Unsubscribes handed out to
    *  `server.ts`'s shared list are ALSO tracked here so a `shutdown()`
    *  call is sufficient even if the caller forgets the external list. */
-  private readonly trackedUnsubscribes = new Set<() => void>()
 
   /** Topic ids we've seen from the remote backend (via listJoinedForUser
    *  at startup, plus any we subsequently joined/created). Used by
@@ -301,6 +345,26 @@ export class RemoteTransport implements Transport {
    *  reactive `listByChannel` query's `sinceTs` so the initial batch
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
+
+  /** The organization this transport's session row is currently bound to.
+   *  Tracked so `introduce` can tell an org CHANGE (which invalidates every
+   *  topic id we hold) from a plain rename. */
+  private boundOrganizationId: string | undefined
+
+  /**
+   * The live feeds this transport owns, keyed by topic id / normalized channel
+   * name. `inner` is the live Convex `onUpdate` unsubscribe, or null when the
+   * feed is SUSPENDED — registered but detached, because the identity or
+   * membership its query args are bound to is momentarily invalid.
+   *
+   * This registry is the whole point of KAI-418: the transport, not the tool
+   * layer, keeps its feeds in sync with its own state (sessionId, channel ids,
+   * cursors). Anything that invalidates a feed suspends it; the join that makes
+   * it valid again restores it. A caller cannot forget to do that, because a
+   * caller is never asked to.
+   */
+  private readonly topicFeeds = new Map<string, TopicFeed>()
+  private readonly channelFeeds = new Map<string, ChannelFeed>()
 
   /** Handle for the periodic `updateLastSeen` ping started once `introduce`
    *  sets `sessionId`. Cleared on `shutdown`. */
@@ -374,6 +438,8 @@ export class RemoteTransport implements Transport {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
+    const previousSessionId = this.sessionId
+    const previousOrganizationId = this.boundOrganizationId
     try {
       const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
         sessionName: args.sessionName,
@@ -381,6 +447,42 @@ export class RemoteTransport implements Transport {
         organizationId: args.organizationId,
       })) as string
       this.sessionId = id
+      this.boundOrganizationId = args.organizationId
+
+      // The session row REBOUND: every live feed's query args froze the old id,
+      // and the backend gates those queries on that id's membership rows. Left
+      // running they would deliver nothing at best and throw at worst — so they
+      // are suspended here and re-attached by the join* that makes them valid
+      // again. We do NOT re-subscribe here: at this moment the memberships have
+      // been left and not yet re-joined, so a feed registered now would be
+      // gated out. An introduce that does NOT move the session row (same name,
+      // same org — the idempotent case) suspends nothing and churns nothing.
+      if (previousSessionId !== null && previousSessionId !== id) {
+        const orgChanged =
+          previousOrganizationId !== undefined &&
+          args.organizationId !== undefined &&
+          previousOrganizationId !== args.organizationId
+
+        if (orgChanged) {
+          // Every topic id we hold belongs to the OLD org: meaningless in the
+          // new one, and re-subscribing it would trip the backend's org
+          // assertion. Drop those feeds outright rather than suspend them —
+          // suspending would leave them pretending forever that the session is
+          // deaf on topics that no longer exist for it. Channel feeds only
+          // suspend: a channel is addressed by NAME and re-resolves in the new
+          // org on the next joinChannel.
+          for (const [topicId, feed] of [...this.topicFeeds]) {
+            this.topicFeeds.delete(topicId)
+            this.detach(feed)
+          }
+          // The cached ids belong to the old org too.
+          this.channelIdsByName.clear()
+        } else {
+          for (const topicId of this.topicFeeds.keys()) this.suspendTopicFeed(topicId)
+        }
+        for (const feed of this.channelFeeds.values()) this.detach(feed)
+      }
+
       this.startHeartbeat()
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
@@ -461,7 +563,7 @@ export class RemoteTransport implements Transport {
         channel: args.channel,
       })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
-        this.channelIdsByName.set(args.channel, res.channelId)
+        this.channelIdsByName.set(channelKey(args.channel), res.channelId)
         // Seed the per-channel cursor ONLY on the first-ever join, to skip
         // pre-join history. A re-join (the identity migration re-joins the
         // channel mid-rename) must NOT touch an existing cursor: the value
@@ -474,6 +576,12 @@ export class RemoteTransport implements Transport {
           this.channelMaxTs.set(res.channelId, res.latestTs)
         }
       }
+      // The membership row the channel feed's query is gated on now exists, so
+      // a feed suspended by a leave or a rebind can go live again — under the
+      // CURRENT sessionId and the preserved cursor. Only AFTER a successful
+      // join, never before. Topic feeds are NOT restored here: their topic
+      // membership may not be back yet; `joinTopic` restores those.
+      this.restoreChannelFeed(args.channel)
       return { subscriberCount: 0 }
     } catch (err) {
       this.registerFailure('joinChannel', err)
@@ -484,6 +592,11 @@ export class RemoteTransport implements Transport {
   async leaveChannel(args: { sessionName: string; channel: string }): Promise<void> {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
+    // Suspend BEFORE the mutation: the instant channel membership goes, a live
+    // listByChannel returns nothing and a live listByTopic inside that channel
+    // THROWS (it asserts channel presence) — and three such failures disable
+    // the whole transport. This also sweeps the topic feeds in the channel.
+    this.suspendChannelFeed(args.channel)
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.leave), {
         sessionId: this.sessionId,
@@ -537,6 +650,14 @@ export class RemoteTransport implements Transport {
       this.registerFailure('listOrganizations', err)
       return []
     }
+  }
+
+  /** The org id this transport's session row is bound to, as far as we can
+   *  actually know it: the one the last successful `introduce` carried.
+   *  (The backend's `getSessionContext` returns only the org NAME, so there is
+   *  no way to ask it for the id.) */
+  getBoundOrganizationId(): string | undefined {
+    return this.boundOrganizationId
   }
 
   /**
@@ -719,6 +840,9 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.listByTopic),
         this.orgScopedArgs({ topicId: args.topicId }),
       )) as Array<{ fromSessionId: string; text: string; ts: number }>
+      // Topic membership is back ⇒ a feed suspended by a leave or a rebind can
+      // go live again, under the CURRENT sessionId and the preserved cursor.
+      this.restoreTopicFeed(args.topicId)
       return {
         history: rows.map((r) => ({
           sender: r.fromSessionId,
@@ -735,6 +859,8 @@ export class RemoteTransport implements Transport {
   async leaveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
     if (!this.enabled || this.sessionId === null) return
+    // Suspend BEFORE the mutation — see `leaveChannel`.
+    this.suspendTopicFeed(args.topicId)
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.leave), {
         sessionId: this.sessionId,
@@ -845,16 +971,17 @@ export class RemoteTransport implements Transport {
   }
 
   private async resolveChannelId(channelName: string): Promise<string | null> {
-    const cached = this.channelIdsByName.get(channelName)
+    const key = channelKey(channelName)
+    const cached = this.channelIdsByName.get(key)
     if (cached !== undefined) return cached
     try {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.channels.queries.listAll),
         this.orgScopedArgs({}),
       )) as Array<{ channelId: string; name: string }>
-      const match = rows.find((r) => r.name.toLowerCase() === channelName.toLowerCase())
+      const match = rows.find((r) => channelKey(r.name) === key)
       if (match === undefined) return null
-      this.channelIdsByName.set(channelName, match.channelId)
+      this.channelIdsByName.set(key, match.channelId)
       return match.channelId
     } catch (err) {
       this.registerFailure('resolveChannelId', err)
@@ -914,22 +1041,45 @@ export class RemoteTransport implements Transport {
   // ─── Inbound subscriptions ────────────────────────────────────────────
 
   /**
-   * Subscribe to a topic's reactive message feed. Each new message is
-   * passed to `onEvent` as a `ParsedMessage` tagged for the remote
-   * source by MessageBus when it pushes. Callers are responsible for
-   * calling the returned unsubscribe fn on leave/archive/shutdown.
+   * Subscribe to a topic's reactive message feed. Each new message is passed to
+   * `onEvent` as a `ParsedMessage` tagged for the remote source by MessageBus
+   * when it pushes.
+   *
+   * Idempotent, and the feed's LIFECYCLE is the transport's own: suspend on
+   * rebind, restore on re-join, forget on a deliberate leave. Callers get no
+   * handle back — they name the feed (`forgetTopicFeed`) rather than hold it.
    */
-  subscribeTopicMessages(
-    args: { topicId: string; channelName: string },
-    onEvent: (msg: ParsedMessage) => void,
-  ): () => void {
-    if (!this.enabled || this.shutdownStarted) return () => {}
+  subscribeTopicMessages(args: { topicId: string; channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    if (!this.enabled || this.shutdownStarted) return
+
+    // Idempotent by topic id: re-subscribing an already-registered feed keeps
+    // the existing one rather than stacking a second onUpdate against the same
+    // topic. Callers (auto-subscribe at attach, join_topic, a re-introduce)
+    // can all call this freely without coordinating.
+    const existing = this.topicFeeds.get(args.topicId)
+    if (existing !== undefined) return
+
+    const feed: TopicFeed = { channelName: channelKey(args.channelName), onEvent, inner: null, attached: false }
+    this.topicFeeds.set(args.topicId, feed)
+    this.attachTopicFeed(args.topicId, feed)
+  }
+
+  /**
+   * Attach the live Convex `onUpdate` for a topic feed, binding the CURRENT
+   * sessionId and cursor into its query args. Called on first subscribe and
+   * again on every restore — which is exactly why a rebind cannot leave a feed
+   * pointing at a dead session row.
+   */
+  private attachTopicFeed(topicId: string, feed: TopicFeed): void {
     // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
     // cursor: the backend returns messages strictly after it. `topicMaxTs`
     // is primed (via primeTopicCursor) to the last history ts already shown
-    // to the user on join, so that boundary message is not replayed. The
-    // `_id` dedup below still guards against the same row appearing in
+    // to the user on join, so that boundary message is not replayed. It
+    // survives suspend/restore, so a restore replays nothing and loses nothing.
+    // The `_id` dedup below still guards against the same row appearing in
     // successive onUpdate batches within one subscription.
+    const args = { topicId, channelName: feed.channelName }
+    const onEvent = feed.onEvent
     const startingTs = this.topicMaxTs.get(args.topicId)
     const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
@@ -970,7 +1120,9 @@ export class RemoteTransport implements Transport {
         this.registerSubscriptionFailure('subscribeTopicMessages', err)
       },
     )
-    return this.trackUnsubscribe(() => rawUnsubscribe())
+    // The topic onUpdate registers synchronously, so the feed is live here.
+    feed.inner = rawUnsubscribe
+    feed.attached = true
   }
 
   /**
@@ -981,12 +1133,30 @@ export class RemoteTransport implements Transport {
    * via the `joinChannel` mutation's returned `channelId`, with a
    * `channels.queries.listAll` fallback when the id isn't cached).
    *
-   * Callers are responsible for invoking the returned unsubscribe fn on
-   * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
-   * so a `shutdown()` still sweeps it if the caller drops the reference.
+   * Idempotent, and the feed's LIFECYCLE is the transport's own: suspend on
+   * rebind, restore on re-join, forget on a deliberate leave. Callers get no
+   * handle back — they name the feed (`forgetChannelFeed`) rather than hold it.
    */
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
-    if (!this.enabled || this.shutdownStarted) return () => {}
+  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    if (!this.enabled || this.shutdownStarted) return
+
+    // Idempotent by NORMALIZED channel name — see `channelKey`.
+    const key = channelKey(args.channelName)
+    const existing = this.channelFeeds.get(key)
+    if (existing !== undefined) return
+
+    const feed: ChannelFeed = { onEvent, inner: null, attached: false }
+    this.channelFeeds.set(key, feed)
+    this.attachChannelFeed(key, feed)
+  }
+
+  /**
+   * Attach the live Convex `onUpdate` for a channel feed under the CURRENT
+   * sessionId and cursor. Symmetric to `registerTopicFeed`; re-run on restore.
+   */
+  private attachChannelFeed(channelName: string, feed: ChannelFeed): void {
+    const args = { channelName }
+    const onEvent = feed.onEvent
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
 
     // Resolve the channel id. If we have it cached from a prior
@@ -1076,6 +1246,11 @@ export class RemoteTransport implements Transport {
           this.registerSubscriptionFailure('subscribeChannelMessages', err)
         },
       )
+      // ONLY here is the feed genuinely live. The id lookup below may be async
+      // and may never get here (throw / no match), and the caller already holds
+      // a non-null `inner` by then — which is exactly why `attached`, not
+      // `inner`, is what liveness is read from.
+      feed.attached = true
     }
 
     const cached = this.channelIdsByName.get(args.channelName)
@@ -1091,7 +1266,7 @@ export class RemoteTransport implements Transport {
             channelId: string
             name: string
           }>
-          const match = rows.find((r) => r.name.toLowerCase() === args.channelName.toLowerCase())
+          const match = rows.find((r) => channelKey(r.name) === args.channelName)
           if (match !== undefined) {
             this.channelIdsByName.set(args.channelName, match.channelId)
             register(match.channelId)
@@ -1102,7 +1277,7 @@ export class RemoteTransport implements Transport {
       })()
     }
 
-    return this.trackUnsubscribe(() => {
+    feed.inner = (): void => {
       unsubscribed = true
       if (innerUnsubscribe !== null) {
         try {
@@ -1112,7 +1287,163 @@ export class RemoteTransport implements Transport {
         }
         innerUnsubscribe = null
       }
-    })
+    }
+  }
+
+  // ─── Feed lifecycle ───────────────────────────────────────────────────
+
+  /** Detach a feed's live subscription, leaving the registry entry intact. */
+  private detach(feed: FeedState): void {
+    feed.attached = false
+    if (feed.inner === null) return
+    const inner = feed.inner
+    feed.inner = null
+    try {
+      inner()
+    } catch (err) {
+      this.log(`feed detach failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Suspend the feed for one topic. Safe when absent or already suspended. */
+  private suspendTopicFeed(topicId: string): void {
+    const feed = this.topicFeeds.get(topicId)
+    if (feed !== undefined) this.detach(feed)
+  }
+
+  /**
+   * Suspend a channel's feed AND every topic feed inside it. The backend's
+   * `listByTopic` asserts CHANNEL presence, so a topic feed left live across
+   * the loss of channel membership starts throwing ConvexError — and three of
+   * those disable the whole transport.
+   */
+  private suspendChannelFeed(name: string): void {
+    const key = channelKey(name)
+    const channel = this.channelFeeds.get(key)
+    if (channel !== undefined) this.detach(channel)
+    for (const feed of this.topicFeeds.values()) {
+      if (feed.channelName === key) this.detach(feed)
+    }
+  }
+
+  /**
+   * Re-attach a suspended topic feed under the current sessionId + cursor.
+   *
+   * `!attached` alone does NOT mean "safe to attach" — see `restoreChannelFeed`.
+   * A non-null `inner` here means a previous attach is still outstanding, and
+   * attaching over it would strand an unreachable subscription, so cancel it
+   * first. `attachTopicFeed` sets `inner` and `attached` together (no async id
+   * lookup), so this is defence in depth on this path rather than a live bug.
+   */
+  private restoreTopicFeed(topicId: string): void {
+    if (!this.enabled || this.shutdownStarted) return
+    const feed = this.topicFeeds.get(topicId)
+    if (feed === undefined || feed.attached) return
+    if (feed.inner !== null) this.detach(feed)
+    this.attachTopicFeed(topicId, feed)
+  }
+
+  /** Re-attach a suspended channel feed under the current sessionId + cursor.
+   *  Deliberately does NOT restore the channel's topic feeds: their topic
+   *  membership may not be back yet. `joinTopic` restores those.
+   *
+   *  `attached === false` conflates two states, and only one of them is safe to
+   *  attach over: properly SUSPENDED (`inner === null`, the old closure already
+   *  cancelled) versus REGISTERED-BUT-NEVER-ATTACHED (`inner` is the outer
+   *  closure and its async channel-id lookup is STILL IN FLIGHT). Attaching over
+   *  the latter overwrites `feed.inner` without ever invoking the old closure,
+   *  so when the lookup lands its `register()` still fires and stacks a SECOND
+   *  onUpdate on the channel — every broadcast delivered twice, and the orphan
+   *  unreachable by detach/suspend/rebind/shutdown because `inner` no longer
+   *  points at it. `detach()` invokes the old closure, which flips its
+   *  `unsubscribed` flag and so cancels the pending `register()`. */
+  private restoreChannelFeed(name: string): void {
+    if (!this.enabled || this.shutdownStarted) return
+    const key = channelKey(name)
+    const feed = this.channelFeeds.get(key)
+    if (feed === undefined || feed.attached) return
+    if (feed.inner !== null) this.detach(feed)
+    this.attachChannelFeed(key, feed)
+  }
+
+  /**
+   * Drop a topic feed for good: the topic is gone for us, so it must not linger
+   * as "suspended" and make the location look deaf, nor be resurrected by a
+   * later join.
+   *
+   * This encodes user INTENT, which the transport cannot infer — `leaveTopic` is
+   * issued both by a deliberate `leave_topic` and by the identity migration's
+   * transient leave, and only the former means "forget this".
+   *
+   * NOT called on archive_topic. Archiving deliberately KEEPS the feed so the
+   * session still hears its own topic being unarchived (KAI-373).
+   */
+  forgetTopicFeed(topicId: string): void {
+    const feed = this.topicFeeds.get(topicId)
+    if (feed === undefined) return
+    this.topicFeeds.delete(topicId)
+    this.detach(feed)
+  }
+
+  /**
+   * Drop a channel's feed AND the feeds of every topic inside it, AND its
+   * delivery cursor. Deliberate `leave_channel` only — see `forgetTopicFeed`.
+   *
+   * The cursor is part of the same intent, not a separate errand. `joinChannel`
+   * seeds a cursor only when absent — which is what stops the identity
+   * migration's transient leave/re-join from skipping broadcasts that land
+   * mid-rename — but it also means a cursor left behind by an INTENTIONAL leave
+   * would survive, and a later re-join would replay the whole backlog as fresh
+   * notifications. Forgetting both together keeps the two leaves distinct:
+   * transient (migration) keeps its place in the stream, deliberate (tool)
+   * starts fresh. They were two calls the tool had to remember to keep in sync;
+   * either one forgotten reintroduces a bug, so they are now one.
+   */
+  forgetChannelFeed(name: string): void {
+    const key = channelKey(name)
+    const channelId = this.channelIdsByName.get(key)
+    if (channelId !== undefined) this.channelMaxTs.delete(channelId)
+    const channel = this.channelFeeds.get(key)
+    if (channel !== undefined) {
+      this.channelFeeds.delete(key)
+      this.detach(channel)
+    }
+    for (const [topicId, feed] of [...this.topicFeeds]) {
+      if (feed.channelName !== key) continue
+      this.topicFeeds.delete(topicId)
+      this.detach(feed)
+    }
+  }
+
+  /** Is this topic's feed actually delivering right now? Liveness is read from
+   *  `attached` — the flag the `onUpdate` registration itself sets — never from
+   *  the mere presence of a handle. */
+  hasLiveTopicFeed(topicId: string): boolean {
+    return this.topicFeeds.get(topicId)?.attached === true
+  }
+
+  /** Is this channel's feed actually delivering right now? See `hasLiveTopicFeed`. */
+  hasLiveChannelFeed(name: string): boolean {
+    return this.channelFeeds.get(channelKey(name))?.attached === true
+  }
+
+  /**
+   * The feeds this transport holds but cannot currently deliver on — i.e.
+   * exactly where the session is deaf. A feed is suspended when the identity or
+   * membership behind it went away and the join that would restore it has not
+   * happened (or failed). The tool layer reports these as `degraded` instead of
+   * peeking at bookkeeping it no longer owns.
+   */
+  suspendedFeeds(): { topics: string[]; channels: string[] } {
+    const topics: string[] = []
+    const channels: string[] = []
+    for (const [topicId, feed] of this.topicFeeds) {
+      if (!feed.attached) topics.push(topicId)
+    }
+    for (const [name, feed] of this.channelFeeds) {
+      if (!feed.attached) channels.push(name)
+    }
+    return { topics, channels }
   }
 
   /**
@@ -1121,86 +1452,46 @@ export class RemoteTransport implements Transport {
    * No-op if the channel name hasn't been resolved yet.
    */
   primeChannelCursor(channelName: string, ts: number): void {
-    const channelId = this.channelIdsByName.get(channelName)
+    const channelId = this.channelIdsByName.get(channelKey(channelName))
     if (channelId === undefined) return
     const prior = this.channelMaxTs.get(channelId) ?? 0
     if (ts > prior) this.channelMaxTs.set(channelId, ts)
   }
 
   /**
-   * Forget a channel's delivery cursor, so the NEXT `joinChannel` re-seeds it
-   * from the channel's `latestTs` and the feed skips everything that accrued
-   * while the session was away.
+   * Tear down the transport: detach every live feed and close the underlying
+   * ConvexClient so its websocket shuts down. Safe to call multiple times;
+   * subsequent calls are no-ops.
    *
-   * Called only when the session DELIBERATELY leaves a channel (`leave_channel`).
-   * `joinChannel` seeds the cursor only when absent — that is what stops the
-   * identity migration's transient leave/re-join from skipping broadcasts that
-   * land mid-rename — but it also means a cursor left behind by an intentional
-   * leave would survive, and a later re-join would replay the entire backlog
-   * since the last delivered message as fresh inbound notifications. Dropping
-   * the cursor here keeps the two leaves distinct: transient (migration) keeps
-   * its place in the stream, deliberate (tool) starts fresh on re-join.
-   */
-  forgetChannelCursor(channelName: string): void {
-    const channelId = this.channelIdsByName.get(channelName)
-    if (channelId === undefined) return
-    this.channelMaxTs.delete(channelId)
-  }
-
-  /**
-   * Tear down the transport: invoke every outstanding subscribe-returned
-   * unsubscribe (DMs, topics, anything else future code adds via
-   * `trackUnsubscribe`), then close the underlying ConvexClient so its
-   * websocket shuts down. Safe to call multiple times; subsequent calls
-   * are no-ops.
+   * Feed teardown goes through the two registries — they are the single source
+   * of truth for what is live, now that the transport owns feed lifecycle and
+   * hands callers no unsubscribe handles at all.
    *
    * Used by `attachLocation`'s replace-in-place path (e.g. a force
    * re-authenticate of an already-live location) and by the process-wide
-   * shutdown hook in `server.ts`. Never throws; errors from inner
-   * `.close()` or individual unsubscribe fns are swallowed after being
-   * logged so a cleanup failure cannot cascade into a stuck shutdown.
+   * shutdown hook in `server.ts`. Never throws; errors from `.close()` or an
+   * individual detach are swallowed after being logged so a cleanup failure
+   * cannot cascade into a stuck shutdown.
    */
   async shutdown(): Promise<void> {
     if (this.shutdownStarted) return
     this.shutdownStarted = true
     this.enabled = false
     this.stopHeartbeat()
-    for (const unsub of this.trackedUnsubscribes) {
-      try {
-        unsub()
-      } catch (err) {
-        this.log(`shutdown: unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-    this.trackedUnsubscribes.clear()
+    // Detach every live feed and drop the registries, so nothing can be
+    // restored after shutdown and no inner callback is in flight when the
+    // websocket goes. KAI-418 replaced main's `trackedUnsubscribes` model
+    // with these two feed registries — that's why no tracked-unsubscribe
+    // drain here.
+    for (const feed of this.topicFeeds.values()) this.detach(feed)
+    for (const feed of this.channelFeeds.values()) this.detach(feed)
+    this.topicFeeds.clear()
+    this.channelFeeds.clear()
     try {
       await this.client.close()
     } catch (err) {
       this.log(`shutdown: client.close() failed: ${err instanceof Error ? err.message : String(err)}`)
     }
-  }
-
-  /**
-   * Wrap an unsubscribe callback so (a) it only runs once, (b) calling
-   * it removes the entry from `trackedUnsubscribes`. Callers hand the
-   * returned fn out - e.g. to `server.ts`'s `remoteTopicUnsubscribes` /
-   * `remoteChannelUnsubscribes` maps - and `shutdown()` still catches it
-   * via the internal set.
-   */
-  private trackUnsubscribe(fn: () => void): () => void {
-    let invoked = false
-    const wrapped = (): void => {
-      if (invoked) return
-      invoked = true
-      this.trackedUnsubscribes.delete(wrapped)
-      try {
-        fn()
-      } catch (err) {
-        this.log(`unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-    this.trackedUnsubscribes.add(wrapped)
-    return wrapped
   }
 
   // ─── internals ────────────────────────────────────────────────────────

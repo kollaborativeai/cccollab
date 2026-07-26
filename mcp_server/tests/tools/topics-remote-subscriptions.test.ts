@@ -141,13 +141,46 @@ class FakeRemoteTransport implements Transport {
       entry.unsubscribeCalled = true
     }
   }
+
+  // KAI-418: the transport owns its feed registry. A DELIBERATE leave asks it to
+  // forget the feed outright (the migration's transient leave only suspends).
+  // The entries are kept here after teardown so tests can still assert on them.
+  forgetTopicFeed(topicId: string): void {
+    const entry = this.subscribedTopics.get(topicId)
+    if (entry) entry.unsubscribeCalled = true
+  }
+
+  forgetChannelFeed(channelName: string): void {
+    const entry = this.subscribedChannels.get(channelName)
+    if (entry) entry.unsubscribeCalled = true
+    for (const topic of this.subscribedTopics.values()) {
+      if (topic.channelName === channelName) topic.unsubscribeCalled = true
+    }
+  }
+
+  // Liveness is MEMBERSHIP-driven: a feed that was never created is just as deaf
+  // as one that was torn down. Both cases must answer false.
+  hasLiveTopicFeed(topicId: string): boolean {
+    const entry = this.subscribedTopics.get(topicId)
+    return entry !== undefined && !entry.unsubscribeCalled
+  }
+
+  hasLiveChannelFeed(name: string): boolean {
+    const entry = this.subscribedChannels.get(name)
+    return entry !== undefined && !entry.unsubscribeCalled
+  }
+
+  suspendedFeeds(): { topics: string[]; channels: string[] } {
+    const topics = [...this.subscribedTopics.entries()].filter(([, t]) => t.unsubscribeCalled).map(([id]) => id)
+    const channels = [...this.subscribedChannels.entries()].filter(([, c]) => c.unsubscribeCalled).map(([n]) => n)
+    return { topics, channels }
+  }
 }
 
 function makeRemoteDeps(): {
   deps: TopicToolDeps
   transport: FakeRemoteTransport
   bus: MessageBus & { push: ReturnType<typeof vi.fn> }
-  unsubscribes: Map<string, () => void>
 } {
   const session = new SessionManager({ username: 'tester', cwd: '/tmp/p' })
   session.setName('architect')
@@ -158,20 +191,18 @@ function makeRemoteDeps(): {
   const bus = {
     push: vi.fn(async () => {}),
   } as unknown as MessageBus & { push: ReturnType<typeof vi.fn> }
-  const unsubscribes = new Map<string, () => void>()
   const deps: TopicToolDeps = {
     session,
     context,
     router,
     messageBus: bus,
-    remoteTopicUnsubscribes: unsubscribes,
   }
-  return { deps, transport, bus, unsubscribes }
+  return { deps, transport, bus }
 }
 
 describe('tool-layer remote topic subscriptions', () => {
   it('start_topic wires a topic-message subscription on the remote transport', async () => {
-    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const { deps, transport } = makeRemoteDeps()
     const res = JSON.parse(
       await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
     )
@@ -179,11 +210,10 @@ describe('tool-layer remote topic subscriptions', () => {
     expect(transport.subscribedTopics.has(res.id)).toBe(true)
     const sub = transport.subscribedTopics.get(res.id)!
     expect(sub.channelName).toBe('dev')
-    expect(unsubscribes.has(`flatout::${res.id}`)).toBe(true)
   })
 
   it('archive_topic keeps the archiver joined and subscribed (KAI-373)', async () => {
-    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const { deps, transport } = makeRemoteDeps()
     const startRes = JSON.parse(
       await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
     )
@@ -197,11 +227,10 @@ describe('tool-layer remote topic subscriptions', () => {
     // receiving the topic's own unarchive event (KAI-373).
     expect(deps.context.isTopicJoined(topicId)).toBe(true)
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(false)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
   })
 
   it('unarchive_topic re-establishes membership and subscription on the remote transport (KAI-373)', async () => {
-    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const { deps, transport } = makeRemoteDeps()
     const topicId = 'abcdefghij0123456789' // matches looksLikeTopicId's convex-id shape
     transport.registerTopic({
       id: topicId,
@@ -218,11 +247,10 @@ describe('tool-layer remote topic subscriptions', () => {
     // The unarchiver is joined again and re-subscribed to live updates.
     expect(deps.context.isTopicJoined(topicId)).toBe(true)
     expect(transport.subscribedTopics.has(topicId)).toBe(true)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
   })
 
   it('leave_topic tears down the topic subscription on the remote transport', async () => {
-    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const { deps, transport } = makeRemoteDeps()
     const startRes = JSON.parse(
       await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
     )
@@ -232,11 +260,10 @@ describe('tool-layer remote topic subscriptions', () => {
     const leaveRes = JSON.parse(await handleTopicTool('leave_topic', {}, deps))
     expect(leaveRes.id).toBe(topicId)
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(true)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(false)
   })
 
   it('join_topic wires a subscription and primes the cursor past the returned history', async () => {
-    const { deps, transport, unsubscribes } = makeRemoteDeps()
+    const { deps, transport } = makeRemoteDeps()
     // Seed the fake with an existing topic so the tool hits joinTopic,
     // not createTopic, and return some history so the priming branch is
     // exercised.
@@ -262,7 +289,6 @@ describe('tool-layer remote topic subscriptions', () => {
     expect(transport.subscribedTopics.has(topicId)).toBe(true)
     const sub = transport.subscribedTopics.get(topicId)!
     expect(sub.sinceTs).toBe(Date.parse('2026-04-20T00:00:01.000Z'))
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
   })
 })
 
@@ -303,35 +329,31 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
   function makeChannelDeps(): {
     deps: ChannelToolDeps
     transport: FakeRemoteTransport
-    channelUnsubs: Map<string, () => void>
   } {
     const session = new SessionManager({ username: 'tester', cwd: '/tmp/p' })
     session.setName('architect')
     const context = new ActiveContext()
     const transport = new FakeRemoteTransport('flatout')
     const router = new TransportRouter([new LocalTransport(0), transport])
-    const channelUnsubs = new Map<string, () => void>()
     const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
     const deps: ChannelToolDeps = {
       session,
       context,
       router,
       messageBus: bus,
-      remoteChannelUnsubscribes: channelUnsubs,
     }
-    return { deps, transport, channelUnsubs }
+    return { deps, transport }
   }
 
   it('join_channel wires a channel-broadcast subscription on the remote transport', async () => {
-    const { deps, transport, channelUnsubs } = makeChannelDeps()
+    const { deps, transport } = makeChannelDeps()
     const res = JSON.parse(await handleChannelTool('join_channel', { name: 'dev', location: 'flatout' }, deps))
     expect(res.channel).toBe('dev')
     expect(transport.subscribedChannels.has('dev')).toBe(true)
-    expect(channelUnsubs.has('flatout::dev')).toBe(true)
   })
 
   it('leave_channel tears down the channel-broadcast subscription', async () => {
-    const { deps, transport, channelUnsubs } = makeChannelDeps()
+    const { deps, transport } = makeChannelDeps()
     await handleChannelTool('join_channel', { name: 'dev', location: 'flatout' }, deps)
     const sub = transport.subscribedChannels.get('dev')!
     expect(sub.unsubscribeCalled).toBe(false)
@@ -339,6 +361,5 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
     const res = JSON.parse(await handleChannelTool('leave_channel', { name: 'dev', location: 'flatout' }, deps))
     expect(res.removed).toBe(true)
     expect(sub.unsubscribeCalled).toBe(true)
-    expect(channelUnsubs.has('flatout::dev')).toBe(false)
   })
 })
