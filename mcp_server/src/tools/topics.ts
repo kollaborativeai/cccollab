@@ -713,7 +713,14 @@ function mergeSessions(
       scopedLocations: Set<ChannelLocation>
     }
   >,
-  rows: Array<{ id?: string; name: string; objective?: string; channels?: string[]; registeredAt?: string; lastSeen?: string }>,
+  rows: Array<{
+    id?: string
+    name: string
+    objective?: string
+    channels?: string[]
+    registeredAt?: string
+    lastSeen?: string
+  }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
    *  server-side to peers sharing a channel with the caller. */

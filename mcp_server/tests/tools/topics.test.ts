@@ -549,7 +549,14 @@ describe('Topic Tools', () => {
     // live one were previously indistinguishable and could be silently
     // collapsed into one entry by mergeSessions's name-keyed dedup.
     function makeRemoteTransportWithSessions(
-      sessions: Array<{ id?: string; name: string; objective?: string; channels?: string[]; registeredAt?: string; lastSeen?: string }>,
+      sessions: Array<{
+        id?: string
+        name: string
+        objective?: string
+        channels?: string[]
+        registeredAt?: string
+        lastSeen?: string
+      }>,
     ) {
       return {
         source: 'remote',
@@ -665,7 +672,13 @@ describe('Topic Tools', () => {
       // no diagnostic. Malformed data should mean "unknown", same as
       // absent data — not "definitely dead".
       const remoteTransport = makeRemoteTransportWithSessions([
-        { id: 'session_bad_ts', name: 'reviewer', channels: [], registeredAt: '2026-01-01T00:00:00Z', lastSeen: 'not-a-timestamp' },
+        {
+          id: 'session_bad_ts',
+          name: 'reviewer',
+          channels: [],
+          registeredAt: '2026-01-01T00:00:00Z',
+          lastSeen: 'not-a-timestamp',
+        },
       ])
       const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
       expect(result).toHaveLength(1)
