@@ -466,12 +466,28 @@ describe('Broker: isolation guards and invariants', () => {
       })
     }
 
-    /** Victim owns a topic in `secret` holding one sensitive message; the
-     *  attacker is registered but has never joined `secret`. */
-    async function setup(tag: string): Promise<{ topicId: string; victim: string; attacker: string }> {
+    /**
+     * Victim owns a topic in `secret` holding one sensitive message; the
+     * attacker is registered and subscribed to a DECOY channel, never `secret`.
+     *
+     * The decoy is load-bearing. With the attacker holding no subscriptions at
+     * all, every assertion in this block is equally satisfied by a guard that
+     * checks "has any subscription" instead of "has THIS subscription" - and
+     * that substitution is the bug family this repo has shipped repeatedly.
+     * Subscribing the attacker somewhere else makes the two hypotheses produce
+     * different answers, so the tests can tell them apart.
+     */
+    async function setup(tag: string): Promise<{
+      topicId: string
+      channel: string
+      victim: string
+      attacker: string
+      decoy: string
+    }> {
       const victim = `k446-victim-${tag}`
       const attacker = `k446-attacker-${tag}`
       const channel = `k446-secret-${tag}`
+      const decoy = `k446-decoy-${tag}`
       await registerSession(port, victim)
       await joinChannel(port, victim, channel)
       const { id } = (await (await createTopic(port, victim, `k446-topic-${tag}`, channel)).json()) as {
@@ -479,7 +495,8 @@ describe('Broker: isolation guards and invariants', () => {
       }
       await postTopicMessage(port, id, victim, 'TOP SECRET: launch codes 1234')
       await registerSession(port, attacker)
-      return { topicId: id, victim, attacker }
+      await joinChannel(port, attacker, decoy)
+      return { topicId: id, channel, victim, attacker, decoy }
     }
 
     it('rejects read-history from a session not subscribed to the channel', async () => {
@@ -504,12 +521,15 @@ describe('Broker: isolation guards and invariants', () => {
     })
 
     it('rejects archive from a session not subscribed to the channel', async () => {
-      const { topicId, attacker } = await setup('arch')
+      const { topicId, victim, attacker } = await setup('arch')
       const res = await archiveTopic(port, topicId, attacker)
       expect(res.status).toBe(403)
-      // and the topic is still active for its owner
-      const { body } = await readHistory(topicId, { sessionId: `k446-victim-arch` })
-      expect(body.messages).toBeDefined()
+      // ...and the archive did not happen. This has to read `state`: read-history
+      // serves an archived topic identically, so asserting `messages` is defined
+      // stays green even when the guard lets the mutation through.
+      const after = await fetch(`http://127.0.0.1:${port}/topics/${topicId}?sessionId=${encodeURIComponent(victim)}`)
+      const { topic } = (await after.json()) as { topic: { state: string } }
+      expect(topic.state).toBe('active')
     })
 
     it('rejects unarchive from a session not subscribed to the channel', async () => {
@@ -536,6 +556,33 @@ describe('Broker: isolation guards and invariants', () => {
       const { topicId, victim } = await setup('happy')
       expect((await archiveTopic(port, topicId, victim)).status).toBe(200)
       expect((await unarchiveTopic(port, topicId, victim)).status).toBe(200)
+    })
+
+    /**
+     * The rest of this block proves "an unsubscribed caller is refused". This
+     * one proves the guard discriminates on the RIGHT thing: the caller holds a
+     * real subscription, just not to this topic's channel.
+     *
+     * Without it the whole block is satisfied by a guard that only asks "does
+     * this session have any subscription at all" - the has-a-role-instead-of-
+     * has-THIS-role family this repo has shipped repeatedly. `setup()`
+     * subscribes the attacker to a decoy for the same reason; this test states
+     * the requirement out loud so it cannot be optimised away as redundant.
+     */
+    it('discriminates on the channel, not on merely holding some subscription', async () => {
+      const { topicId, victim, attacker, decoy } = await setup('discriminate')
+
+      // Precondition: the attacker really is subscribed to something.
+      const attackerChannels = await listChannels(port, attacker)
+      expect(attackerChannels.map((c) => c.name)).toEqual([decoy])
+
+      // Same session, same non-empty subscription set, both verdicts.
+      expect((await readHistory(topicId, { sessionId: attacker })).status).toBe(403)
+      expect((await readHistory(topicId, { sessionId: victim })).status).toBe(200)
+
+      expect((await archiveTopic(port, topicId, attacker)).status).toBe(403)
+      expect((await unarchiveTopic(port, topicId, attacker)).status).toBe(403)
+      expect((await leaveTopic(topicId, attacker)).status).toBe(403)
     })
   })
 })
