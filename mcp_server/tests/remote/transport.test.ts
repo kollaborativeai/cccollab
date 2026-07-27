@@ -850,3 +850,28 @@ describe('RemoteTransport heartbeat', () => {
     expect(transport.degradation).toMatch(/authentication failed/i)
   })
 })
+
+/**
+ * KAI-514 ships direct messages on the local transport only; KAI-517 wires
+ * the remote one. Until then the stubs must refuse honestly rather than
+ * claim a delivery that never happened - the tool layer routes DMs to
+ * `local` today, so nothing else would catch a stub that lies.
+ */
+describe('RemoteTransport direct-message stubs (KAI-517 pending)', () => {
+  it('never reports a DM as delivered and returns an empty thread page', async () => {
+    const { client, queryMock, mutationMock } = makeStubClient(async () => [])
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    const sent = await transport.sendSessionMessage({ sessionName: 'me', toSessionId: 'some-id', text: 'hi' })
+    expect(sent.delivered).toBe(false)
+    expect(sent.reason).toMatch(/not supported/i)
+
+    const page = await transport.readSessionMessages({ sessionName: 'me', withSessionId: 'some-id' })
+    expect(page).toEqual({ messages: [], hasMore: false })
+
+    // A stub that quietly called the backend would be worse than one that
+    // refuses: the Convex functions don't exist yet.
+    expect(queryMock).not.toHaveBeenCalled()
+    expect(mutationMock).not.toHaveBeenCalled()
+  })
+})
