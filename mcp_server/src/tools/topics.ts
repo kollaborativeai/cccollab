@@ -638,9 +638,10 @@ async function handleListSessions(
   await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
-  // Merged by session id when the transport provides one (every non-local
-  // transport does), falling back to `location::name` for transports that
-  // don't (the local broker has no stable id — see `TransportSession.id`).
+  // Merged by session id when the transport provides one — every transport
+  // now does, local included (the broker mints one per registration,
+  // KAI-514) — falling back to `location::name` for any future transport
+  // that doesn't (see `TransportSession.id`).
   // Keying by id (KAI-515) keeps a dead and a live registration that
   // happen to share a display name as distinct entries instead of
   // silently collapsing them into one.
