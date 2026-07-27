@@ -300,6 +300,11 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     env,
     ensureAttached,
     diagnostics,
+    // The broker streams channel-tagged events only to connections whose
+    // session is subscribed (KAI-446), and the listener below starts before a
+    // late `introduce` can name this session — so re-open the stream when it
+    // does, or the session never hears anything again.
+    onIdentityChanged: () => listener.reconnectForIdentity(),
   })
 
   let shutdownInFlight: Promise<void> | null = null
@@ -399,6 +404,9 @@ interface ToolDeps {
    *  name gate for pre-introduce discovery. Cheap and idempotent after the
    *  first attach — see `ensureLazyAttach`. */
   ensureAttached: (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => Promise<void>
+  /** Re-identify the broker's SSE stream after `introduce` sets a name.
+   *  See `IdentityToolDeps.onIdentityChanged`. */
+  onIdentityChanged: () => void
   /** Registry of failed non-local attaches (KAI-368). Passed through to
    *  the identity tools so `whoami` can surface a location that failed to
    *  attach and is therefore absent from the router. */

@@ -33,6 +33,12 @@ interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  /** Mirrors `server.ts`: re-identify the SSE stream when `introduce` names
+   *  the session. The listener starts before `introduce` here exactly as it
+   *  does in production, and the broker's stream is subscription-scoped
+   *  (KAI-446), so without this the harness sessions stay anonymous on the
+   *  broker and receive nothing. */
+  onIdentityChanged: () => void
 }
 
 interface SessionHarness {
@@ -68,7 +74,12 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router }
+  const deps: HarnessDeps = {
+    session,
+    context,
+    router,
+    onIdentityChanged: () => listener.reconnectForIdentity(),
+  }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {

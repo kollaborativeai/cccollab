@@ -106,9 +106,14 @@ async function unarchiveTopic(port: number, topicId: string, unarchivedBy: strin
  * Opens the broker's SSE `/events` stream (via raw node:http, which streams
  * small SSE frames reliably), fires `trigger` once the connection is live, and
  * resolves the first broadcast event matching `predicate`.
+ *
+ * `as` is the session the connection identifies as. Channel-tagged events only
+ * reach connections whose session is subscribed to that channel (KAI-446), so
+ * a caller watching for one must name a session that is entitled to it.
  */
 function nextEvent(
   port: number,
+  as: string,
   predicate: (evt: Record<string, unknown>) => boolean,
   trigger: () => Promise<void>,
   timeoutMs = 4000,
@@ -124,7 +129,12 @@ function nextEvent(
     }
     const timer = setTimeout(() => finish(null), timeoutMs)
     const req = http.get(
-      { host: '127.0.0.1', port, path: '/events', headers: { Accept: 'text/event-stream' } },
+      {
+        host: '127.0.0.1',
+        port,
+        path: `/events?sessionId=${encodeURIComponent(as)}`,
+        headers: { Accept: 'text/event-stream' },
+      },
       (res) => {
         res.setEncoding('utf-8')
         let buffer = ''
@@ -423,6 +433,7 @@ describe('Broker: isolation guards and invariants', () => {
 
       const evt = await nextEvent(
         port,
+        'attrib-a',
         (e) => e.type === 'topic_unarchived' && e.topicId === id,
         async () => {
           const res = await unarchiveTopic(port, id, 'attrib-a')
@@ -583,6 +594,212 @@ describe('Broker: isolation guards and invariants', () => {
       expect((await archiveTopic(port, topicId, attacker)).status).toBe(403)
       expect((await unarchiveTopic(port, topicId, attacker)).status).toBe(403)
       expect((await leaveTopic(topicId, attacker)).status).toBe(403)
+    })
+  })
+
+  /**
+   * KAI-446 (follow-up): the topic ROUTES were gated, but `/events` fanned every
+   * event out to every connected SSE client with no identity and no filter, and
+   * the only channel filtering lived client-side in `broker-event-listener.ts`.
+   * A cooperating client filtered; a hostile one just read the wire. So the
+   * ticket's own proof sentence - an unsubscribed local process can read topic
+   * message text - stayed true with every route gated.
+   *
+   * These assert the unsubscribed connection RECEIVES NOTHING, so deleting the
+   * server-side filter turns them red. A test that only asserted the subscribed
+   * connection still gets its events would stay green with the hole reopened.
+   */
+  describe('KAI-446: /events is subscription-scoped server-side', () => {
+    const SENTINEL = 'TOP SECRET: launch codes 1234'
+
+    /**
+     * Opens one SSE connection per entry in `as` (a session name, or `null` for
+     * an anonymous connection), fires `trigger` once every connection is live,
+     * then returns what each connection actually received.
+     *
+     * Negative assertions need this rather than `nextEvent`: proving a
+     * connection never received something means watching the whole window, not
+     * resolving on the first match.
+     */
+    type SeenEvents = Record<string, unknown>[]
+
+    async function eventsPerConnection<K extends string>(
+      as: Record<K, string | null>,
+      trigger: () => Promise<void>,
+      settleMs = 400,
+    ): Promise<Record<K, SeenEvents>> {
+      const entries = Object.entries(as) as Array<[K, string | null]>
+      const seen = Object.fromEntries(entries.map(([k]) => [k, [] as SeenEvents])) as Record<K, SeenEvents>
+      const reqs = await Promise.all(
+        entries.map(
+          ([key, sessionId]) =>
+            new Promise<http.ClientRequest>((resolve, reject) => {
+              const path = sessionId === null ? '/events' : `/events?sessionId=${encodeURIComponent(sessionId)}`
+              const req = http.get(
+                { host: '127.0.0.1', port, path, headers: { Accept: 'text/event-stream' } },
+                (res) => {
+                  res.setEncoding('utf-8')
+                  let buffer = ''
+                  res.on('data', (chunk: string) => {
+                    buffer += chunk
+                    const frames = buffer.split('\n\n')
+                    buffer = frames.pop() ?? ''
+                    for (const frame of frames) {
+                      const line = frame.split('\n').find((l) => l.startsWith('data:'))
+                      if (!line) continue
+                      try {
+                        seen[key].push(JSON.parse(line.slice(5).trim()) as Record<string, unknown>)
+                      } catch {
+                        /* keepalive / non-JSON frame */
+                      }
+                    }
+                  })
+                  resolve(req)
+                },
+              )
+              req.on('error', reject)
+            }),
+        ),
+      )
+      try {
+        await trigger()
+        await new Promise<void>((r) => setTimeout(r, settleMs))
+      } finally {
+        for (const req of reqs) req.destroy()
+      }
+      return seen
+    }
+
+    /** Victim owns a topic in its own channel; the outsider is registered and
+     *  subscribed to a DIFFERENT channel, never the victim's. */
+    async function stage(tag: string): Promise<{
+      topicId: string
+      channel: string
+      victim: string
+      outsider: string
+      decoy: string
+    }> {
+      const victim = `sse-victim-${tag}`
+      const outsider = `sse-outsider-${tag}`
+      const channel = `sse-secret-${tag}`
+      const decoy = `sse-decoy-${tag}`
+      await registerSession(port, victim)
+      await joinChannel(port, victim, channel)
+      const { id } = (await (await createTopic(port, victim, `sse-topic-${tag}`, channel)).json()) as { id: string }
+      await registerSession(port, outsider)
+      await joinChannel(port, outsider, decoy)
+      return { topicId: id, channel, victim, outsider, decoy }
+    }
+
+    it('never sends a topic message to a connection subscribed only to another channel', async () => {
+      const { topicId, victim, outsider } = await stage('msg')
+      const seen = await eventsPerConnection({ outsider, victim }, async () => {
+        expect((await postTopicMessage(port, topicId, victim, SENTINEL)).status).toBe(200)
+      })
+      // The whole point of the ticket: the text must never reach the wire.
+      expect(JSON.stringify(seen.outsider)).not.toContain('launch codes')
+      expect(seen.outsider).toEqual([])
+      // ...and the legitimate subscriber is unaffected.
+      expect(JSON.stringify(seen.victim)).toContain(SENTINEL)
+    })
+
+    it('never sends a channel broadcast to a connection subscribed only to another channel', async () => {
+      const { channel, victim, outsider } = await stage('bcast')
+      const seen = await eventsPerConnection({ outsider, victim }, async () => {
+        expect((await broadcast(port, victim, channel, SENTINEL)).status).toBe(200)
+      })
+      expect(seen.outsider).toEqual([])
+      expect(JSON.stringify(seen.victim)).toContain(SENTINEL)
+    })
+
+    it('never sends topic lifecycle events to a connection subscribed only to another channel', async () => {
+      const { topicId, channel, victim, outsider } = await stage('lifecycle')
+      const seen = await eventsPerConnection({ outsider, victim }, async () => {
+        expect((await createTopic(port, victim, 'sse-second-topic', channel)).status).toBe(200)
+        expect((await archiveTopic(port, topicId, victim)).status).toBe(200)
+        expect((await unarchiveTopic(port, topicId, victim)).status).toBe(200)
+      })
+      expect(seen.outsider).toEqual([])
+      expect(seen.victim.map((e) => e.type)).toEqual(['topic_created', 'topic_archived', 'topic_unarchived'])
+    })
+
+    it('never sends a channel-tagged event to an anonymous connection', async () => {
+      const { topicId, victim } = await stage('anon')
+      const seen = await eventsPerConnection({ anon: null }, async () => {
+        expect((await postTopicMessage(port, topicId, victim, SENTINEL)).status).toBe(200)
+      })
+      expect(seen.anon).toEqual([])
+    })
+
+    it('never sends a channel-tagged event to a connection naming an unregistered session', async () => {
+      const { topicId, victim } = await stage('ghost')
+      const seen = await eventsPerConnection({ ghost: 'sse-never-registered' }, async () => {
+        expect((await postTopicMessage(port, topicId, victim, SENTINEL)).status).toBe(200)
+      })
+      expect(seen.ghost).toEqual([])
+    })
+
+    /**
+     * The untagged lane must stay wide. Events with no channel are how the
+     * broker signals things that are not channel-scoped, and KAI-514's DM work
+     * relies on this lane existing and reaching every connection - its
+     * "no leak into the untagged broadcast lane" guard is only meaningful while
+     * an untagged event genuinely would reach everyone.
+     */
+    it('still delivers an untagged event to every connection, including anonymous ones', async () => {
+      const { victim, outsider } = await stage('untagged')
+      const seen = await eventsPerConnection({ outsider, victim, anon: null }, async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/local-event`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'presence_ping', note: 'untagged' }),
+        })
+        expect(res.status).toBe(200)
+      })
+      for (const saw of [seen.outsider, seen.victim, seen.anon]) {
+        expect(saw.map((e) => e.type)).toEqual(['presence_ping'])
+      }
+    })
+
+    /** A channel-tagged event posted through the generic `/local-event` lane is
+     *  scoped like any other, so that route is not a way around the filter. */
+    it('scopes a channel-tagged /local-event to that channel', async () => {
+      const { channel, victim, outsider } = await stage('localevt')
+      const seen = await eventsPerConnection({ outsider, victim }, async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/local-event`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'custom', channel, text: SENTINEL }),
+        })
+        expect(res.status).toBe(200)
+      })
+      expect(seen.outsider).toEqual([])
+      expect(JSON.stringify(seen.victim)).toContain(SENTINEL)
+    })
+
+    /** Membership is read at fan-out time, not captured at connect time, so a
+     *  join takes effect on a stream that is already open. Without this a
+     *  session would have to reconnect after every `join_channel`. */
+    it('applies a join that happens after the connection is already open', async () => {
+      const { topicId, channel, victim, outsider } = await stage('latejoin')
+      const seen = await eventsPerConnection({ outsider }, async () => {
+        expect((await postTopicMessage(port, topicId, victim, 'before join')).status).toBe(200)
+        expect((await joinChannel(port, outsider, channel)).status).toBe(200)
+        expect((await postTopicMessage(port, topicId, victim, 'after join')).status).toBe(200)
+      })
+      expect(seen.outsider.map((e) => e.text)).toEqual(['after join'])
+    })
+
+    /** ...and symmetrically, leaving stops the stream. */
+    it('stops delivering once the session leaves the channel', async () => {
+      const { topicId, channel, victim, outsider } = await stage('leave')
+      await joinChannel(port, outsider, channel)
+      const seen = await eventsPerConnection({ outsider }, async () => {
+        expect((await postTopicMessage(port, topicId, victim, 'while subscribed')).status).toBe(200)
+        expect((await leaveChannel(port, outsider, channel)).status).toBe(200)
+        expect((await postTopicMessage(port, topicId, victim, 'after leaving')).status).toBe(200)
+      })
+      expect(seen.outsider.map((e) => e.text)).toEqual(['while subscribed'])
     })
   })
 })

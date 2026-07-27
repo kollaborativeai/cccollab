@@ -16,18 +16,58 @@ const LOG_FILE = join(CCCOLLAB_LOGS_DIR, `${PROFILE}.log`)
 
 type SSEResponse = ServerResponse & { req: IncomingMessage }
 
-const clients = new Set<SSEResponse>()
+interface SSEClient {
+  res: SSEResponse
+  /** Session this connection identified as via `/events?sessionId=`.
+   *  `undefined` for a connection that named nobody. */
+  sessionName?: string
+}
+
+const clients = new Set<SSEClient>()
 
 function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`
   appendFileSync(LOG_FILE, line)
 }
 
-function broadcast(data: string): void {
+/**
+ * Is this connection's session subscribed to `channel` right now (KAI-446)?
+ *
+ * Membership is read at fan-out time rather than captured when the stream
+ * opened, so a `join_channel` or `leave_channel` takes effect on a connection
+ * that is already open — otherwise every join would need a reconnect.
+ */
+function sseSubscribed(client: SSEClient, channel: string): boolean {
+  if (!client.sessionName) return false
+  return sessions.get(client.sessionName)?.channels.has(channel) === true
+}
+
+/**
+ * Fan an event out to the SSE streams entitled to it.
+ *
+ * `channel` scopes delivery: a channel-tagged event reaches only connections
+ * whose session is subscribed to that channel. Before KAI-446 this route was
+ * the hole the rest of the ticket left open — every topic ROUTE was gated
+ * while `/events` handed every event to every connection, and the only channel
+ * filtering lived client-side in `broker-event-listener.ts`. A cooperating
+ * client filtered; a hostile one read the wire, so "an unsubscribed local
+ * process can read topic message text" stayed true with all five routes gated.
+ *
+ * Untagged events (no `channel`) still reach every connection. That lane is
+ * how the broker signals things that are not channel-scoped, and narrowing it
+ * is a separate decision from this one — it must stay wide, or a leak INTO it
+ * stops being observable.
+ *
+ * Like the route guards this is not authentication: the broker is
+ * loopback-only and any local process may still name any session. It makes the
+ * stream answer to the same subscription rule the routes already answer to.
+ */
+function broadcast(data: string, channel?: string): void {
   const payload = `data: ${data}\n\n`
   for (const client of clients) {
+    if (channel !== undefined && !sseSubscribed(client, channel)) continue
     try {
-      client.write(payload)
+      client.res.write(payload)
     } catch {
       clients.delete(client)
     }
@@ -200,16 +240,20 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       Connection: 'keep-alive',
     })
 
-    const sseRes = res as SSEResponse
-    clients.add(sseRes)
+    // Naming a session is what entitles the connection to that session's
+    // channel-tagged events (KAI-446). A connection that names nobody stays
+    // open and receives untagged events only — the listener connects before
+    // `introduce` has run and re-opens with its name afterwards.
+    const client: SSEClient = { res: res as SSEResponse, sessionName: searchParams.get('sessionId') ?? undefined }
+    clients.add(client)
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
     // broadcast, so they don't miss events that fire right after connecting.
     res.flushHeaders()
-    log(`SSE client connected (total: ${clients.size})`)
+    log(`SSE client connected as ${client.sessionName ?? 'anonymous'} (total: ${clients.size})`)
 
     req.on('close', () => {
-      clients.delete(sseRes)
+      clients.delete(client)
       log(`SSE client disconnected (total: ${clients.size})`)
     })
     return
@@ -224,7 +268,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           return
         }
         const payload = { source: 'local', ...event }
-        broadcast(JSON.stringify(payload))
+        // A channel-tagged event here is scoped like any other; an untagged one
+        // rides the wide lane. Normalized because this body is arbitrary input,
+        // unlike the broker's own events which carry an already-normalized name.
+        broadcast(JSON.stringify(payload), normalizeChannel(event.channel) ?? undefined)
         log(`LOCAL EVENT: ${JSON.stringify(payload).slice(0, 200)}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
@@ -325,7 +372,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           text: body.text,
           ts: new Date().toISOString(),
         }
-        broadcast(JSON.stringify(event))
+        broadcast(JSON.stringify(event), channel)
         log(`BROADCAST ${channel}: ${body.sender}: ${body.text}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
@@ -381,7 +428,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         topics.set(id, localTopic)
         const topicData = { id, topic: body.topic, channel, creator: body.creator, state: 'active', createdAt }
         const event = { source: 'local' as const, type: 'topic_created' as const, channel, topic: topicData }
-        broadcast(JSON.stringify(event))
+        broadcast(JSON.stringify(event), channel)
         log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${body.creator}`)
         jsonResponse(res, 200, topicData)
       } catch {
@@ -524,7 +571,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               text,
               ts,
             }
-            broadcast(JSON.stringify(event))
+            broadcast(JSON.stringify(event), t.channel)
             log(`MESSAGE in ${id} (${t.channel}): ${sender}: ${text}`)
             jsonResponse(res, 200, { ok: true })
             return
@@ -564,7 +611,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               topicId: id,
               archivedBy,
             }
-            broadcast(JSON.stringify(event))
+            broadcast(JSON.stringify(event), t.channel)
             log(`TOPIC ARCHIVED: ${id} by ${archivedBy}`)
             jsonResponse(res, 200, { ok: true })
             return
@@ -580,7 +627,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               topicId: id,
               unarchivedBy,
             }
-            broadcast(JSON.stringify(event))
+            broadcast(JSON.stringify(event), t.channel)
             log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy}`)
             jsonResponse(res, 200, { ok: true })
             return
@@ -643,7 +690,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 function shutdown(): void {
   log('Shutting down...')
   for (const client of clients) {
-    client.end()
+    client.res.end()
   }
   clients.clear()
   server.close()

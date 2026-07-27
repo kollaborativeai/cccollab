@@ -510,3 +510,37 @@ describe('Identity Tools', () => {
     })
   })
 })
+
+/**
+ * KAI-446: the broker scopes the SSE stream to the connecting session's
+ * subscriptions, and the listener opens that stream before `introduce` has
+ * necessarily run. A session that names itself at runtime is therefore
+ * anonymous on the broker until something re-identifies the stream — so
+ * `introduce` has to say it changed.
+ */
+describe('introduce: re-identifies the event stream (KAI-446)', () => {
+  it('signals the identity change after registering the name', async () => {
+    const deps = createMockDeps()
+    const calls: Array<string | undefined> = []
+    // Recorded at call time: signalling before the name is set would re-open
+    // the stream as anonymous again and leave the session deaf.
+    const withHook: IdentityToolDeps = {
+      ...deps,
+      onIdentityChanged: () => calls.push(deps.session.hasName() ? deps.session.displayName : undefined),
+    }
+
+    await handleIdentityTool('introduce', { name: 'architect' }, withHook)
+
+    expect(calls).toEqual(['architect'])
+  })
+
+  it('does not signal for whoami', async () => {
+    const deps = createMockDeps()
+    deps.session.setName('architect')
+    const onIdentityChanged = vi.fn()
+
+    await handleIdentityTool('whoami', {}, { ...deps, onIdentityChanged })
+
+    expect(onIdentityChanged).not.toHaveBeenCalled()
+  })
+})
