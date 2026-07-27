@@ -68,16 +68,23 @@ export class MessageBus extends EventEmitter {
    * crash the server or break the inbound subscription.
    */
   async push(msg: ParsedMessage, source: MessageSource = 'local'): Promise<void> {
-    const key = dedupKey(msg)
     const now = Date.now()
-    this.vacuum(now)
-    const last = this.dedupSeen.get(key)
-    if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
-      this.emit('dedup:dropped', { msg, source, previousTs: last })
-      return
+    // DMs are exempt: dedup exists for one message arriving over BOTH
+    // transports, and a DM has only one delivery path (the local broker's
+    // private lane). Deduping it would drop a genuine second send that the
+    // broker already answered `delivered: true` for - a wake the caller was
+    // told happened and didn't (KAI-514 AC3).
+    if (msg.kind !== 'dm') {
+      const key = dedupKey(msg)
+      this.vacuum(now)
+      const last = this.dedupSeen.get(key)
+      if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
+        this.emit('dedup:dropped', { msg, source, previousTs: last })
+        return
+      }
+      this.dedupSeen.set(key, now)
+      if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
     }
-    this.dedupSeen.set(key, now)
-    if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
 
     const meta: Record<string, string> = {
       sender: msg.sender,
