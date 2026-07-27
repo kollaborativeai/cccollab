@@ -197,16 +197,20 @@ export async function handleTopicTool(
       return JSON.stringify(result)
     }
     case 'read_session_messages': {
-      const { sessionId } = args as { sessionId?: string }
+      const { sessionId, limit, before } = args as { sessionId?: string; limit?: number; before?: number }
       if (!sessionId) {
         return JSON.stringify({ error: 'sessionId is required.' })
       }
       const transport = deps.router.get(LOCAL_LOCATION)
-      const messages = await transport.readSessionMessages({
+      // Paged like read_topic_messages: newest page first, `before` walks
+      // back. A 1:1 thread outlives any one exchange and is never trimmed.
+      const page = await transport.readSessionMessages({
         sessionName: deps.session.displayName,
         withSessionId: sessionId,
+        limit,
+        before,
       })
-      return JSON.stringify({ messages })
+      return JSON.stringify(page)
     }
     case 'read_topic_messages': {
       const { topic, limit, before } = args as {

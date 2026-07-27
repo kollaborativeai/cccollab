@@ -4,6 +4,7 @@ import {
   type Transport,
   type TransportChannel,
   type TransportDmMessage,
+  type TransportDmPage,
   type TransportDmResult,
   type TransportHistoryPage,
   type TransportSession,
@@ -162,12 +163,23 @@ export class LocalTransport implements Transport {
     })
   }
 
-  async readSessionMessages(args: { sessionName: string; withSessionId: string }): Promise<TransportDmMessage[]> {
-    const qs = `?asName=${encodeURIComponent(args.sessionName)}`
-    const data = await this.brokerGet<{ messages: TransportDmMessage[] }>(
-      `/sessions/${encodeURIComponent(args.withSessionId)}/dm${qs}`,
+  async readSessionMessages(args: {
+    sessionName: string
+    withSessionId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportDmPage> {
+    const params = new URLSearchParams({ asName: args.sessionName })
+    if (args.limit !== undefined) params.set('limit', String(args.limit))
+    if (args.before !== undefined) params.set('before', String(args.before))
+    const data = await this.brokerGet<{ messages: TransportDmMessage[]; hasMore: boolean }>(
+      `/sessions/${encodeURIComponent(args.withSessionId)}/dm?${params.toString()}`,
     )
-    return data.messages
+    return {
+      messages: data.messages,
+      hasMore: data.hasMore,
+      oldestTs: data.messages.length > 0 ? data.messages[0]!.ts : undefined,
+    }
   }
 
   // ─── Message history ──────────────────────────────────────────────────

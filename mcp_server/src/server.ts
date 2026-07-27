@@ -905,9 +905,14 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'read_session_messages',
     {
       description:
-        "Read back a private 1:1 thread with another session (local transport only). Returns {messages: [{fromId, fromName, text, ts}]}, oldest first. `sessionId` is the other party's stable id, from list_sessions.",
+        "Read back a private 1:1 thread with another session (local transport only, newest page first; oldest-first within the page). Returns {messages:[{fromId, fromName, text, ts}], hasMore, oldestTs} with `ts` in epoch-ms. To read further back, call again with `before` set to the previous page's `oldestTs` until `hasMore` is false. `sessionId` is the other party's stable id, from list_sessions.",
       inputSchema: {
         sessionId: z.string().describe("The other party's stable id, from list_sessions."),
+        limit: z.number().optional().describe('Max messages to return (default 50, max 200).'),
+        before: z
+          .number()
+          .optional()
+          .describe('Epoch-ms cursor; return messages older than this. Omit for the newest page.'),
       },
     },
     async (args) => {

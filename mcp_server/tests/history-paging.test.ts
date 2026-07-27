@@ -1,24 +1,32 @@
 import { describe, it, expect } from 'vitest'
 import {
   clampHistoryLimit,
-  pageTopicHistory,
+  pageHistory,
   HISTORY_DEFAULT_LIMIT,
   HISTORY_MAX_LIMIT,
   type HistoryEntry,
+  type HistoryPage,
 } from '../src/history-paging.js'
 
-function entry(id: string, ts: number): HistoryEntry {
+/** A topic-shaped entry: `pageHistory` only reads `ts`, callers keep their
+ *  own fields. */
+interface Entry extends HistoryEntry {
+  sender: string
+  text: string
+}
+
+function entry(id: string, ts: number): Entry {
   return { sender: id, text: id, ts }
 }
 
 /** Walk the whole history newest-page-first exactly as a client would, and
  *  return the ids in chronological order. Guards against silent drop/dup. */
-function fullWalk(store: HistoryEntry[], limit: number): string[] {
+function fullWalk(store: Entry[], limit: number): string[] {
   const collected: string[] = []
   let before: number | null = null
   for (let guard = 0; guard < 1000; guard++) {
-    const older = before === null ? store : store.filter((m) => m.ts < before!)
-    const { messages, hasMore } = pageTopicHistory(older, { limit, before })
+    const older: Entry[] = before === null ? store : store.filter((m) => m.ts < before!)
+    const { messages, hasMore }: HistoryPage<Entry> = pageHistory(older, { limit, before })
     collected.unshift(...messages.map((m) => m.text))
     if (!hasMore || messages.length === 0) break
     before = messages[0]!.ts // oldestTs cursor
@@ -44,28 +52,28 @@ describe('clampHistoryLimit', () => {
   })
 })
 
-describe('pageTopicHistory', () => {
+describe('pageHistory', () => {
   it('returns an empty page for empty history', () => {
-    expect(pageTopicHistory([], { limit: 50, before: null })).toEqual({ messages: [], hasMore: false })
+    expect(pageHistory([], { limit: 50, before: null })).toEqual({ messages: [], hasMore: false })
   })
 
   it('returns the whole history oldest-first when it fits under the limit', () => {
     const store = [entry('a', 1), entry('b', 2), entry('c', 3)]
-    const page = pageTopicHistory(store, { limit: 50, before: null })
+    const page = pageHistory(store, { limit: 50, before: null })
     expect(page.messages.map((m) => m.text)).toEqual(['a', 'b', 'c'])
     expect(page.hasMore).toBe(false)
   })
 
   it('returns the newest page and flags hasMore when history exceeds the limit', () => {
     const store = [entry('a', 1), entry('b', 2), entry('c', 3), entry('d', 4)]
-    const page = pageTopicHistory(store, { limit: 2, before: null })
+    const page = pageHistory(store, { limit: 2, before: null })
     expect(page.messages.map((m) => m.text)).toEqual(['c', 'd'])
     expect(page.hasMore).toBe(true)
   })
 
   it('excludes messages at or after the `before` cursor (strict <)', () => {
     const store = [entry('a', 1), entry('b', 2), entry('c', 3)]
-    const page = pageTopicHistory(store, { limit: 50, before: 3 })
+    const page = pageHistory(store, { limit: 50, before: 3 })
     expect(page.messages.map((m) => m.text)).toEqual(['a', 'b'])
   })
 

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import crypto from 'node:crypto'
 import { PROFILE, BROKER_RENDEZVOUS_FILE, CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
-import { clampHistoryLimit, pageTopicHistory } from './history-paging.js'
+import { clampHistoryLimit, pageHistory } from './history-paging.js'
 
 mkdirSync(CCCOLLAB_RUN_DIR, { recursive: true })
 mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
@@ -536,7 +536,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // is an internal bug, not untrusted input worth a 400.
     const before = Number.isFinite(beforeNum) ? beforeNum : null
     const all = t.messages.map((m) => ({ sender: m.sender, text: m.text, ts: Date.parse(m.ts) }))
-    jsonResponse(res, 200, pageTopicHistory(all, { limit, before }))
+    jsonResponse(res, 200, pageHistory(all, { limit, before }))
     return
   }
 
@@ -756,10 +756,22 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 400, { error: `Unknown session "${asName}".` })
       return
     }
+    // Paged the same way as topic history (newest page first, `before`
+    // cursor in epoch-ms): a DM thread is unbounded and a long-lived
+    // orchestration pair accumulates one forever, so returning the whole
+    // thread on every read is a growing, unaskable cost.
+    const limit = clampHistoryLimit(searchParams.get('limit'))
+    const beforeRaw = searchParams.get('before')
+    const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
+    const before = Number.isFinite(beforeNum) ? beforeNum : null
     const thread = dmThreads.get(dmPairKey(self.id, withId)) ?? []
-    jsonResponse(res, 200, {
-      messages: thread.map((m) => ({ fromId: m.fromId, fromName: m.fromName, text: m.text, ts: m.ts })),
-    })
+    const all = thread.map((m) => ({
+      fromId: m.fromId,
+      fromName: m.fromName,
+      text: m.text,
+      ts: Date.parse(m.ts),
+    }))
+    jsonResponse(res, 200, pageHistory(all, { limit, before }))
     return
   }
 

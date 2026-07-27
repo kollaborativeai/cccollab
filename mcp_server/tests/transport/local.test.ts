@@ -164,10 +164,15 @@ describe('LocalTransport: message history reads', () => {
       const aId = sessions.find((s) => s.name === 'lt-dm-a')!.id!
       const asA = await transport.readSessionMessages({ sessionName: 'lt-dm-a', withSessionId: bId })
       const asB = await transport.readSessionMessages({ sessionName: 'lt-dm-b', withSessionId: aId })
-      expect(asA).toHaveLength(1)
-      expect(asB).toHaveLength(1)
-      expect(asA[0]!.text).toBe('transport dm')
-      expect(asA[0]!.fromName).toBe('lt-dm-a')
+      expect(asA.messages).toHaveLength(1)
+      expect(asB.messages).toHaveLength(1)
+      expect(asA.messages[0]!.text).toBe('transport dm')
+      expect(asA.messages[0]!.fromName).toBe('lt-dm-a')
+      // Page contract parity with every other history read: epoch-ms `ts`,
+      // an `oldestTs` cursor, and `hasMore` false when the thread fits.
+      expect(typeof asA.messages[0]!.ts).toBe('number')
+      expect(asA.oldestTs).toBe(asA.messages[0]!.ts)
+      expect(asA.hasMore).toBe(false)
     })
   })
 })

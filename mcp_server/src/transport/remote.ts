@@ -8,7 +8,7 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
-  type TransportDmMessage,
+  type TransportDmPage,
   type TransportDmResult,
   type TransportHistoryPage,
   type TransportSession,
@@ -836,9 +836,14 @@ export class RemoteTransport implements Transport {
     return { delivered: false, reason: 'Direct messages are not supported on this location yet.' }
   }
 
-  async readSessionMessages(args: { sessionName: string; withSessionId: string }): Promise<TransportDmMessage[]> {
+  async readSessionMessages(args: {
+    sessionName: string
+    withSessionId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportDmPage> {
     void args
-    return []
+    return { messages: [], hasMore: false }
   }
 
   // ─── Message history ──────────────────────────────────────────────────

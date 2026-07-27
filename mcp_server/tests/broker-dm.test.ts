@@ -39,16 +39,30 @@ async function sendDm(port: number, toId: string, from: string, text: string): P
   })
 }
 
+interface DmPage {
+  messages: Array<{ fromId: string; fromName: string; text: string; ts: number }>
+  hasMore: boolean
+}
+
+async function readDmPage(
+  port: number,
+  withId: string,
+  asName: string,
+  opts: { limit?: number; before?: number } = {},
+): Promise<DmPage> {
+  const params = new URLSearchParams({ asName })
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+  if (opts.before !== undefined) params.set('before', String(opts.before))
+  const res = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(withId)}/dm?${params.toString()}`)
+  return (await res.json()) as DmPage
+}
+
 async function readDm(
   port: number,
   withId: string,
   asName: string,
-): Promise<Array<{ fromId: string; fromName: string; text: string; ts: string }>> {
-  const res = await fetch(
-    `http://127.0.0.1:${port}/sessions/${encodeURIComponent(withId)}/dm?asName=${encodeURIComponent(asName)}`,
-  )
-  const body = (await res.json()) as { messages: Array<{ fromId: string; fromName: string; text: string; ts: string }> }
-  return body.messages
+): Promise<Array<{ fromId: string; fromName: string; text: string; ts: number }>> {
+  return (await readDmPage(port, withId, asName)).messages
 }
 
 /** Opens an SSE stream (tagged with a sessionId, or untagged) and keeps it
@@ -268,6 +282,38 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     const asOutsider = await readDm(port, aId, 'dm-hist-outsider')
     expect(asOutsider).toHaveLength(0)
     void outsiderId
+  })
+
+  it('pages a long thread newest-page-first, like every other history read', async () => {
+    const aName = 'dm-page-a'
+    const bName = 'dm-page-b'
+    await registerSession(port, aName)
+    const bId = await registerSession(port, bName)
+    for (let i = 1; i <= 5; i++) {
+      await sendDm(port, bId, aName, `msg ${i}`)
+      // Space the sends so no two share a millisecond: the `before` cursor is
+      // ts-based, and equal-ts messages are deliberately kept in one page
+      // (see pageHistory), which would blur the page boundaries asserted here.
+      await new Promise<void>((r) => setTimeout(r, 3))
+    }
+
+    const newest = await readDmPage(port, bId, aName, { limit: 2 })
+    expect(newest.messages.map((m) => m.text)).toEqual(['msg 4', 'msg 5'])
+    expect(newest.hasMore).toBe(true)
+
+    const older = await readDmPage(port, bId, aName, { limit: 2, before: newest.messages[0]!.ts })
+    expect(older.messages.map((m) => m.text)).toEqual(['msg 2', 'msg 3'])
+    expect(older.hasMore).toBe(true)
+
+    const oldest = await readDmPage(port, bId, aName, { limit: 2, before: older.messages[0]!.ts })
+    expect(oldest.messages.map((m) => m.text)).toEqual(['msg 1'])
+    expect(oldest.hasMore).toBe(false)
+
+    // The other party pages the same thread identically.
+    const aId = (await readDmPage(port, bId, aName)).messages[0]!.fromId
+    const asB = await readDmPage(port, aId, bName, { limit: 1 })
+    expect(asB.messages.map((m) => m.text)).toEqual(['msg 5'])
+    expect(asB.hasMore).toBe(true)
   })
 
   it('assigns a fresh id after a deregister+re-register, and never leaks a DM for the new id to the old connection', async () => {

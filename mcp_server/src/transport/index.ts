@@ -58,12 +58,21 @@ export interface TransportDmResult {
   reason?: string
 }
 
-/** One message in a private 1:1 thread between two sessions. */
+/** One message in a private 1:1 thread between two sessions. `ts` is
+ *  epoch-ms, matching the other read-history contracts. */
 export interface TransportDmMessage {
   fromId: string
   fromName: string
   text: string
-  ts: string
+  ts: number
+}
+
+/** A page of a 1:1 thread. Same newest-page-first contract as
+ *  `TransportHistoryPage`: `oldestTs` (epoch-ms) is the next `before`. */
+export interface TransportDmPage {
+  messages: TransportDmMessage[]
+  hasMore: boolean
+  oldestTs?: number
 }
 
 /** Channel summary as surfaced by `list_channels`. */
@@ -176,8 +185,15 @@ export interface Transport {
    *  a DM as more authoritative than a broadcast for destructive
    *  instructions - confirm with the human at the terminal first. */
   sendSessionMessage(args: { sessionName: string; toSessionId: string; text: string }): Promise<TransportDmResult>
-  /** Read back a private 1:1 thread the caller is a party to. */
-  readSessionMessages(args: { sessionName: string; withSessionId: string }): Promise<TransportDmMessage[]>
+  /** Read back a private 1:1 thread the caller is a party to, newest page
+   *  first. Threads are unbounded, so this pages like every other history
+   *  read: pass the previous page's `oldestTs` as `before` to walk back. */
+  readSessionMessages(args: {
+    sessionName: string
+    withSessionId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportDmPage>
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
