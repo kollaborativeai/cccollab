@@ -41,6 +41,7 @@ interface SessionHarness {
   displayName: string
   session: SessionManager
   context: ActiveContext
+  transport: LocalTransport
   listener: BrokerEventListener
   received: ParsedMessage[]
   identityDeps: HarnessDeps
@@ -59,15 +60,19 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
     received.push(m)
   })
 
+  // Transport first: the listener has to be able to read the registration
+  // id it will tag its SSE stream with (KAI-514). The id itself only exists
+  // after `introduce` below - hence the getter.
+  const transport = new LocalTransport(brokerPort)
   const listener = new BrokerEventListener({
     brokerUrl: `http://127.0.0.1:${brokerPort}`,
     messageBus,
     sessionManager: session,
     context,
+    sessionId: () => transport.sessionId,
   })
   await listener.start()
 
-  const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
   const deps: HarnessDeps = { session, context, router, eventListener: listener }
   await handleIdentityTool('introduce', { name: displayName }, deps)
@@ -77,6 +82,7 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
     displayName,
     session,
     context,
+    transport,
     listener,
     received,
     identityDeps: deps,
@@ -227,7 +233,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
 
       // Sanity: broker knows B joined the topic
       const before = (await (
-        await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=cascade-a`)
+        await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=${A.transport.sessionId}`)
       ).json()) as {
         topic: { id: string }
       }
@@ -239,7 +245,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       const rejoin = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: 'cascade-b' }),
+        body: JSON.stringify({ sessionId: B.transport.sessionId }),
       })
       expect(rejoin.status).toBe(403)
 
@@ -247,7 +253,7 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       const sendAttempt = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sender: 'cascade-b', text: 'should not send' }),
+        body: JSON.stringify({ sessionId: B.transport.sessionId, text: 'should not send' }),
       })
       expect(sendAttempt.status).toBe(403)
     } finally {
@@ -271,11 +277,13 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
       expect(noSession.status).toBe(400)
 
       // Subscribed -> 200
-      const okRes = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=gate-a`)
+      const okRes = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=${A.transport.sessionId}`)
       expect(okRes.status).toBe(200)
 
       // Not subscribed to the topic's channel -> 403
-      const forbidden = await fetch(`http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=gate-b`)
+      const forbidden = await fetch(
+        `http://127.0.0.1:${brokerPort}/topics/${topicId}?sessionId=${B.transport.sessionId}`,
+      )
       expect(forbidden.status).toBe(403)
       const body = (await forbidden.json()) as { error: string }
       expect(body.error).toContain('Not subscribed')

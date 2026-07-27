@@ -20,36 +20,50 @@ async function waitUntil<T>(fn: () => Promise<T | null> | T | null, timeoutMs = 
   throw new Error('waitUntil timeout')
 }
 
-async function registerSession(port: number, name: string): Promise<void> {
+/** Display name -> registration id. The broker addresses every session by
+ *  the id it mints (KAI-514), so the helpers keep their readable
+ *  name-based signatures and resolve to ids here. */
+const idByName = new Map<string, string>()
+
+function idOf(name: string): string {
+  const id = idByName.get(name)
+  if (!id) throw new Error(`register "${name}" before using it`)
+  return id
+}
+
+async function registerSession(port: number, name: string): Promise<string> {
   const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   })
   expect(res.status).toBe(200)
+  const body = (await res.json()) as { ok: boolean; id: string }
+  idByName.set(name, body.id)
+  return body.id
 }
 
-async function joinChannel(port: number, sessionId: string, channel: string): Promise<Response> {
+async function joinChannel(port: number, sessionName: string, channel: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/channels/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, channel }),
+    body: JSON.stringify({ sessionId: idOf(sessionName), channel }),
   })
 }
 
-async function leaveChannel(port: number, sessionId: string, channel: string): Promise<Response> {
+async function leaveChannel(port: number, sessionName: string, channel: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/channels/leave`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, channel }),
+    body: JSON.stringify({ sessionId: idOf(sessionName), channel }),
   })
 }
 
 async function listChannels(
   port: number,
-  sessionId: string,
+  sessionName: string,
 ): Promise<Array<{ name: string; subscriberCount: number }>> {
-  const res = await fetch(`http://127.0.0.1:${port}/channels?sessionId=${encodeURIComponent(sessionId)}`)
+  const res = await fetch(`http://127.0.0.1:${port}/channels?sessionId=${encodeURIComponent(idOf(sessionName))}`)
   const body = (await res.json()) as { channels: Array<{ name: string; subscriberCount: number }> }
   return body.channels
 }
@@ -58,7 +72,7 @@ async function createTopic(port: number, creator: string, topic: string, channel
   return fetch(`http://127.0.0.1:${port}/topics`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, creator, channel }),
+    body: JSON.stringify({ topic, sessionId: idOf(creator), channel }),
   })
 }
 
@@ -66,7 +80,7 @@ async function broadcast(port: number, sender: string, channel: string, text: st
   return fetch(`http://127.0.0.1:${port}/broadcast`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sender, channel, text }),
+    body: JSON.stringify({ sessionId: idOf(sender), channel, text }),
   })
 }
 
@@ -74,15 +88,15 @@ async function postTopicMessage(port: number, topicId: string, sender: string, t
   return fetch(`http://127.0.0.1:${port}/topics/${topicId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sender, text }),
+    body: JSON.stringify({ sessionId: idOf(sender), text }),
   })
 }
 
-async function joinTopic(port: number, topicId: string, sessionId: string): Promise<Response> {
+async function joinTopic(port: number, topicId: string, sessionName: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/topics/${topicId}/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId }),
+    body: JSON.stringify({ sessionId: idOf(sessionName) }),
   })
 }
 
@@ -90,7 +104,7 @@ async function archiveTopic(port: number, topicId: string, archivedBy: string): 
   return fetch(`http://127.0.0.1:${port}/topics/${topicId}/archive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ archivedBy }),
+    body: JSON.stringify({ sessionId: idOf(archivedBy) }),
   })
 }
 
@@ -98,7 +112,7 @@ async function unarchiveTopic(port: number, topicId: string, unarchivedBy: strin
   return fetch(`http://127.0.0.1:${port}/topics/${topicId}/unarchive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ unarchivedBy }),
+    body: JSON.stringify({ sessionId: idOf(unarchivedBy) }),
   })
 }
 

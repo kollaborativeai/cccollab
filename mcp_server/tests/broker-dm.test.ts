@@ -20,22 +20,40 @@ async function waitUntil<T>(fn: () => Promise<T | null> | T | null, timeoutMs = 
   throw new Error('waitUntil timeout')
 }
 
-async function registerSession(port: number, name: string): Promise<string> {
+/** Display name -> most recent registration id, so the helpers below can keep
+ *  their readable name-based signatures while the wire talks ids. */
+const idByName = new Map<string, string>()
+
+function idOf(name: string): string {
+  const id = idByName.get(name)
+  if (!id) throw new Error(`register "${name}" before using it`)
+  return id
+}
+
+/** `id` re-registers an existing registration in place (what `introduce`
+ *  does mid-session); omitting it is a brand-new registration. */
+async function registerSession(port: number, name: string, id?: string): Promise<string> {
   const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, ...(id ? { id } : {}) }),
   })
   expect(res.status).toBe(200)
   const body = (await res.json()) as { ok: boolean; id: string }
+  idByName.set(name, body.id)
   return body.id
+}
+
+async function listSessions(port: number): Promise<Array<{ id: string; name: string; lastSeen?: string }>> {
+  const res = await fetch(`http://127.0.0.1:${port}/sessions`)
+  return ((await res.json()) as { sessions: Array<{ id: string; name: string; lastSeen?: string }> }).sessions
 }
 
 async function sendDm(port: number, toId: string, from: string, text: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(toId)}/dm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, text }),
+    body: JSON.stringify({ fromId: idOf(from), text }),
   })
 }
 
@@ -50,7 +68,7 @@ async function readDmPage(
   asName: string,
   opts: { limit?: number; before?: number } = {},
 ): Promise<DmPage> {
-  const params = new URLSearchParams({ asName })
+  const params = new URLSearchParams({ asId: idOf(asName) })
   if (opts.limit !== undefined) params.set('limit', String(opts.limit))
   if (opts.before !== undefined) params.set('before', String(opts.before))
   const res = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(withId)}/dm?${params.toString()}`)
@@ -108,7 +126,7 @@ function openStream(
 }
 
 async function deleteSession(port: number, name: string): Promise<void> {
-  await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(idOf(name))}`, { method: 'DELETE' })
 }
 
 /** Opens the broker's SSE stream tagged to a sessionId, resolving once a
@@ -208,10 +226,129 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     expect(idA).not.toBe(idB)
   })
 
-  it('re-introducing the same still-registered session keeps the same id', async () => {
+  it('re-introducing with the registration id keeps that id (rename in place)', async () => {
     const first = await registerSession(port, 'dm-reg-stable')
-    const second = await registerSession(port, 'dm-reg-stable')
+    const second = await registerSession(port, 'dm-reg-stable', first)
     expect(second).toBe(first)
+    // The same registration can change its display name without becoming a
+    // second one - `introduce` is callable again mid-session.
+    const renamed = await registerSession(port, 'dm-reg-renamed', first)
+    expect(renamed).toBe(first)
+    const sessions = await listSessions(port)
+    expect(sessions.filter((s) => s.id === first).map((s) => s.name)).toEqual(['dm-reg-renamed'])
+  })
+
+  /**
+   * AC2: an id identifies one REGISTRATION, not a role. A relaunch after a
+   * crash sends no id (the process that held it is gone), and there is no
+   * DELETE on the SIGKILL path - so the broker must not hand the dead
+   * registration's id to the new process, or a stale id an orchestrator is
+   * holding silently retargets a different process.
+   */
+  it('mints a new id for a bare re-register under the same name (crash relaunch)', async () => {
+    const first = await registerSession(port, 'dm-reg-crash')
+    const second = await registerSession(port, 'dm-reg-crash')
+    expect(second).not.toBe(first)
+  })
+
+  /**
+   * AC2: two live sessions that pick the same display name are two
+   * registrations. The fleet convention names sessions by role ("reviewer",
+   * "worker"), so this collision is routine, not exotic.
+   */
+  it('gives two concurrent sessions sharing a display name distinct ids, and DMs only the addressed one', async () => {
+    const twinA = await registerSession(port, 'dm-twin')
+    const twinB = await registerSession(port, 'dm-twin')
+    expect(twinA).not.toBe(twinB)
+
+    const sender = 'dm-twin-sender'
+    await registerSession(port, sender)
+    const streamA = openStream(port, twinA)
+    const streamB = openStream(port, twinB)
+    await new Promise<void>((r) => setTimeout(r, 100))
+
+    const res = await sendDm(port, twinA, sender, 'for twin A only')
+    expect(((await res.json()) as { delivered: boolean }).delivered).toBe(true)
+    await new Promise<void>((r) => setTimeout(r, 200))
+
+    expect(streamA.events.some((e) => e.type === 'dm')).toBe(true)
+    expect(streamB.events.some((e) => e.type === 'dm')).toBe(false)
+    streamA.close()
+    streamB.close()
+  })
+
+  /**
+   * AC1: the recipient is resolved by id and ONLY by id. Addressing a
+   * registered peer's display name - a string that resolves fine under any
+   * name fallback - must still miss.
+   */
+  it('refuses a DM addressed to a registered peer display name, with no name fallback', async () => {
+    await registerSession(port, 'dm-byname-recipient')
+    await registerSession(port, 'dm-byname-sender')
+    const stream = openStream(port, 'dm-byname-recipient')
+    await new Promise<void>((r) => setTimeout(r, 100))
+
+    const res = await sendDm(port, 'dm-byname-recipient', 'dm-byname-sender', 'by name?')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { delivered: boolean; reason?: string }
+    expect(body.delivered).toBe(false)
+    expect(body.reason).toMatch(/unknown recipient id/i)
+    await new Promise<void>((r) => setTimeout(r, 200))
+    expect(stream.events.some((e) => e.type === 'dm')).toBe(false)
+    stream.close()
+  })
+
+  /**
+   * The delivery lane is keyed by registration id, so a connection can only
+   * receive a session's DMs by knowing that session's id. Tagging a stream
+   * with a display name - which any process can guess - reaches nothing.
+   */
+  it('never delivers to a stream tagged with the recipient display name instead of its id', async () => {
+    const victimId = await registerSession(port, 'dm-impostor-victim')
+    await registerSession(port, 'dm-impostor-sender')
+    const impostor = openStream(port, 'dm-impostor-victim')
+    await new Promise<void>((r) => setTimeout(r, 100))
+
+    const res = await sendDm(port, victimId, 'dm-impostor-sender', 'victim eyes only')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { delivered: boolean; reason?: string }
+    // The victim itself never attached, so honest delivery is false...
+    expect(body.delivered).toBe(false)
+    expect(body.reason).toMatch(/attached/i)
+    await new Promise<void>((r) => setTimeout(r, 200))
+    // ...and the message reached nobody.
+    expect(impostor.events.some((e) => e.type === 'dm')).toBe(false)
+    impostor.close()
+  })
+
+  /**
+   * Per-registration ids mean a crashed session's row outlives it (there is
+   * no DELETE on the SIGKILL path). `lastSeen` is what lets `list_sessions`
+   * age that row out instead of showing two identically-named sessions
+   * forever - it tracks the live SSE connection and freezes when it drops.
+   */
+  it('reports lastSeen from the live connection, frozen once the session detaches', async () => {
+    const id = await registerSession(port, 'dm-liveness')
+    const lastSeenOf = async (): Promise<string> => {
+      const row = (await listSessions(port)).find((s) => s.id === id)
+      expect(row?.lastSeen).toBeTruthy()
+      return row!.lastSeen!
+    }
+
+    const stream = openStream(port, id)
+    await new Promise<void>((r) => setTimeout(r, 100))
+    const attachedFirst = await lastSeenOf()
+    await new Promise<void>((r) => setTimeout(r, 30))
+    const attachedSecond = await lastSeenOf()
+    // Attached: liveness keeps advancing, so the row never looks stale.
+    expect(attachedSecond > attachedFirst).toBe(true)
+
+    stream.close()
+    await new Promise<void>((r) => setTimeout(r, 150))
+    const detachedFirst = await lastSeenOf()
+    await new Promise<void>((r) => setTimeout(r, 30))
+    // Detached: frozen at the disconnect, so the staleness filter can drop it.
+    expect(await lastSeenOf()).toBe(detachedFirst)
   })
 
   it('rejects a self-send', async () => {
@@ -250,7 +387,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
 
     const evtPromise = nextEventFor(
       port,
-      recipientName,
+      recipientId,
       (evt) => evt.type === 'dm' && evt.fromName === senderName,
       async () => {
         const res = await sendDm(port, recipientId, senderName, 'hi there')
@@ -320,7 +457,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     const name = 'dm-reuse-name'
     const idFirst = await registerSession(port, name)
     // The first registration holds an open, tagged SSE connection.
-    const stale = openStream(port, name)
+    const stale = openStream(port, idFirst)
     // Give the connection a moment to attach at the broker.
     await new Promise<void>((r) => setTimeout(r, 100))
 
@@ -354,7 +491,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     // Also open the recipient's tagged stream so the DM has somewhere
     // legitimate to land - otherwise `delivered:false` would trivially
     // starve the leak channel.
-    const recipientTagged = openStream(port, recipientName)
+    const recipientTagged = openStream(port, recipientId)
     await new Promise<void>((r) => setTimeout(r, 100))
 
     const res = await sendDm(port, recipientId, senderName, 'private for recipient only')

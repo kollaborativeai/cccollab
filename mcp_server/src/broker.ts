@@ -36,16 +36,20 @@ function broadcast(data: string): void {
 
 /**
  * Write an event to only the SSE connection(s) tagged with the given
- * session name - never the global `clients` set. A DM is private (KAI-514
- * AC6): fanning it through `broadcast()` would hand its text to every
- * other connected session's event listener, even though each listener
+ * registration id - never the global `clients` set. A DM is private
+ * (KAI-514 AC6): fanning it through `broadcast()` would hand its text to
+ * every other connected session's event listener, even though each listener
  * currently self-filters what it surfaces to its own Claude session.
+ *
+ * Keyed by *id*, not display name: a name is guessable and shared (two
+ * sessions can pick "reviewer"), so a name-keyed lane delivers a session's
+ * private mail to whoever tagged a stream with that name.
  *
  * Returns whether at least one connection received the write, which also
  * doubles as the "recipient attached at commit time" signal (AC3).
  */
-function sendToSessionConnections(sessionName: string, event: unknown): boolean {
-  const conns = sseBySession.get(sessionName)
+function sendToSessionConnections(sessionId: string, event: unknown): boolean {
+  const conns = sseBySession.get(sessionId)
   if (!conns || conns.size === 0) return false
   const payload = `data: ${JSON.stringify(event)}\n\n`
   let wrote = false
@@ -79,14 +83,21 @@ interface LocalTopic {
 
 interface SessionInfo {
   name: string
-  /** Stable id for this *registration*. Reused across repeated `introduce`
-   *  calls while the session stays registered; a fresh id is minted only
-   *  when a new SessionInfo is created (first introduce, or introduce
-   *  after a prior deregister). Never derived from `name` - two
-   *  registrations sharing a display name still get distinct ids. */
+  /** Stable id for this *registration* - the key of the `sessions` map and
+   *  the only way to address the session (KAI-514 AC1/AC2). A registration
+   *  keeps its id for as long as its process holds it: `POST /sessions`
+   *  echoing a known id updates that registration in place (an `introduce`
+   *  rename), while a POST without one is always a NEW registration. So two
+   *  live sessions sharing a display name are two ids, and a process that
+   *  crashed and relaunched can never inherit the id an orchestrator is
+   *  still holding for the dead one. Never derived from `name`. */
   id: string
   objective?: string
   registeredAt: string
+  /** Last time this registration was known attached (SSE connect, or the
+   *  moment its last connection dropped). `list_sessions` uses it to age out
+   *  registrations whose process died without deregistering. */
+  lastSeenAt: string
   channels: Set<string>
 }
 
@@ -99,12 +110,15 @@ interface DmMessage {
 }
 
 const topics = new Map<string, LocalTopic>()
+/** Registrations, keyed by registration id. Channel membership sets and
+ *  `LocalTopic.joinedSessions` hold ids too, so two sessions sharing a
+ *  display name are independent everywhere. */
 const sessions = new Map<string, SessionInfo>()
 const channels = new Map<string, Set<string>>()
 
-/** SSE connections tagged with the session name that opened them (via
- *  `/events?sessionId=`), used only to answer "is this session currently
- *  attached" for DM delivery honesty. Distinct from the untargeted
+/** SSE connections tagged with the registration id that opened them (via
+ *  `/events?sessionId=`), used to route DMs and to answer "is this session
+ *  currently attached" for delivery honesty. Distinct from the untargeted
  *  `clients` set that channel/topic broadcasts fan out to. */
 const sseBySession = new Map<string, Set<SSEResponse>>()
 
@@ -118,11 +132,9 @@ function dmPairKey(idA: string, idB: string): string {
   return [idA, idB].sort().join('|')
 }
 
-function findSessionById(id: string): SessionInfo | undefined {
-  for (const info of sessions.values()) {
-    if (info.id === id) return info
-  }
-  return undefined
+/** Is this registration currently holding at least one SSE connection? */
+function isAttached(sessionId: string): boolean {
+  return (sseBySession.get(sessionId)?.size ?? 0) > 0
 }
 
 /** Normalize channel name: trim + lowercase. Returns null if empty. */
@@ -132,48 +144,42 @@ function normalizeChannel(raw: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
-function ensureSession(name: string): SessionInfo {
-  let info = sessions.get(name)
-  if (!info) {
-    info = { name, id: crypto.randomUUID(), registeredAt: new Date().toISOString(), channels: new Set() }
-    sessions.set(name, info)
-  }
-  return info
-}
-
-function joinChannel(sessionName: string, channel: string): boolean {
-  const info = ensureSession(sessionName)
-  const already = info.channels.has(channel)
+/** Join by registration id. Unlike the old name-keyed version this never
+ *  conjures a registration: an id that isn't registered is a caller bug
+ *  (introduce runs first), not something to paper over with a new row. */
+function joinChannel(sessionId: string, channel: string): boolean {
+  const info = sessions.get(sessionId)
+  if (!info) return false
   info.channels.add(channel)
   let members = channels.get(channel)
   if (!members) {
     members = new Set()
     channels.set(channel, members)
   }
-  members.add(sessionName)
-  return !already
+  members.add(sessionId)
+  return true
 }
 
-function leaveChannel(sessionName: string, channel: string): boolean {
-  const info = sessions.get(sessionName)
+function leaveChannel(sessionId: string, channel: string): boolean {
+  const info = sessions.get(sessionId)
   if (!info) return false
   const removed = info.channels.delete(channel)
   const members = channels.get(channel)
   if (members) {
-    members.delete(sessionName)
+    members.delete(sessionId)
     if (members.size === 0) channels.delete(channel)
   }
   for (const t of topics.values()) {
-    if (t.channel === channel) t.joinedSessions.delete(sessionName)
+    if (t.channel === channel) t.joinedSessions.delete(sessionId)
   }
   return removed
 }
 
-function removeSessionFromAllChannels(sessionName: string): void {
-  const info = sessions.get(sessionName)
+function removeSessionFromAllChannels(sessionId: string): void {
+  const info = sessions.get(sessionId)
   if (!info) return
   for (const ch of [...info.channels]) {
-    leaveChannel(sessionName, ch)
+    leaveChannel(sessionId, ch)
   }
 }
 
@@ -210,7 +216,7 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
 const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
 const TOPIC_MESSAGES_ROUTE = /^\/topics\/([^/]+)\/messages$/
-const SESSION_NAME_ROUTE = /^\/sessions\/([^/]+)$/
+const SESSION_ID_ROUTE = /^\/sessions\/([^/]+)$/
 const SESSION_DM_ROUTE = /^\/sessions\/([^/]+)\/dm$/
 
 const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -231,9 +237,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     const sseRes = res as SSEResponse
     clients.add(sseRes)
-    // Optional session tag: lets DM delivery know this session is
-    // currently attached (KAI-514). Untagged connections (sessionId
-    // omitted) still receive channel/topic broadcasts as before.
+    // Optional registration tag: routes DMs to this session and lets
+    // delivery know it is currently attached (KAI-514). It must be the
+    // registration id from `POST /sessions` - a tag that matches no
+    // registration receives nothing beyond the usual broadcasts.
     const sessionId = searchParams.get('sessionId') ?? undefined
     if (sessionId) {
       let conns = sseBySession.get(sessionId)
@@ -242,6 +249,8 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         sseBySession.set(sessionId, conns)
       }
       conns.add(sseRes)
+      const info = sessions.get(sessionId)
+      if (info) info.lastSeenAt = new Date().toISOString()
     }
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
@@ -257,6 +266,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           conns.delete(sseRes)
           if (conns.size === 0) sseBySession.delete(sessionId)
         }
+        // Freeze liveness at the moment the last connection dropped, so a
+        // registration whose process died ages out of `list_sessions`
+        // instead of lingering as a second row with the same name.
+        const info = sessions.get(sessionId)
+        if (info) info.lastSeenAt = new Date().toISOString()
       }
       log(`SSE client disconnected (total: ${clients.size})`)
     })
@@ -354,13 +368,15 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (pathname === '/broadcast' && method === 'POST') {
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { text?: string; sender?: string; channel?: string }
+        const body = JSON.parse(await readBody(req)) as { text?: string; sessionId?: string; channel?: string }
         const channel = normalizeChannel(body.channel)
-        if (!body.text || !body.sender || !channel) {
-          jsonResponse(res, 400, { error: 'text, sender and channel are required' })
+        if (!body.text || !body.sessionId || !channel) {
+          jsonResponse(res, 400, { error: 'text, sessionId and channel are required' })
           return
         }
-        const info = sessions.get(body.sender)
+        // The display name on the wire comes from the registration, not from
+        // the caller: one registration, one name, resolved at send time.
+        const info = sessions.get(body.sessionId)
         if (!info || !info.channels.has(channel)) {
           jsonResponse(res, 400, { error: `Sender is not subscribed to channel "${channel}".` })
           return
@@ -369,12 +385,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           source: 'local' as const,
           type: 'broadcast' as const,
           channel,
-          sender: body.sender,
+          sender: info.name,
           text: body.text,
           ts: new Date().toISOString(),
         }
         broadcast(JSON.stringify(event))
-        log(`BROADCAST ${channel}: ${body.sender}: ${body.text}`)
+        log(`BROADCAST ${channel}: ${info.name}: ${body.text}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -386,17 +402,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (pathname === '/topics' && method === 'POST') {
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { topic?: string; creator?: string; channel?: string }
+        const body = JSON.parse(await readBody(req)) as { topic?: string; sessionId?: string; channel?: string }
         const channel = normalizeChannel(body.channel)
-        if (!body.topic || !body.creator || !channel) {
-          jsonResponse(res, 400, { error: 'topic, creator and channel are required' })
+        if (!body.topic || !body.sessionId || !channel) {
+          jsonResponse(res, 400, { error: 'topic, sessionId and channel are required' })
           return
         }
-        const info = sessions.get(body.creator)
+        const info = sessions.get(body.sessionId)
         if (!info || !info.channels.has(channel)) {
           jsonResponse(res, 400, { error: `Creator is not subscribed to channel "${channel}".` })
           return
         }
+        const creator = info.name
         const wanted = body.topic.trim().toLowerCase()
         for (const t of topics.values()) {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {
@@ -420,17 +437,17 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           id,
           topic: body.topic,
           channel,
-          creator: body.creator,
+          creator,
           state: 'active',
           createdAt,
           messages: [],
           joinedSessions: new Set(),
         }
         topics.set(id, localTopic)
-        const topicData = { id, topic: body.topic, channel, creator: body.creator, state: 'active', createdAt }
+        const topicData = { id, topic: body.topic, channel, creator, state: 'active', createdAt }
         const event = { source: 'local' as const, type: 'topic_created' as const, channel, topic: topicData }
         broadcast(JSON.stringify(event))
-        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${body.creator}`)
+        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${creator}`)
         jsonResponse(res, 200, topicData)
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -559,16 +576,17 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         switch (action) {
           case 'messages': {
             const text = body.text as string | undefined
-            const sender = body.sender as string | undefined
-            if (!text || !sender) {
-              jsonResponse(res, 400, { error: 'text and sender are required' })
+            const sessionId = body.sessionId as string | undefined
+            if (!text || !sessionId) {
+              jsonResponse(res, 400, { error: 'text and sessionId are required' })
               return
             }
-            const info = sessions.get(sender)
+            const info = sessions.get(sessionId)
             if (!info || !info.channels.has(t.channel)) {
               jsonResponse(res, 403, { error: `Sender is not subscribed to channel "${t.channel}".` })
               return
             }
+            const sender = info.name
             const ts = new Date().toISOString()
             t.messages.push({ sender, text, ts })
             const event = {
@@ -609,7 +627,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'archive': {
-            const archivedBy = body.archivedBy as string | undefined
+            const archivedBy = sessions.get(body.sessionId as string)?.name
             t.state = 'archived'
             const event = {
               source: 'local' as const,
@@ -624,7 +642,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'unarchive': {
-            const unarchivedBy = body.unarchivedBy as string | undefined
+            const unarchivedBy = sessions.get(body.sessionId as string)?.name
             t.state = 'active'
             const event = {
               source: 'local' as const,
@@ -648,7 +666,15 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (pathname === '/sessions' && method === 'GET') {
     const channelFilter = normalizeChannel(searchParams.get('channel'))
-    const result: Array<{ name: string; id: string; objective?: string; registeredAt: string; channels: string[] }> = []
+    const now = new Date().toISOString()
+    const result: Array<{
+      name: string
+      id: string
+      objective?: string
+      registeredAt: string
+      lastSeen: string
+      channels: string[]
+    }> = []
     for (const s of sessions.values()) {
       if (channelFilter && !s.channels.has(channelFilter)) continue
       result.push({
@@ -656,6 +682,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         id: s.id,
         objective: s.objective,
         registeredAt: s.registeredAt,
+        // An attached session is live right now; a detached one froze at
+        // its last disconnect, which is what lets the tool layer's staleness
+        // filter drop a registration whose process was killed (no DELETE).
+        lastSeen: isAttached(s.id) ? now : s.lastSeenAt,
         channels: [...s.channels],
       })
     }
@@ -666,23 +696,36 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (pathname === '/sessions' && method === 'POST') {
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { name?: string; objective?: string }
+        const body = JSON.parse(await readBody(req)) as { name?: string; objective?: string; id?: string }
         if (!body.name) {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
-        const existing = sessions.get(body.name)
-        const info: SessionInfo = existing
-          ? { ...existing, objective: body.objective ?? existing.objective }
-          : {
-              name: body.name,
-              id: crypto.randomUUID(),
-              objective: body.objective,
-              registeredAt: new Date().toISOString(),
-              channels: new Set(),
-            }
-        sessions.set(body.name, info)
-        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
+        // Echoing a live registration id updates that registration in place:
+        // that is a session calling `introduce` again to rename or restate
+        // its objective, and it must not spawn a second row. Anything else -
+        // including a relaunch after a crash, which has no id to echo - is a
+        // NEW registration with a NEW id, even under the same display name
+        // (KAI-514 AC2). Never key this on the name.
+        const existing = body.id ? sessions.get(body.id) : undefined
+        if (existing) {
+          existing.name = body.name
+          if (body.objective !== undefined) existing.objective = body.objective
+          log(`SESSION RE-REGISTERED: ${body.name} (${existing.id})`)
+          jsonResponse(res, 200, { ok: true, id: existing.id })
+          return
+        }
+        const now = new Date().toISOString()
+        const info: SessionInfo = {
+          name: body.name,
+          id: crypto.randomUUID(),
+          objective: body.objective,
+          registeredAt: now,
+          lastSeenAt: now,
+          channels: new Set(),
+        }
+        sessions.set(info.id, info)
+        log(`SESSION REGISTERED: ${body.name} (${info.id})${body.objective ? ` (${body.objective})` : ''}`)
         jsonResponse(res, 200, { ok: true, id: info.id })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -696,20 +739,21 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const toId = decodeURIComponent(sessionDmMatch[1]!)
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { from?: string; text?: string }
-        if (!body.from || !body.text) {
-          jsonResponse(res, 400, { error: 'from and text are required' })
+        const body = JSON.parse(await readBody(req)) as { fromId?: string; text?: string }
+        if (!body.fromId || !body.text) {
+          jsonResponse(res, 400, { error: 'fromId and text are required' })
           return
         }
-        const sender = sessions.get(body.from)
+        const sender = sessions.get(body.fromId)
         if (!sender) {
-          jsonResponse(res, 400, { error: `Unknown sender session "${body.from}".` })
+          jsonResponse(res, 400, { error: `Unknown sender session id "${body.fromId}".` })
           return
         }
-        // AC2: an unknown/stale id is a normal outcome, never a name
+        // AC1: an unknown/stale id is a normal outcome, never a name
         // fallback - report it the same way as "recipient not attached"
-        // rather than a 4xx, so callers get one honest result shape.
-        const recipient = findSessionById(toId)
+        // rather than a 4xx, so callers get one honest result shape. Both
+        // sides of this lookup are ids; a display name resolves to nothing.
+        const recipient = sessions.get(toId)
         if (!recipient) {
           jsonResponse(res, 200, { delivered: false, reason: `Unknown recipient id "${toId}".` })
           return
@@ -726,7 +770,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         thread.push(msg)
         dmThreads.set(pairKey, thread)
 
-        const delivered = sendToSessionConnections(recipient.name, {
+        const delivered = sendToSessionConnections(recipient.id, {
           source: 'local' as const,
           type: 'dm' as const,
           fromId: sender.id,
@@ -746,14 +790,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (sessionDmMatch && method === 'GET') {
     const withId = decodeURIComponent(sessionDmMatch[1]!)
-    const asName = searchParams.get('asName')
-    if (!asName) {
-      jsonResponse(res, 400, { error: 'asName query parameter is required' })
+    const asId = searchParams.get('asId')
+    if (!asId) {
+      jsonResponse(res, 400, { error: 'asId query parameter is required' })
       return
     }
-    const self = sessions.get(asName)
+    const self = sessions.get(asId)
     if (!self) {
-      jsonResponse(res, 400, { error: `Unknown session "${asName}".` })
+      jsonResponse(res, 400, { error: `Unknown session id "${asId}".` })
       return
     }
     // Paged the same way as topic history (newest page first, `before`
@@ -775,19 +819,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
-  const sessionNameMatch = SESSION_NAME_ROUTE.exec(pathname)
-  if (sessionNameMatch && method === 'DELETE') {
-    const name = decodeURIComponent(sessionNameMatch[1]!)
-    removeSessionFromAllChannels(name)
-    sessions.delete(name)
-    // DM delivery tags SSE connections by session name; drop this name's
-    // tag on deregister so a later registration reusing the same display
-    // name (a fresh id, per AC2) can't have its private DMs fan out to
-    // this now-departed session's still-closing connection (KAI-514 AC6).
-    // Channel/topic broadcasts are unaffected - they use the global
-    // `clients` set, which the connection's own close handler prunes.
-    sseBySession.delete(name)
-    log(`SESSION UNREGISTERED: ${name}`)
+  const sessionIdMatch = SESSION_ID_ROUTE.exec(pathname)
+  if (sessionIdMatch && method === 'DELETE') {
+    const id = decodeURIComponent(sessionIdMatch[1]!)
+    const info = sessions.get(id)
+    removeSessionFromAllChannels(id)
+    sessions.delete(id)
+    // Drop the delivery tag too, so a still-closing connection from this
+    // registration can't receive anything after deregistration. Channel/
+    // topic broadcasts are unaffected - they use the global `clients` set,
+    // which the connection's own close handler prunes.
+    sseBySession.delete(id)
+    log(`SESSION UNREGISTERED: ${info?.name ?? 'unknown'} (${id})`)
     jsonResponse(res, 200, { ok: true })
     return
   }

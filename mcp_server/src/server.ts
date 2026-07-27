@@ -16,7 +16,6 @@ import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
 import { resolveTsx } from './resolve-tsx.js'
 import { LocalTransport } from './transport/local.js'
-import { type Transport } from './transport/index.js'
 import { TransportRouter } from './transport/router.js'
 import { attachLocation, ensureLazyAttach, planStartupAttachments } from './transport/attach.js'
 import { AttachDiagnostics } from './transport/diagnostics.js'
@@ -70,7 +69,9 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // same code path the `authenticate` tool hits for hot-attach. Going
   // through one shared function keeps startup behaviour and hot-attach
   // behaviour in lock-step.
-  const localTransport: Transport = new LocalTransport(brokerPort)
+  // Concrete type (not `Transport`): the SSE listener below needs this
+  // transport's broker registration id to tag its stream with (KAI-514).
+  const localTransport = new LocalTransport(brokerPort)
   const router = new TransportRouter([localTransport])
   const context = new ActiveContext()
 
@@ -101,6 +102,10 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     messageBus,
     sessionManager: session,
     context,
+    // Tag the SSE stream with the broker registration id so DMs addressed
+    // to this session reach it. Read lazily: the stream opens before
+    // `introduce` mints the id.
+    sessionId: () => localTransport.sessionId,
   })
 
   // Topic-message subscriptions are keyed by `${location}::${topicId}`

@@ -17,6 +17,11 @@ interface BrokerEventListenerOptions {
   messageBus: MessageBus
   sessionManager: SessionManager
   context: ActiveContext
+  /** This session's broker registration id, read at connect time. A getter
+   *  rather than a value because the connection opens before `introduce`
+   *  mints the id (KAI-514). Optional: a listener without one stays
+   *  untagged and simply receives no DMs. */
+  sessionId?: () => string | undefined
 }
 
 export interface BrokerLocalEvent {
@@ -32,8 +37,8 @@ export interface BrokerLocalEvent {
   ts?: string
   /** `dm` events only (KAI-514): the broker only ever sends a `dm` event
    *  down the SSE connection(s) tagged with the addressed session's own
-   *  name, so every listener that receives one is the intended recipient
-   *  - there is no channel/topic gate to check. */
+   *  registration id, so every listener that receives one is the intended
+   *  recipient - there is no channel/topic gate to check. */
   fromId?: string
   fromName?: string
   toId?: string
@@ -48,6 +53,7 @@ export class BrokerEventListener {
   private readonly bus: MessageBus
   private readonly session: SessionManager
   private readonly context: ActiveContext
+  private readonly getSessionId: () => string | undefined
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
 
@@ -56,6 +62,7 @@ export class BrokerEventListener {
     this.bus = options.messageBus
     this.session = options.sessionManager
     this.context = options.context
+    this.getSessionId = options.sessionId ?? (() => undefined)
   }
 
   async start(): Promise<void> {
@@ -73,28 +80,28 @@ export class BrokerEventListener {
   }
 
   /**
-   * Re-open the SSE connection tagged with the session's current
-   * display name. The connection opened at `start()` predates
+   * Re-open the SSE connection tagged with this session's broker
+   * registration id. The connection opened at `start()` predates
    * `introduce` in the common case (see `server.ts`), so it carries no
-   * session tag and the broker can't yet answer "is this session
-   * attached" for DM delivery (KAI-514 AC3). Call this once `introduce`
-   * has set a name; a no-op if the connection is already tagged with
-   * that same name.
+   * tag and the broker can neither route DMs to it nor answer "is this
+   * session attached" for delivery honesty (KAI-514 AC3). Call this once
+   * `introduce` has registered; a no-op if already tagged with that id.
    */
   reconnectForIdentity(): void {
-    if (this.stopped || !this.session.hasName()) return
-    if (this.taggedSessionName === this.session.displayName) return
+    if (this.stopped) return
+    const id = this.getSessionId()
+    if (!id || this.taggedSessionId === id) return
     if (this.currentRequest) this.currentRequest.destroy()
     this.connect()
   }
 
-  private taggedSessionName: string | undefined
+  private taggedSessionId: string | undefined
 
   private connect(): void {
     if (this.stopped) return
 
-    this.taggedSessionName = this.session.hasName() ? this.session.displayName : undefined
-    const qs = this.taggedSessionName ? `?sessionId=${encodeURIComponent(this.taggedSessionName)}` : ''
+    this.taggedSessionId = this.getSessionId()
+    const qs = this.taggedSessionId ? `?sessionId=${encodeURIComponent(this.taggedSessionId)}` : ''
     const url = `${this.brokerUrl}/events${qs}`
     this.log(`Connecting to broker at ${url}`)
 
@@ -288,8 +295,8 @@ export class BrokerEventListener {
       case 'dm': {
         // No channel/topic gate: the broker only sends `dm` events down
         // the SSE connection(s) tagged with the addressed session's own
-        // name (KAI-514), so every listener that sees one is the
-        // intended recipient. The self-check is defense in depth only.
+        // registration id (KAI-514), so every listener that sees one is
+        // the intended recipient. The self-check is defense in depth only.
         if (event.fromName && this.session.isExactSelf(event.fromName)) {
           this.log(`DROPPED: self dm from ${event.fromName}`)
           return
