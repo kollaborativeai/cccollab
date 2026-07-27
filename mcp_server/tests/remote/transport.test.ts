@@ -777,6 +777,43 @@ describe('RemoteTransport subscription resilience (KAI-438)', () => {
     expect(transport.degradation).toBeNull()
   })
 
+  it('four intermittent blips, each followed by a healthy delivery, never disable the transport', async () => {
+    // AC2's actual mechanism: `onHealthy` resetting `failures` to 0.
+    // `failures` is a LIFETIME counter with no time window (unlike
+    // `recentFailures`/DEGRADATION_WINDOW_MS), so without the reset four
+    // blips at *any* spacing — four separate days — accumulate to an
+    // exhausted schedule and permanently disable the transport with no
+    // auto-recovery. The neighbouring "a transient fault recovers" test
+    // cannot catch that: it fires exactly one error, and one error never
+    // disables anything whether the reset exists or not.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (m) => delivered.push(m.text))
+
+    // Three full error → recover cycles. Each recovery must clear the debt
+    // left by the error before it. 20s drains even the longest backoff in
+    // RESUBSCRIBE_DELAYS_MS, so the replacement opens either way.
+    for (let cycle = 0; cycle < 3; cycle++) {
+      errCbs[cycle]!(maskedProductionError())
+      await vi.advanceTimersByTimeAsync(20_000)
+      dataCbs[cycle + 1]!([
+        { _id: `m${cycle}`, fromSessionId: 'alice', text: `recovered ${cycle}`, ts: 1_700_000_100_000 + cycle },
+      ])
+    }
+    expect(delivered).toEqual(['recovered 0', 'recovered 1', 'recovered 2'])
+
+    // The fourth blip. With the reset it is the counter's *first* failure;
+    // without it, it is the fourth and exhausts the schedule.
+    errCbs[3]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(20_000)
+
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
   it('tears down the dead subscription handle before replacing it (no duplicate streams)', async () => {
     vi.useFakeTimers()
     const { stub, errCbs, unsubs } = makeSubStub()
@@ -823,6 +860,66 @@ describe('RemoteTransport subscription resilience (KAI-438)', () => {
     // The acceptance criterion: NOT enabled-and-silently-dead.
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/schema drift/i)
+  })
+
+  /** Resolve 'dev' through the async `channels.queries.listAll` lookup —
+   *  the path that re-enters `register` from a promise, which the topic
+   *  path has no equivalent of. */
+  function makeChannelSubStub(): SubStub {
+    const sub = makeSubStub()
+    sub.stub.query = vi.fn(async () => [{ channelId: 'chan_dev', name: 'dev' }])
+    return sub
+  }
+
+  it('re-subscribes a dead CHANNEL subscription instead of silently losing every later broadcast', async () => {
+    // The channel path is the higher-traffic one and carries machinery the
+    // topic path does not: `register` re-entered after the async listAll,
+    // the `innerUnsubscribe` reassignment, a cursor keyed by channelId and
+    // the fire-and-forget ackChannel. Reverting it to pre-PR silent death
+    // loses 'after recovery' with the whole suite still green.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs, unsubs } = makeChannelSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (m) => delivered.push(m.text))
+    // Let the async channel-id lookup land and `register` run.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stub.onUpdate as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1)
+
+    dataCbs[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'before', ts: 1_700_000_500_000 }])
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // A replacement must exist, and the dead handle must be torn down first.
+    expect((stub.onUpdate as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(unsubs[0]!).toHaveBeenCalled()
+
+    dataCbs[1]!([{ _id: 'm2', fromSessionId: 'alice', text: 'after recovery', ts: 1_700_000_600_000 }])
+
+    expect(delivered).toEqual(['before', 'after recovery'])
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('resumes a CHANNEL re-subscribe from the channelId-keyed watermark', async () => {
+    // The channel cursor lives in `channelMaxTs`, keyed by channelId rather
+    // than topicId, and is read inside the attempt so a replacement resumes
+    // where its predecessor stopped instead of replaying the channel's
+    // broadcast history.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs, argsSeen } = makeChannelSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+
+    dataCbs[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'seen', ts: 1_700_000_500_000 }])
+    expect(argsSeen[0]).toEqual({ channelId: 'chan_dev' })
+
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(argsSeen[1]).toEqual({ channelId: 'chan_dev', sinceTs: 1_700_000_500_000 })
   })
 
   it('does not describe a dead subscription as "(transient)"', async () => {
