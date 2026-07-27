@@ -202,8 +202,14 @@ const DEGRADATION_THRESHOLD = 3
  * rollover rides through without disabling anything, short enough that a
  * genuinely missing function surfaces to the user quickly rather than
  * decaying into silence.
+ *
+ * Exported so the counter-reset test derives its cycle count from the
+ * schedule instead of hardcoding today's length: without `onHealthy`'s
+ * reset, exactly `length + 1` blips disable the transport, so a test
+ * pinned to a literal 4 stops guarding anything the moment a fourth
+ * delay is added.
  */
-const RESUBSCRIBE_DELAYS_MS = [1_000, 5_000, 15_000]
+export const RESUBSCRIBE_DELAYS_MS = [1_000, 5_000, 15_000]
 
 /**
  * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
