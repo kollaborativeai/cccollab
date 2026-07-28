@@ -587,6 +587,15 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel, location: match.location })
 }
 
+/**
+ * A remote session with no fresher liveness signal than this is dropped
+ * from `list_sessions` (KAI-515) — a registration that hasn't reported
+ * `lastSeen` within 5 heartbeat-ish intervals is presumed dead. Sessions
+ * whose transport doesn't report `lastSeen` at all are unaffected: absence
+ * means "unknown", not "stale", so they're kept (see the `visible` filter).
+ */
+const SESSION_STALE_MS = 5 * 60_000
+
 async function handleListSessions(
   deps: TopicToolDeps,
   channelArg?: string,
@@ -597,8 +606,8 @@ async function handleListSessions(
 
   // Merged by session identity, which `mergeSessions` derives per row —
   // our own registrations collapse into one entry across locations, peers
-  // do not. Channels union across transports, each tagged by the location
-  // it came from.
+  // are kept apart per (location, id). Channels union across transports,
+  // each tagged by the location it came from.
   //
   // `scopedLocations` records locations whose transport already scopes
   // `listSessions` server-side to peers sharing a channel with this
@@ -608,10 +617,12 @@ async function handleListSessions(
   const merged = new Map<
     string | symbol,
     {
+      id?: string
       name: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      lastSeen?: string
       scopedLocations: Set<ChannelLocation>
     }
   >()
@@ -659,11 +670,27 @@ async function handleListSessions(
         return s.channels.some((ch) => mySubs.has(`${ch.location}::${ch.name}`))
       })
 
-  const result = visible.map((s) => ({
+  // Drop registrations with a known, stale `lastSeen` (KAI-515). No
+  // `lastSeen` means the transport hasn't reported liveness yet, which is
+  // "unknown", not "dead" — those are kept unfiltered.
+  const alive = visible.filter((s) => {
+    if (s.lastSeen === undefined) return true
+    const seenAt = Date.parse(s.lastSeen)
+    // An unparseable timestamp is "unknown", not "definitely dead" —
+    // treat it the same as absent rather than silently dropping the
+    // session (NaN comparisons are always false, so `Date.now() - NaN <=
+    // threshold` would otherwise filter it out with no diagnostic).
+    if (Number.isNaN(seenAt)) return true
+    return Date.now() - seenAt <= SESSION_STALE_MS
+  })
+
+  const result = alive.map((s) => ({
+    ...(s.id ? { id: s.id } : {}),
     name: s.name,
     ...(s.objective ? { objective: s.objective } : {}),
     channels: s.channels,
     registeredAt: s.registeredAt,
+    ...(s.lastSeen ? { lastSeen: s.lastSeen } : {}),
   }))
   return JSON.stringify(result)
 }
@@ -676,58 +703,85 @@ function mergeSessions(
   merged: Map<
     string | symbol,
     {
+      id?: string
       name: string
       objective?: string
       channels: Array<{ name: string; location: ChannelLocation }>
       registeredAt?: string
+      lastSeen?: string
       scopedLocations: Set<ChannelLocation>
     }
   >,
-  rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string; self?: boolean }>,
+  rows: Array<{
+    id?: string
+    name: string
+    objective?: string
+    channels?: string[]
+    registeredAt?: string
+    lastSeen?: string
+    self?: boolean
+  }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
    *  server-side to peers sharing a channel with the caller. */
   serverScoped: boolean,
 ): void {
   for (const r of rows) {
-    // What identifies a session here:
+    // What identifies a session here, in the order the key is derived:
     //
-    // Our own rows merge on the transport's `self` flag. This process
-    // called `introduce` on every transport, so each one can point at its
-    // own registration authoritatively — that is what makes one process
-    // attached to two locations one entry (KAI-516) rather than a phantom
-    // second peer somewhere the user is not.
+    // 1. Our own rows merge on the transport's `self` flag. This process
+    //    called `introduce` on every transport, so each transport can
+    //    point at its own registration authoritatively. That is the only
+    //    cross-location identity that exists, and it is what makes one
+    //    process attached to two locations one entry (KAI-516) rather
+    //    than a phantom second peer somewhere the user is not.
     //
-    // Peers fall back to the display name, which is *not* an identity:
-    // names are unique per (user, organization) only, and a broker name
-    // and a Convex session id are issued by different authorities and are
-    // never comparable across locations. The fallback is the only key
-    // available today; it must never be used for our own rows, because
-    // since KAI-516 those carry real memberships and a same-named stranger
-    // would absorb them.
-    const key = r.self ? OWN_SESSION_KEY : r.name
+    // 2. Peers key by (location, id). Ids are per-deployment, so they are
+    //    scoped by location to stop two remote locations colliding on the
+    //    same id string. This is KAI-515: a dead and a live registration
+    //    sharing a display name at the same transport stay distinct.
+    //
+    // 3. Peers from a transport that issues no id (the local broker) key
+    //    by display name. This is a weak key, not an identity — names are
+    //    unique per (user, organization) only — but it is the only one
+    //    such a transport offers.
+    //
+    // Note what (3) is NOT: it is not a cross-transport merge. `name`
+    // never equals `location::id`, so a peer's local row and remote row
+    // are always two entries. Only `self` unifies across locations, and
+    // only for us. That distinction matters since KAI-516, because our
+    // own row now carries real memberships — key it by name and a
+    // same-named stranger in the org would absorb them.
+    const key = r.self ? OWN_SESSION_KEY : r.id !== undefined ? `${location}::${r.id}` : r.name
     const existing = merged.get(key)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
+      existing.id = existing.id ?? r.id
       existing.objective = existing.objective ?? r.objective
       // Union channels; same (name, location) tuples dedupe themselves
       // because this stage runs per-location.
       const seen = new Set(existing.channels.map((c) => `${c.location}::${c.name}`))
       for (const t of tagged) {
-        const key = `${t.location}::${t.name}`
-        if (!seen.has(key)) {
+        const tKey = `${t.location}::${t.name}`
+        if (!seen.has(tKey)) {
           existing.channels.push(t)
-          seen.add(key)
+          seen.add(tKey)
         }
       }
       existing.registeredAt = existing.registeredAt ?? r.registeredAt
+      // Newest lastSeen wins across merged rows for the same id.
+      if (r.lastSeen && (!existing.lastSeen || Date.parse(r.lastSeen) > Date.parse(existing.lastSeen))) {
+        existing.lastSeen = r.lastSeen
+      }
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(key, {
+        id: r.id,
         name: r.name,
         objective: r.objective,
         channels: tagged,
         registeredAt: r.registeredAt,
+        lastSeen: r.lastSeen,
         scopedLocations: serverScoped ? new Set([location]) : new Set(),
       })
     }

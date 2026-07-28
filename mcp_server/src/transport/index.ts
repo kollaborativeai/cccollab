@@ -29,16 +29,27 @@ export const LOCAL_LOCATION: ChannelLocation = 'local'
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
+  /** Stable per-registration id, when the transport's backend issues one
+   *  (remote transports do; the local broker does not). Used to tell two
+   *  registrations with the same display name apart, and to dedupe a
+   *  session's rows across transports without collapsing distinct
+   *  registrations into one. */
+  id?: string
   name: string
   objective?: string
   machine?: string
   channels: string[]
   registeredAt?: string
+  /** ISO timestamp of the last liveness signal received for this
+   *  registration (e.g. a heartbeat). Absent when the backend doesn't
+   *  report it yet, in which case liveness is unknown rather than false. */
+  lastSeen?: string
   /** True on the row that is *this process's own* registration at this
    *  location; omitted otherwise. Only the transport can supply it — it
    *  holds the identity its own `introduce` established (a Convex session
    *  id remotely, the registered name on the single-tenant local broker),
-   *  and those identities are not comparable across locations.
+   *  and those identities are not comparable across locations, so `id`
+   *  cannot answer this question across transports.
    *
    *  This is what lets `list_sessions` report one process attached to
    *  several locations as one session. Display names cannot: they are
