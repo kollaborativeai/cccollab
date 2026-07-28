@@ -36,6 +36,12 @@ function log(msg: string): void {
  * Membership is read at fan-out time rather than captured when the stream
  * opened, so a `join_channel` or `leave_channel` takes effect on a connection
  * that is already open — otherwise every join would need a reconnect.
+ *
+ * This is the only place a connection's `/events?sessionId=` tag is resolved
+ * against the session registry. If that registry is ever keyed by something
+ * other than the display name (a per-registration id, say), this lookup and the
+ * tag `broker-event-listener.ts` writes have to change in the same commit —
+ * they are two halves of one agreement and neither fails loudly on its own.
  */
 function sseSubscribed(client: SSEClient, channel: string): boolean {
   if (!client.sessionName) return false
