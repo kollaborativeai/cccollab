@@ -551,14 +551,20 @@ describe('RemoteTransport.listSessions', () => {
     // membership per session, so every row it reports comes back with
     // no channels — including the caller's own. The transport can at
     // least resolve its own memberships via `channels.listForUser`
-    // (Clerk-identity-scoped) and patch them onto its own row.
+    // (session-scoped) and patch them onto its own row.
+    //
+    // The peer is listed FIRST on purpose. `listByChannel` orders rows by
+    // presence-row insertion order, so the caller is at index 0 only if
+    // they joined first — matching by position would pass on a fixture
+    // that puts us there, and leak our memberships onto whoever happens
+    // to lead the list in production.
     const queryMock = vi.fn(async (ref: unknown) => {
       const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
       if (name === 'cccollab/topics:listJoinedForSession') return []
       if (name === 'cccollab/sessions:listByChannel') {
         return [
-          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
           { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
         ]
       }
       if (name === 'cccollab/channels:listForUser') {
@@ -579,6 +585,15 @@ describe('RemoteTransport.listSessions', () => {
 
     expect(sessions).toEqual([
       {
+        id: 'session_2',
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+      },
+      {
         id: 'session_1',
         name: 'laptop',
         objective: undefined,
@@ -592,16 +607,45 @@ describe('RemoteTransport.listSessions', () => {
         // one entry instead of reporting a phantom second peer.
         self: true,
       },
-      {
-        id: 'session_2',
-        name: 'peer',
-        objective: undefined,
-        machine: undefined,
-        channels: [],
-        registeredAt: new Date(1_700_000_000_000).toISOString(),
-        lastSeen: undefined,
-      },
     ])
+  })
+
+  it('scopes channels.listForUser to this session id — the backend rejects the call without it', async () => {
+    // `channels.listForUser` is declared `args: { sessionId: v.id('cccollabSessions') }`
+    // and resolves memberships from `cccollabSessionChannels` by that id.
+    // Drop the argument and Convex raises an ArgumentValidationError that
+    // `listOwnChannelNames`'s catch swallows, so the fix degrades to
+    // `channels: []` in production with no error and no failing test.
+    // Two comments near the call site describe the query as
+    // identity-scoped rather than session-scoped, which is exactly the
+    // reasoning that would make the argument look removable.
+    let listForUserArgs: Record<string, unknown> | undefined
+    const queryMock = vi.fn(async (ref: unknown, args: Record<string, unknown>) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        listForUserArgs = args
+        return [{ name: 'kai' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    await transport.listSessions({})
+
+    // `undefined` here would mean the query never ran at all, which is
+    // just as broken as running it unscoped — both yield `channels: []`.
+    expect(listForUserArgs).toEqual({ sessionId: 'session_1' })
   })
 
   it('returns no channels for anyone before introduce (no sessionId yet)', async () => {
@@ -674,6 +718,12 @@ describe('RemoteTransport.listSessions', () => {
         lastSeen: undefined,
       },
     ])
+    // The planted throw above cannot prove the skip on its own:
+    // `listOwnChannelNames` catches it and returns `[]`, which is the same
+    // output as skipping, so the assertion above is byte-identical either
+    // way. Only the absence of the call distinguishes them.
+    const queried = queryMock.mock.calls.map(([ref]) => getFunctionName(ref as Parameters<typeof getFunctionName>[0]))
+    expect(queried).not.toContain('cccollab/channels:listForUser')
   })
 
   it('degrades to empty channels (not the whole transport) when channels.listForUser fails', async () => {

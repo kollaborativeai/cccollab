@@ -362,6 +362,16 @@ describe('Dual transport: graceful degradation', () => {
 })
 
 describe('Dual transport: list_sessions merging', () => {
+  // Ids shaped the way each transport really issues them. The remote
+  // backend mints Convex `Id<'cccollabSessions'>`; the local broker mints
+  // none at all (`/sessions` GET reports name/objective/registeredAt/
+  // channels only). Seeding a remote row *without* an id would be a state
+  // production cannot reach — and it is the one state that still lands on
+  // `mergeSessions`'s display-name fallback, which would merge the caller's
+  // two rows for the wrong reason and hide a regression in the `self` key.
+  const REMOTE_OWN_ID = 'k5711aaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const REMOTE_PEER_ID = 'k9922bbbbbbbbbbbbbbbbbbbbbbbbbb'
+
   /**
    * KAI-516's Expected Result, end to end at the tool layer: one process
    * that introduced itself on two transports is *one* session, and its
@@ -383,12 +393,14 @@ describe('Dual transport: list_sessions merging', () => {
       self: true,
     })
     remote.registerSession({
+      id: REMOTE_OWN_ID,
       name: 'architect',
       channels: ['product'],
       registeredAt: '2026-01-01T00:00:00Z',
       self: true,
     })
     remote.registerSession({
+      id: REMOTE_PEER_ID,
       name: 'reviewer',
       channels: [],
       registeredAt: '2026-01-01T00:00:00Z',
@@ -424,6 +436,7 @@ describe('Dual transport: list_sessions merging', () => {
       self: true,
     })
     remote.registerSession({
+      id: REMOTE_PEER_ID,
       name: 'architect',
       channels: [],
       registeredAt: '2026-01-02T00:00:00Z',
