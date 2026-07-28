@@ -86,6 +86,18 @@ async function joinTopic(port: number, topicId: string, sessionId: string): Prom
   })
 }
 
+async function listTopics(
+  port: number,
+  query: { sessionId?: string; channel?: string; includeArchived?: boolean } = {},
+): Promise<Response> {
+  const params = new URLSearchParams()
+  if (query.sessionId !== undefined) params.set('sessionId', query.sessionId)
+  if (query.channel !== undefined) params.set('channel', query.channel)
+  if (query.includeArchived) params.set('include_archived', 'true')
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return fetch(`http://127.0.0.1:${port}/topics${qs}`)
+}
+
 async function archiveTopic(port: number, topicId: string, archivedBy: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/topics/${topicId}/archive`, {
     method: 'POST',
@@ -800,6 +812,160 @@ describe('Broker: isolation guards and invariants', () => {
         expect((await postTopicMessage(port, topicId, victim, 'after leaving')).status).toBe(200)
       })
       expect(seen.outsider.map((e) => e.text)).toEqual(['while subscribed'])
+    })
+  })
+
+  /**
+   * KAI-446: the ticket's Expected Result is "EVERY route that reads or mutates
+   * a topic applies the same subscription check". Per-route tests prove the
+   * routes that exist today; they say nothing about the next one somebody adds.
+   *
+   * This block is the enumeration. `TOPIC_ROUTES` below is the claim, and
+   * `discovers every topic route...` is what keeps the claim honest: it reads
+   * the broker's own route dispatch and fails if a topic route exists that is
+   * not in the table. Adding a route therefore forces you into the sweep, and
+   * the sweep runs it against an unsubscribed caller.
+   */
+  describe('KAI-446: every topic route answers to the subscription rule', () => {
+    const SENTINEL = 'TOP SECRET: launch codes 1234'
+    const SECRET_CHANNEL = 'k446sweep-secret'
+    const SECRET_TOPIC = 'k446sweep-classified'
+    const DECOY_CHANNEL = 'k446sweep-decoy'
+    const VICTIM = 'k446sweep-victim'
+    /** Subscribed to the decoy, never to the secret: "holds a subscription" and
+     *  "holds THIS subscription" have to be distinguishable states. */
+    const ATTACKER = 'k446sweep-attacker'
+
+    let secretTopicId: string
+
+    beforeAll(async () => {
+      await registerSession(port, VICTIM)
+      await joinChannel(port, VICTIM, SECRET_CHANNEL)
+      const created = await createTopic(port, VICTIM, SECRET_TOPIC, SECRET_CHANNEL)
+      secretTopicId = ((await created.json()) as { id: string }).id
+      expect((await postTopicMessage(port, secretTopicId, VICTIM, SENTINEL)).status).toBe(200)
+
+      await registerSession(port, ATTACKER)
+      await joinChannel(port, ATTACKER, DECOY_CHANNEL)
+      expect((await createTopic(port, ATTACKER, 'k446sweep-harmless', DECOY_CHANNEL)).status).toBe(200)
+    })
+
+    /**
+     * Every route the broker exposes on the topic resource, and what an
+     * unsubscribed caller gets from it. `status: 200` is only for the listing
+     * route, which answers everyone — scoped to the caller's own channels, so
+     * the disclosure assertion is what carries the guarantee there.
+     */
+    const TOPIC_ROUTES: Array<{ route: string; status: number; probe: (topicId: string) => Promise<Response> }> = [
+      {
+        route: 'POST /topics',
+        status: 400,
+        probe: () => createTopic(port, ATTACKER, 'k446sweep-intruder', SECRET_CHANNEL),
+      },
+      { route: 'GET /topics', status: 200, probe: () => listTopics(port, { sessionId: ATTACKER }) },
+      {
+        route: 'GET /topics/:id',
+        status: 403,
+        probe: (id) => fetch(`http://127.0.0.1:${port}/topics/${id}?sessionId=${encodeURIComponent(ATTACKER)}`),
+      },
+      {
+        route: 'GET /topics/:id/messages',
+        status: 403,
+        probe: (id) =>
+          fetch(`http://127.0.0.1:${port}/topics/${id}/messages?sessionId=${encodeURIComponent(ATTACKER)}`),
+      },
+      {
+        route: 'POST /topics/:id/messages',
+        status: 403,
+        probe: (id) => postTopicMessage(port, id, ATTACKER, 'intrusion'),
+      },
+      { route: 'POST /topics/:id/join', status: 403, probe: (id) => joinTopic(port, id, ATTACKER) },
+      {
+        route: 'POST /topics/:id/leave',
+        status: 403,
+        probe: (id) =>
+          fetch(`http://127.0.0.1:${port}/topics/${id}/leave`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: ATTACKER }),
+          }),
+      },
+      { route: 'POST /topics/:id/archive', status: 403, probe: (id) => archiveTopic(port, id, ATTACKER) },
+      { route: 'POST /topics/:id/unarchive', status: 403, probe: (id) => unarchiveTopic(port, id, ATTACKER) },
+    ]
+
+    it.each(TOPIC_ROUTES.map((r) => [r.route, r] as const))(
+      '%s refuses an unsubscribed caller and discloses nothing about the topic',
+      async (_name, { status, probe }) => {
+        const res = await probe(secretTopicId)
+        expect(res.status).toBe(status)
+        const body = await res.text()
+        // Neither the message text nor the topic's own name. The channel name
+        // is deliberately NOT asserted absent: a 403 names the channel you
+        // would have to join, which is the point of the message.
+        expect(body).not.toContain(SENTINEL)
+        expect(body).not.toContain(SECRET_TOPIC)
+      },
+    )
+
+    /**
+     * The trap. `TOPIC_ROUTES` is a hand-written claim about what the broker
+     * exposes; this reads the dispatch in `broker.ts` and fails when the two
+     * disagree. A new topic route (a new `pathname === '/topics…'` branch, a new
+     * `TOPIC_*_ROUTE` matcher, or a new verb in the action alternation) reds
+     * this until it is added to the table above — at which point the sweep
+     * points an unsubscribed caller at it.
+     *
+     * Source-reading is deliberate: nothing in the broker's dispatch is
+     * introspectable at runtime, and a claim of full coverage that is not
+     * mechanically checked is exactly the kind of claim this ticket exists to
+     * disprove.
+     *
+     * Ceiling, stated rather than implied: it scans dispatch under `/topics`.
+     * A topic read served from some other prefix would not be found — that is
+     * the one way past this, and it is a bigger change than adding a route.
+     */
+    it('discovers every topic route in broker.ts, so a new one cannot skip the sweep', () => {
+      const source = readFileSync(fileURLToPath(new URL('../src/broker.ts', import.meta.url)), 'utf-8')
+
+      const literal = [...source.matchAll(/pathname === '(\/topics[^']*)' && method === '(\w+)'/g)].map(
+        (m) => `${m[2]} ${m[1]}`,
+      )
+      const matchers = [...source.matchAll(/^const (TOPIC_\w+) = \//gm)].map((m) => m[1]!)
+      const actions = /^const TOPIC_ACTION_ROUTE = .*\(([a-z|]+)\)/m.exec(source)?.[1]?.split('|') ?? []
+
+      // Routes reachable by a path-matching regex rather than a literal
+      // compare. Kept explicit so a NEW matcher constant reds this list
+      // instead of silently adding an unswept route.
+      expect(matchers.sort()).toEqual(['TOPIC_ACTION_ROUTE', 'TOPIC_ID_ROUTE', 'TOPIC_MESSAGES_ROUTE'])
+
+      const discovered = [
+        ...literal,
+        'GET /topics/:id',
+        'GET /topics/:id/messages',
+        ...actions.map((a) => `POST /topics/:id/${a}`),
+      ]
+      expect(discovered.sort()).toEqual(TOPIC_ROUTES.map((r) => r.route).sort())
+    })
+
+    it('refuses to list topics for a caller that names no session at all', async () => {
+      const res = await listTopics(port)
+      expect(res.status).toBe(400)
+      expect(await res.text()).not.toContain(SECRET_TOPIC)
+    })
+
+    it('refuses to list a channel the caller is not subscribed to', async () => {
+      const res = await listTopics(port, { sessionId: ATTACKER, channel: SECRET_CHANNEL })
+      expect(res.status).toBe(403)
+      expect(await res.text()).not.toContain(SECRET_TOPIC)
+    })
+
+    it('lists the caller its own channels and no others', async () => {
+      const res = await listTopics(port, { sessionId: ATTACKER })
+      expect(res.status).toBe(200)
+      const { topics } = (await res.json()) as { topics: Array<{ topic: string; channel: string }> }
+      expect(topics.map((t) => t.channel)).toEqual([DECOY_CHANNEL])
+      expect(topics.map((t) => t.topic)).toEqual(['k446sweep-harmless'])
     })
   })
 })
