@@ -81,12 +81,25 @@ describe('makeClerkAuthFetcher', () => {
   })
 
   it('returns the cached ID token when expiry is exactly at the freshness margin boundary + 1ms', async () => {
-    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }))
+    // Freeze the clock. The fetcher decides freshness with its own Date.now(),
+    // so on a real clock this case only holds while the millisecond that the
+    // test read has not ticked over -- a 1ms budget that a loaded CI runner
+    // loses. Freezing pins the gap at exactly the margin + 1ms the name claims.
+    const frozenNow = Date.now()
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(frozenNow)
 
-    const token = await fetcher({ forceRefreshToken: false })
+    try {
+      const fetcher = makeClerkAuthFetcher(
+        baseInit({ accessTokenExpiresAt: frozenNow + CLERK_FRESHNESS_MARGIN_MS + 1 }),
+      )
 
-    expect(token).toBe('initial-id-token')
-    expect(mockRefreshAccessToken).not.toHaveBeenCalled()
+      const token = await fetcher({ forceRefreshToken: false })
+
+      expect(token).toBe('initial-id-token')
+      expect(mockRefreshAccessToken).not.toHaveBeenCalled()
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it('refreshes and returns the new ID token when the token is expired', async () => {
