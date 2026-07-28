@@ -811,13 +811,27 @@ export class RemoteTransport implements Transport {
         lastSeenAt?: number
       }>
       // `listByChannel` doesn't denormalize channel memberships per session,
-      // so every row comes back with none. We can at least fill in our own
-      // row: `channels.listForUser` is declared
-      // `args: { sessionId: v.id('cccollabSessions') }` and reads
+      // so no row arrives carrying any. Two independent facts fill that in.
+      //
+      // The first is the scope of the call itself. Asked for a channel,
+      // `listByChannel` resolves it and returns only sessions holding a
+      // presence row in it, so every row it reports is a member of
+      // `args.channel` by construction — peers included. Reporting `[]`
+      // there is not "unknown", it is a claim the query result disproves.
+      // `TransportSession.channels` has no way to say "unknown", so `[]`
+      // reads as "in no channel" one layer up. Unscoped, no such fact
+      // exists: the rows are simply everyone we can see, so peers stay
+      // empty rather than guessing.
+      //
+      // The channel name needs no normalisation here — `handleListSessions`
+      // runs `normalizeChannelName` before it reaches any transport.
+      const scopedChannel = args.channel
+      // The second is our own membership list: `channels.listForUser` is
+      // declared `args: { sessionId: v.id('cccollabSessions') }` and reads
       // `cccollabSessionChannels` by that exact id — it is session-scoped,
       // not merely scoped to the authenticated user, so the id we pass is
-      // the scope and not incidental. Other sessions' rows stay empty until
-      // the backend denormalizes membership per session.
+      // the scope and not incidental. It is the only source for channels
+      // outside the one this call was scoped to, and only for us.
       //
       // Our own row is the one whose Convex `_id` equals the id our own
       // `introduce` returned — never the one whose name matches ours.
@@ -827,12 +841,17 @@ export class RemoteTransport implements Transport {
       // up, fold them into our entry in `list_sessions`.
       const isOwnRow = (r: { _id: string }): boolean => this.sessionId !== null && r._id === this.sessionId
       const ownChannels = rows.some(isOwnRow) ? await this.listOwnChannelNames() : []
+      // Union, not replace. `listOwnChannelNames` degrades to `[]` on
+      // failure, and taking it as the whole truth would leave our own row
+      // claiming fewer channels than the peers listed beside it — inside
+      // the very channel the call was scoped to.
+      const ownRowChannels = scopedChannel === undefined ? ownChannels : [...new Set([...ownChannels, scopedChannel])]
       return rows.map((r) => ({
         id: r._id,
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
-        channels: isOwnRow(r) ? ownChannels : [],
+        channels: isOwnRow(r) ? ownRowChannels : scopedChannel === undefined ? [] : [scopedChannel],
         registeredAt: new Date(r.createdAt).toISOString(),
         lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
         // Omitted rather than `false` on peers: the tool layer treats the
