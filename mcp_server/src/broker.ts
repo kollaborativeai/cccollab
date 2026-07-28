@@ -193,6 +193,9 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
  * handed the same session that topic's full text. Keeping the rule in one place
  * is what stops the two drifting apart again.
  *
+ * Takes the channel rather than the topic so the listing route can use it too:
+ * `GET /topics` gates on a channel with no topic in hand.
+ *
  * Returns the validated session id, or null when it has already answered `res`
  * and the caller must stop. Mirrors the order `GET /topics/:id` already used —
  * topic-existence (404) is checked by the caller first, then missing id (400),
@@ -202,21 +205,21 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
  * process may name any session, which is the documented honor-system model.
  * This only enforces that routes on the same resource agree on the same rule.
  */
-function requireSubscribed(
-  res: ServerResponse,
-  topic: LocalTopic,
-  sessionId: string | undefined | null,
-): string | null {
+function requireSubscribed(res: ServerResponse, channel: string, sessionId: string | undefined | null): string | null {
   if (!sessionId) {
     jsonResponse(res, 400, { error: 'sessionId is required' })
     return null
   }
-  const info = sessions.get(sessionId)
-  if (!info || !info.channels.has(topic.channel)) {
-    jsonResponse(res, 403, { error: `Not subscribed to channel "${topic.channel}".` })
+  if (!subscribedChannels(sessionId).has(channel)) {
+    jsonResponse(res, 403, { error: `Not subscribed to channel "${channel}".` })
     return null
   }
   return sessionId
+}
+
+/** The channels this session is subscribed to; empty for an unknown session. */
+function subscribedChannels(sessionId: string): ReadonlySet<string> {
+  return sessions.get(sessionId)?.channels ?? new Set()
 }
 
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
@@ -485,7 +488,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    if (!requireSubscribed(res, t, searchParams.get('sessionId'))) return
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId'))) return
     jsonResponse(res, 200, {
       topic: {
         id: t.id,
@@ -518,7 +521,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    if (!requireSubscribed(res, t, searchParams.get('sessionId'))) return
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId'))) return
     const limit = clampHistoryLimit(searchParams.get('limit'))
     const beforeRaw = searchParams.get('before')
     const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
@@ -555,11 +558,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               jsonResponse(res, 400, { error: 'text and sender are required' })
               return
             }
-            const info = sessions.get(sender)
-            if (!info || !info.channels.has(t.channel)) {
-              jsonResponse(res, 403, { error: `Sender is not subscribed to channel "${t.channel}".` })
-              return
-            }
+            if (!requireSubscribed(res, t.channel, sender)) return
             const ts = new Date().toISOString()
             t.messages.push({ sender, text, ts })
             const event = {
@@ -577,23 +576,15 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'join': {
-            const sessionId = body.sessionId as string | undefined
-            if (!sessionId) {
-              jsonResponse(res, 400, { error: 'sessionId is required' })
-              return
-            }
-            const info = sessions.get(sessionId)
-            if (!info || !info.channels.has(t.channel)) {
-              jsonResponse(res, 403, { error: `You are not subscribed to channel "${t.channel}".` })
-              return
-            }
+            const sessionId = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
+            if (!sessionId) return
             t.joinedSessions.add(sessionId)
             log(`JOIN: ${sessionId} joined topic ${id} (${t.channel})`)
             jsonResponse(res, 200, { ok: true, channel: t.channel, messages: t.messages })
             return
           }
           case 'leave': {
-            const sessionId = requireSubscribed(res, t, body.sessionId as string | undefined)
+            const sessionId = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
             if (!sessionId) return
             t.joinedSessions.delete(sessionId)
             log(`LEAVE: ${sessionId} left topic ${id}`)
@@ -601,7 +592,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'archive': {
-            const archivedBy = requireSubscribed(res, t, body.archivedBy as string | undefined)
+            const archivedBy = requireSubscribed(res, t.channel, body.archivedBy as string | undefined)
             if (!archivedBy) return
             t.state = 'archived'
             const event = {
@@ -617,7 +608,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
             return
           }
           case 'unarchive': {
-            const unarchivedBy = requireSubscribed(res, t, body.unarchivedBy as string | undefined)
+            const unarchivedBy = requireSubscribed(res, t.channel, body.unarchivedBy as string | undefined)
             if (!unarchivedBy) return
             t.state = 'active'
             const event = {
