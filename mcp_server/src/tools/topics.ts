@@ -199,9 +199,22 @@ export async function handleTopicTool(
       // online before asking which transport owns it — the user is
       // explicitly reading a (possibly remote) topic.
       await deps.ensureAttached?.()
+      // Joined topics are already subscription-checked (`joinTopic` refuses an
+      // unsubscribed channel, `leaveChannel` drops that channel's topics).
+      // Anything else resolves through the subscription check that
+      // `send_message_to_topic` and archive-by-name use, so the read is refused
+      // HERE rather than forwarded for the broker to 403 (KAI-446) — and on the
+      // remote path, where the tool used to forward unconditionally, this is the
+      // only gate this process applies.
+      let location = deps.context.getJoinedTopicLocation(topicId)
+      if (location === undefined) {
+        const resolved = await resolveTopicIdInSubscribedChannels(deps, topicId)
+        if ('error' in resolved) return JSON.stringify(resolved)
+        location = resolved.location
+      }
       let transport: Transport
       try {
-        transport = resolveTopicTransport(deps, topicId)
+        transport = deps.router.get(location)
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
