@@ -422,6 +422,78 @@ describe('Dual transport: list_sessions merging', () => {
     expect(result).toHaveLength(2)
   })
 
+  it("tags a peer's id with the location that issued it", async () => {
+    // An id is only an address at the location that minted it — Convex
+    // `_id`s are per deployment, broker uuids per broker, and neither
+    // resolves anywhere else. Locations are named by the user's config,
+    // so "remote" is one possible name and not a category the output can
+    // assume.
+    const remote = new FakeTransport('kai-prod')
+    remote.registerSession({
+      id: REMOTE_PEER_ID,
+      name: 'reviewer',
+      channels: [],
+      registeredAt: '2026-01-01T00:00:00Z',
+    })
+    const deps = makeDeps([remote])
+    deps.context.joinChannel('product', 'manual', 'kai-prod')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ id: REMOTE_PEER_ID, location: 'kai-prod' })
+  })
+
+  it('tags the merged entry with the location that issued the id it kept', async () => {
+    // Our own registrations collapse into one entry spanning every
+    // location we attached to, but the entry carries a single id. Which
+    // location that id came from is not derivable from the entry — the
+    // channels span all of them and the local broker mints no id at all —
+    // so the merge has to record it as the id is taken. Tagging it
+    // afterwards, or on each merge, would name whichever transport was
+    // merged last: an address handed to a location that never issued it.
+    const local = new FakeTransport('local')
+    const kai = new FakeTransport('kai-prod')
+    const acme = new FakeTransport('acme-prod')
+    local.registerSession({ name: 'architect', channels: ['kai'], registeredAt: '2026-01-01T00:00:00Z', self: true })
+    kai.registerSession({
+      id: REMOTE_OWN_ID,
+      name: 'architect',
+      channels: ['product'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    acme.registerSession({
+      id: 'k3300cccccccccccccccccccccccccc',
+      name: 'architect',
+      channels: ['ops'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    const deps = makeDeps([local, kai, acme])
+    deps.context.joinChannel('kai', 'manual', 'local')
+    deps.context.joinChannel('product', 'manual', 'kai-prod')
+    deps.context.joinChannel('ops', 'manual', 'acme-prod')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ id: REMOTE_OWN_ID, location: 'kai-prod' })
+  })
+
+  it('omits location for a registration the transport reports without an id', async () => {
+    // The local broker issues no id today. There is nothing to address,
+    // so there is no address space to name either — an entry must not
+    // carry a bare `location` that no `id` belongs to.
+    const local = new FakeTransport('local')
+    local.registerSession({ name: 'reviewer', channels: ['kai'], registeredAt: '2026-01-01T00:00:00Z' })
+    const deps = makeDeps([local])
+    deps.context.joinChannel('kai', 'manual', 'local')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(1)
+    expect(Object.keys(result[0])).not.toContain('id')
+    expect(Object.keys(result[0])).not.toContain('location')
+  })
+
   it('keeps a peer that merely shares the caller’s display name separate', async () => {
     // Session names are unique per (user, organization) only, so two users
     // in one org can both run "architect". Merging on the name invents a

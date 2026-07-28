@@ -614,18 +614,7 @@ async function handleListSessions(
   // session (every non-local transport does). Such a session is a
   // confirmed peer even when the transport can't denormalize *which*
   // channels — see the `visible` filter below.
-  const merged = new Map<
-    string | symbol,
-    {
-      id?: string
-      name: string
-      objective?: string
-      channels: Array<{ name: string; location: ChannelLocation }>
-      registeredAt?: string
-      lastSeen?: string
-      scopedLocations: Set<ChannelLocation>
-    }
-  >()
+  const merged = new Map<string | symbol, MergedSession>()
 
   if (channelArg) {
     const channel = normalizeChannelName(channelArg)
@@ -684,8 +673,13 @@ async function handleListSessions(
     return Date.now() - seenAt <= SESSION_STALE_MS
   })
 
+  // `id` never travels without `location`. An entry can span two
+  // locations (ours does, and only ours can) while carrying a single id,
+  // so an untagged id leaves the caller unable to tell which transport
+  // can resolve it — and ids from different locations are never
+  // comparable to each other.
   const result = alive.map((s) => ({
-    ...(s.id ? { id: s.id } : {}),
+    ...(s.registration ? { id: s.registration.id, location: s.registration.location } : {}),
     name: s.name,
     ...(s.objective ? { objective: s.objective } : {}),
     channels: s.channels,
@@ -699,19 +693,26 @@ async function handleListSessions(
  *  so no display name can collide with it. */
 const OWN_SESSION_KEY = Symbol('own session')
 
+/** One session as `list_sessions` accumulates it, across every transport
+ *  that reported it. */
+type MergedSession = {
+  /** The id this entry is reported under, paired with the location that
+   *  issued it. One field rather than two so the pair cannot drift: ids
+   *  are minted per location (Convex `_id`s per deployment, broker uuids
+   *  per broker) and are not comparable across them, so an id without its
+   *  location is an address with no address space. An entry can span
+   *  several locations — our own does — while carrying exactly one id. */
+  registration?: { id: string; location: ChannelLocation }
+  name: string
+  objective?: string
+  channels: Array<{ name: string; location: ChannelLocation }>
+  registeredAt?: string
+  lastSeen?: string
+  scopedLocations: Set<ChannelLocation>
+}
+
 function mergeSessions(
-  merged: Map<
-    string | symbol,
-    {
-      id?: string
-      name: string
-      objective?: string
-      channels: Array<{ name: string; location: ChannelLocation }>
-      registeredAt?: string
-      lastSeen?: string
-      scopedLocations: Set<ChannelLocation>
-    }
-  >,
+  merged: Map<string | symbol, MergedSession>,
   rows: Array<{
     id?: string
     name: string
@@ -756,7 +757,14 @@ function mergeSessions(
     const existing = merged.get(key)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
-      existing.id = existing.id ?? r.id
+      // First id wins, and its location travels with it. Assigning the
+      // location separately (or on every merge) would tag the winning id
+      // with whichever transport was merged last — a wrong address space
+      // reads worse than none, since it names a transport that will
+      // answer "no such session" for an id it never issued.
+      if (existing.registration === undefined && r.id !== undefined) {
+        existing.registration = { id: r.id, location }
+      }
       existing.objective = existing.objective ?? r.objective
       // Union channels; same (name, location) tuples dedupe themselves
       // because this stage runs per-location.
@@ -776,7 +784,7 @@ function mergeSessions(
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(key, {
-        id: r.id,
+        registration: r.id === undefined ? undefined : { id: r.id, location },
         name: r.name,
         objective: r.objective,
         channels: tagged,
