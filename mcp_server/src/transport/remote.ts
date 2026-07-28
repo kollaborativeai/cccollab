@@ -315,8 +315,12 @@ export class RemoteTransport implements Transport {
 
   /**
    * Merges this session's `sessionId` into a read query's argument object.
-   * KAI's queries require the sessionId to resolve the caller's
-   * organization. A no-op when no session has been introduced yet.
+   * KAI's queries require it, and what it scopes depends on the query: for
+   * most it resolves the caller's organization, but for some — notably
+   * `channels.listForUser` — the session id *is* the scope, and the query
+   * returns nothing meaningful without it. Never drop it on the assumption
+   * that the caller's identity alone is enough. A no-op when no session has
+   * been introduced yet.
    */
   private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
     if (this.sessionId !== null) {
@@ -808,9 +812,12 @@ export class RemoteTransport implements Transport {
       }>
       // `listByChannel` doesn't denormalize channel memberships per session,
       // so every row comes back with none. We can at least fill in our own
-      // row: `channels.listForUser` resolves memberships for the
-      // authenticated caller, which is this session. Other sessions' rows
-      // stay empty until the backend denormalizes membership per session.
+      // row: `channels.listForUser` is declared
+      // `args: { sessionId: v.id('cccollabSessions') }` and reads
+      // `cccollabSessionChannels` by that exact id — it is session-scoped,
+      // not merely scoped to the authenticated user, so the id we pass is
+      // the scope and not incidental. Other sessions' rows stay empty until
+      // the backend denormalizes membership per session.
       //
       // Our own row is the one whose Convex `_id` equals the id our own
       // `introduce` returned — never the one whose name matches ours.
