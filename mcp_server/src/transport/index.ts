@@ -34,6 +34,16 @@ export interface TransportSession {
   machine?: string
   channels: string[]
   registeredAt?: string
+  /** True on the row that is *this process's own* registration at this
+   *  location; omitted otherwise. Only the transport can supply it — it
+   *  holds the identity its own `introduce` established (a Convex session
+   *  id remotely, the registered name on the single-tenant local broker),
+   *  and those identities are not comparable across locations.
+   *
+   *  This is what lets `list_sessions` report one process attached to
+   *  several locations as one session. Display names cannot: they are
+   *  unique per (user, organization) only. */
+  self?: boolean
 }
 
 /** Channel summary as surfaced by `list_channels`. */

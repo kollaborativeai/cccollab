@@ -362,34 +362,78 @@ describe('Dual transport: graceful degradation', () => {
 })
 
 describe('Dual transport: list_sessions merging', () => {
-  it('unions channels from both transports, tagging each with its location', async () => {
+  /**
+   * KAI-516's Expected Result, end to end at the tool layer: one process
+   * that introduced itself on two transports is *one* session, and its
+   * entry lists what it holds at each location.
+   *
+   * The fixture models what real transports emit — each one flags the row
+   * that is its own registration, because each one holds the identity its
+   * own `introduce` handed back. Nothing here keys off the display name;
+   * that is not an identity (see the next test).
+   */
+  it('reports the caller once, unioning the channels it holds at each location', async () => {
     const local = new FakeTransport('local')
     const remote = new FakeTransport('remote')
     local.registerSession({
-      name: 'alice',
+      name: 'architect',
       objective: 'Design API',
-      channels: ['dev'],
+      channels: ['kai'],
       registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
     })
     remote.registerSession({
-      name: 'alice',
-      channels: ['cccollab'],
+      name: 'architect',
+      channels: ['product'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    remote.registerSession({
+      name: 'reviewer',
+      channels: [],
       registeredAt: '2026-01-01T00:00:00Z',
     })
     const deps = makeDeps([local, remote])
-    deps.context.joinChannel('dev', 'manual', 'local')
-    deps.context.joinChannel('cccollab', 'manual', 'remote')
+    deps.context.joinChannel('kai', 'manual', 'local')
+    deps.context.joinChannel('product', 'manual', 'remote')
 
     const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
-    expect(result).toHaveLength(1)
+    expect(result.filter((s: { name: string }) => s.name === 'architect')).toHaveLength(1)
     expect(result[0]).toMatchObject({
-      name: 'alice',
+      name: 'architect',
       objective: 'Design API',
       channels: [
-        { name: 'dev', location: 'local' },
-        { name: 'cccollab', location: 'remote' },
+        { name: 'kai', location: 'local' },
+        { name: 'product', location: 'remote' },
       ],
     })
+    expect(result).toHaveLength(2)
+  })
+
+  it('keeps a peer that merely shares the caller’s display name separate', async () => {
+    // Session names are unique per (user, organization) only, so two users
+    // in one org can both run "architect". Merging on the name invents a
+    // session that does not exist — and since KAI-516 fills the caller's
+    // row in, it also hands that stranger the caller's real memberships.
+    const local = new FakeTransport('local')
+    const remote = new FakeTransport('remote')
+    local.registerSession({
+      name: 'architect',
+      channels: ['kai'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    remote.registerSession({
+      name: 'architect',
+      channels: [],
+      registeredAt: '2026-01-02T00:00:00Z',
+    })
+    const deps = makeDeps([local, remote])
+    deps.context.joinChannel('kai', 'manual', 'local')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(2)
+    expect(result.map((s: { channels: unknown[] }) => s.channels)).toEqual([[{ name: 'kai', location: 'local' }], []])
   })
 })
 

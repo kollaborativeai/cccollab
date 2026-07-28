@@ -24,6 +24,13 @@ export class LocalTransport implements Transport {
   readonly source = 'local'
   enabled = true
 
+  /** The name this transport registered with the broker, or null before
+   *  `introduce`. The local broker is single-tenant and keys sessions by
+   *  name, so the name *is* our identity here — the counterpart of the
+   *  remote transport's Convex session id. Used to flag our own row in
+   *  `listSessions`. */
+  private ownSessionName: string | null = null
+
   constructor(private readonly brokerPort: number) {}
 
   /** Local broker emits topic ids as RFC 4122 UUIDs. */
@@ -35,6 +42,7 @@ export class LocalTransport implements Transport {
   async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     // The local broker is single-tenant; organizationId is intentionally ignored.
     await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
+    this.ownSessionName = args.sessionName
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────
@@ -145,7 +153,7 @@ export class LocalTransport implements Transport {
     if (args.channel) params.set('channel', args.channel)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.brokerGet<{ sessions: TransportSession[] }>(`/sessions${qs}`)
-    return data.sessions
+    return data.sessions.map((s) => (s.name === this.ownSessionName ? { ...s, self: true } : s))
   }
 
   // ─── Message history ──────────────────────────────────────────────────

@@ -741,14 +741,24 @@ export class RemoteTransport implements Transport {
       // row: `channels.listForUser` resolves memberships for the
       // authenticated caller, which is this session. Other sessions' rows
       // stay empty until the backend denormalizes membership per session.
-      const hasOwnRow = this.sessionId !== null && rows.some((r) => r._id === this.sessionId)
-      const ownChannels = hasOwnRow ? await this.listOwnChannelNames() : []
+      //
+      // Our own row is the one whose Convex `_id` equals the id our own
+      // `introduce` returned — never the one whose name matches ours.
+      // Session names are unique per (user, organization), so a peer of
+      // another user in this org can carry the same display name; matching
+      // on it would both leak our memberships onto their row and, one layer
+      // up, fold them into our entry in `list_sessions`.
+      const isOwnRow = (r: { _id: string }): boolean => this.sessionId !== null && r._id === this.sessionId
+      const ownChannels = rows.some(isOwnRow) ? await this.listOwnChannelNames() : []
       return rows.map((r) => ({
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
-        channels: r._id === this.sessionId ? ownChannels : [],
+        channels: isOwnRow(r) ? ownChannels : [],
         registeredAt: new Date(r.createdAt).toISOString(),
+        // Omitted rather than `false` on peers: the tool layer treats the
+        // flag's presence as "this transport vouches that this row is us".
+        ...(isOwnRow(r) ? { self: true } : {}),
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)

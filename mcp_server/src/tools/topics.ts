@@ -595,8 +595,10 @@ async function handleListSessions(
   await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
-  // Merged by session name. Channels union across transports, each
-  // tagged by the location it came from.
+  // Merged by session identity, which `mergeSessions` derives per row —
+  // our own registrations collapse into one entry across locations, peers
+  // do not. Channels union across transports, each tagged by the location
+  // it came from.
   //
   // `scopedLocations` records locations whose transport already scopes
   // `listSessions` server-side to peers sharing a channel with this
@@ -604,7 +606,7 @@ async function handleListSessions(
   // confirmed peer even when the transport can't denormalize *which*
   // channels — see the `visible` filter below.
   const merged = new Map<
-    string,
+    string | symbol,
     {
       name: string
       objective?: string
@@ -666,9 +668,13 @@ async function handleListSessions(
   return JSON.stringify(result)
 }
 
+/** Merge key for our own registrations. A symbol, not a reserved string,
+ *  so no display name can collide with it. */
+const OWN_SESSION_KEY = Symbol('own session')
+
 function mergeSessions(
   merged: Map<
-    string,
+    string | symbol,
     {
       name: string
       objective?: string
@@ -677,14 +683,30 @@ function mergeSessions(
       scopedLocations: Set<ChannelLocation>
     }
   >,
-  rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string }>,
+  rows: Array<{ name: string; objective?: string; channels?: string[]; registeredAt?: string; self?: boolean }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
    *  server-side to peers sharing a channel with the caller. */
   serverScoped: boolean,
 ): void {
   for (const r of rows) {
-    const existing = merged.get(r.name)
+    // What identifies a session here:
+    //
+    // Our own rows merge on the transport's `self` flag. This process
+    // called `introduce` on every transport, so each one can point at its
+    // own registration authoritatively — that is what makes one process
+    // attached to two locations one entry (KAI-516) rather than a phantom
+    // second peer somewhere the user is not.
+    //
+    // Peers fall back to the display name, which is *not* an identity:
+    // names are unique per (user, organization) only, and a broker name
+    // and a Convex session id are issued by different authorities and are
+    // never comparable across locations. The fallback is the only key
+    // available today; it must never be used for our own rows, because
+    // since KAI-516 those carry real memberships and a same-named stranger
+    // would absorb them.
+    const key = r.self ? OWN_SESSION_KEY : r.name
+    const existing = merged.get(key)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
       existing.objective = existing.objective ?? r.objective
@@ -701,7 +723,7 @@ function mergeSessions(
       existing.registeredAt = existing.registeredAt ?? r.registeredAt
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
-      merged.set(r.name, {
+      merged.set(key, {
         name: r.name,
         objective: r.objective,
         channels: tagged,

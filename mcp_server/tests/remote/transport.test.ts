@@ -584,6 +584,11 @@ describe('RemoteTransport.listSessions', () => {
         machine: undefined,
         channels: ['kai', 'product'],
         registeredAt: new Date(1_700_000_000_000).toISOString(),
+        // Flagged for the tool layer: this row is *us* at this location,
+        // established by `_id`, not by the display name. It is what lets
+        // list_sessions collapse our local and remote registrations into
+        // one entry instead of reporting a phantom second peer.
+        self: true,
       },
       {
         name: 'peer',
@@ -696,6 +701,10 @@ describe('RemoteTransport.listSessions', () => {
         machine: undefined,
         channels: [],
         registeredAt: new Date(1_700_000_000_000).toISOString(),
+        // Still our row — only its memberships are missing. Identity does
+        // not depend on the enrichment query, so the tool layer can still
+        // merge this location's entry into our single one.
+        self: true,
       },
     ])
     // The transport itself must stay enabled — this failure is isolated.

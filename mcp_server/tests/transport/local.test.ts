@@ -121,4 +121,36 @@ describe('LocalTransport: message history reads', () => {
       expect(second.hasMore).toBe(false)
     })
   })
+
+  describe('listSessions', () => {
+    it('flags the row for the session this transport introduced, and no other', async () => {
+      // A transport is the only authority on which row is its own: it holds
+      // the identity its own `introduce` established. The tool layer needs
+      // that flag to merge one process's registrations across locations
+      // without guessing from display names.
+      await post(port, '/sessions', { name: 'lt-sess-peer' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-peer', channel: 'lt-ch-sessions' })
+
+      const transport = new LocalTransport(port)
+      await transport.introduce({ sessionName: 'lt-sess-own' })
+      await transport.joinChannel({ sessionName: 'lt-sess-own', channel: 'lt-ch-sessions' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-sessions' })
+      expect(rows.map((s) => [s.name, s.self === true])).toEqual(
+        expect.arrayContaining([
+          ['lt-sess-own', true],
+          ['lt-sess-peer', false],
+        ]),
+      )
+    })
+
+    it('flags nothing before introduce — an un-introduced transport has no own row', async () => {
+      await post(port, '/sessions', { name: 'lt-sess-other' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-other', channel: 'lt-ch-anon' })
+
+      const rows = await new LocalTransport(port).listSessions({ channel: 'lt-ch-anon' })
+      expect(rows).not.toHaveLength(0)
+      expect(rows.some((s) => s.self === true)).toBe(false)
+    })
+  })
 })
