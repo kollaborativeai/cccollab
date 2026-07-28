@@ -82,14 +82,16 @@ export class LocalTransport implements Transport {
   }
 
   async listTopics(args: {
-    sessionName?: string
+    sessionName: string
     channel?: string
     includeArchived?: boolean
   }): Promise<TransportTopic[]> {
     const params = new URLSearchParams()
     if (args.includeArchived) params.set('include_archived', 'true')
+    // Both, always. Sending `channel` INSTEAD of `sessionId` is what left the
+    // broker's listing route with nothing to gate on (KAI-446).
     if (args.channel) params.set('channel', args.channel)
-    else if (args.sessionName) params.set('sessionId', args.sessionName)
+    params.set('sessionId', args.sessionName)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.brokerGet<{ topics: TransportTopic[] }>(`/topics${qs}`)
     return data.topics

@@ -540,7 +540,7 @@ export class RemoteTransport implements Transport {
   }
 
   async listTopics(args: {
-    sessionName?: string
+    sessionName: string
     channel?: string
     includeArchived?: boolean
   }): Promise<TransportTopic[]> {

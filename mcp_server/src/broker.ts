@@ -441,17 +441,27 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // Listing is a topic read, so it answers to the same rule (KAI-446). It used
+  // to derive the caller's channels only when no `channel` param was supplied —
+  // and the local transport sends `channel` INSTEAD of `sessionId`, never both,
+  // so `?channel=<foreign>` was ungated and a bare `GET /topics` enumerated
+  // every topic in every channel. Metadata rather than message text, but the
+  // same rule applies: you see the channels you joined.
   if (pathname === '/topics' && method === 'GET') {
     const includeArchived = searchParams.get('include_archived') === 'true'
     const channelFilter = normalizeChannel(searchParams.get('channel'))
-    const sessionFilter = searchParams.get('sessionId')
+    const sessionId = searchParams.get('sessionId')
 
-    let allowedChannels: Set<string> | null = null
+    let allowedChannels: ReadonlySet<string>
     if (channelFilter) {
+      if (!requireSubscribed(res, channelFilter, sessionId)) return
       allowedChannels = new Set([channelFilter])
-    } else if (sessionFilter) {
-      const info = sessions.get(sessionFilter)
-      allowedChannels = info ? new Set(info.channels) : new Set()
+    } else {
+      if (!sessionId) {
+        jsonResponse(res, 400, { error: 'sessionId is required' })
+        return
+      }
+      allowedChannels = subscribedChannels(sessionId)
     }
 
     const result: Array<{
@@ -465,7 +475,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     }> = []
     for (const t of topics.values()) {
       if (!includeArchived && t.state === 'archived') continue
-      if (allowedChannels && !allowedChannels.has(t.channel)) continue
+      if (!allowedChannels.has(t.channel)) continue
       result.push({
         id: t.id,
         topic: t.topic,

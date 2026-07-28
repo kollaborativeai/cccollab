@@ -240,7 +240,7 @@ async function handleListTopics(
     }
     for (const transport of eligible) {
       try {
-        const rows = await transport.listTopics({ channel, includeArchived })
+        const rows = await transport.listTopics({ sessionName: deps.session.displayName, channel, includeArchived })
         for (const r of rows) located.push({ ...r, location: transport.source })
       } catch {
         // Transport unreachable: skip.
