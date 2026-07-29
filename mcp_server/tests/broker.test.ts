@@ -20,6 +20,25 @@ async function waitUntil<T>(fn: () => Promise<T | null> | T | null, timeoutMs = 
   throw new Error('waitUntil timeout')
 }
 
+/**
+ * A path-matching regex constant, as written in `broker.ts`, turned into the
+ * paths it accepts in the notation the route table uses:
+ * `/^\/topics\/([^/]+)\/(join|leave)$/` -> `/topics/:id/join`, `/topics/:id/leave`.
+ *
+ * Derived rather than hardcoded so the route sweep cannot go stale against the
+ * matcher it claims to describe.
+ */
+function pathsMatchedBy(regexSource: string): string[] {
+  const path = regexSource
+    .replace(/^\/\^/, '')
+    .replace(/\$\/$/, '')
+    .replace(/\\\//g, '/')
+    .replace(/\(\[\^\/\]\+\)/g, ':id')
+  const alternation = /\(([a-z|]+)\)/.exec(path)
+  if (!alternation) return [path]
+  return alternation[1]!.split('|').map((option) => path.replace(alternation[0]!, option))
+}
+
 async function registerSession(port: number, name: string): Promise<void> {
   const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
     method: 'POST',
@@ -915,41 +934,117 @@ describe('Broker: isolation guards and invariants', () => {
     /**
      * The trap. `TOPIC_ROUTES` is a hand-written claim about what the broker
      * exposes; this reads the dispatch in `broker.ts` and fails when the two
-     * disagree. A new topic route (a new `pathname === '/topics…'` branch, a new
-     * `TOPIC_*_ROUTE` matcher, or a new verb in the action alternation) reds
-     * this until it is added to the table above — at which point the sweep
-     * points an unsubscribed caller at it.
+     * disagree. Any new dispatch branch under `/topics` reds this until it is
+     * added to the table above — at which point the sweep points an
+     * unsubscribed caller at it.
      *
      * Source-reading is deliberate: nothing in the broker's dispatch is
      * introspectable at runtime, and a claim of full coverage that is not
      * mechanically checked is exactly the kind of claim this ticket exists to
-     * disprove.
+     * disprove. Which is why nothing below is hardcoded: an earlier version
+     * collected matchers by NAME (`TOPIC_*`) and listed their routes as string
+     * literals, so a matcher called something else, and a second verb on a
+     * matcher already in the list, both walked straight past it.
      *
-     * Ceiling, stated rather than implied: it scans dispatch under `/topics`.
-     * A topic read served from some other prefix would not be found — that is
-     * the one way past this, and it is a bigger change than adding a route.
+     * What it guarantees, stated as narrowly as it is true. Two collectors read
+     * the routes out of dispatch (literal compares; matcher constants, by what
+     * they match and per verb). Those only see two shapes — so the three
+     * assertions after them do not look for routes at all, they pin dispatch to
+     * exactly those shapes:
+     *
+     *   1. nothing that names `/topics` is written any other way,
+     *   2. no verb compare sits away from the path test it guards,
+     *   3. no dispatch condition is missing a literal verb.
+     *
+     * Between them, a new ROUTE under `/topics` either lands in one of the two
+     * collectors — and then has to be in `TOPIC_ROUTES` — or reds one of the
+     * three. Not "in the four shapes I thought of": in any shape, because the
+     * shapes are what is asserted. The cost is that dispatch has to keep being
+     * written the way it is written today, which is a fair price for a coverage
+     * claim that is checked rather than asserted.
+     *
+     * Two ceilings, stated rather than implied, because a written guarantee is
+     * what the next reader trusts instead of re-deriving:
+     *
+     * - It scans dispatch under `/topics`. A topic read served from some other
+     *   prefix (`GET /export/:id`, say) is not found — no source scan can decide
+     *   which paths disclose topic content, so that call stays human.
+     * - It discovers routes, not disclosures WITHIN a route. An early
+     *   `if (searchParams.has('raw'))` returning `t.messages` ahead of the guard
+     *   in an already-swept handler adds no route, so nothing here reds and the
+     *   sweep does not see it either — its probe sends one canonical request per
+     *   route, not every parameter that route accepts. Verified, not assumed:
+     *   that mutation is green against this whole suite. Guard bypasses inside a
+     *   handler are what `requireSubscribed` being a single chokepoint is for,
+     *   and what reviewing the handler body is for.
      */
     it('discovers every topic route in broker.ts, so a new one cannot skip the sweep', () => {
       const source = readFileSync(fileURLToPath(new URL('../src/broker.ts', import.meta.url)), 'utf-8')
 
+      // Whole-path compares: `pathname === '/topics…' && method === 'X'`.
       const literal = [...source.matchAll(/pathname === '(\/topics[^']*)' && method === '(\w+)'/g)].map(
         (m) => `${m[2]} ${m[1]}`,
       )
-      const matchers = [...source.matchAll(/^const (TOPIC_\w+) = \//gm)].map((m) => m[1]!)
-      const actions = /^const TOPIC_ACTION_ROUTE = .*\(([a-z|]+)\)/m.exec(source)?.[1]?.split('|') ?? []
 
-      // Routes reachable by a path-matching regex rather than a literal
-      // compare. Kept explicit so a NEW matcher constant reds this list
-      // instead of silently adding an unswept route.
-      expect(matchers.sort()).toEqual(['TOPIC_ACTION_ROUTE', 'TOPIC_ID_ROUTE', 'TOPIC_MESSAGES_ROUTE'])
+      // Path-matching regex constants, collected by what they MATCH rather than
+      // what they are named, and turned into the paths they accept.
+      const matchers = new Map<string, string[]>()
+      for (const [, name, body] of source.matchAll(/^const (\w+) = (\/\^[^\n]+\/)$/gm)) {
+        if (body!.includes('/topics')) matchers.set(name!, pathsMatchedBy(body!))
+      }
 
-      const discovered = [
-        ...literal,
-        'GET /topics/:id',
-        'GET /topics/:id/messages',
-        ...actions.map((a) => `POST /topics/:id/${a}`),
-      ]
-      expect(discovered.sort()).toEqual(TOPIC_ROUTES.map((r) => r.route).sort())
+      // The verbs each matcher dispatches, one entry per branch, so a second
+      // verb on a matcher that already has one is a new route here too.
+      const bindings = new Map<string, string>()
+      for (const [, variable, name] of source.matchAll(/const (\w+) = (\w+)\.exec\(pathname\)/g)) {
+        bindings.set(variable!, name!)
+      }
+      const matched: string[] = []
+      for (const [variable, name] of bindings) {
+        const paths = matchers.get(name)
+        if (!paths) continue
+        const usage = new RegExp(`\\b${variable}\\b`)
+        for (const line of source.split('\n').filter((l) => usage.test(l))) {
+          for (const [, verb] of line.matchAll(/method === '(\w+)'/g)) {
+            matched.push(...paths.map((p) => `${verb} ${p}`))
+          }
+        }
+      }
+
+      // Every `/topics` matcher reaches dispatch through one of those bindings.
+      // An inline `TOPIC_X_ROUTE.test(pathname)` would carry no binding, and its
+      // verbs would go uncollected above.
+      const bound = [...new Set(bindings.values())].filter((name) => matchers.has(name))
+      expect([...matchers.keys()].sort()).toEqual(bound.sort())
+
+      // ...and nothing else in the dispatch names `/topics` at all, so a branch
+      // written in some third shape (an inline regex literal, a `startsWith`)
+      // cannot serve a topic path without first showing up here.
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+      for (const line of code.split('\n').filter((l) => l.includes('/topics'))) {
+        expect(line).toMatch(/^(const \w+ = \/|\s*if \(pathname === ')/)
+      }
+
+      // ...and every verb compare shares a line with the path test it guards,
+      // which is what makes the per-line scan above complete: a condition
+      // wrapped across lines would otherwise carry its verb where nothing looks.
+      const guarded = new RegExp(`pathname === '|\\b(${[...bindings.keys()].join('|')})\\b`)
+      for (const line of code.split('\n').filter((l) => l.includes("method === '"))) {
+        expect(line).toMatch(guarded)
+      }
+
+      // ...and the converse, which is the half that turns "I checked these
+      // shapes" into "there is no other shape": every dispatch condition carries
+      // a LITERAL verb. A branch with no `method` compare (`if (pathname ===
+      // '/topics/export')`, answering every verb) or one comparing against a
+      // variable both name a real route that the two collectors above produce
+      // nothing for — and the route table would agree with them, vacuously.
+      const dispatches = new RegExp(`\\bpathname\\b|\\b(${[...bindings.keys()].join('|')})\\b`)
+      for (const line of code.split('\n').filter((l) => /^\s*if \(/.test(l) && dispatches.test(l))) {
+        expect(line).toMatch(/method === '\w+'/)
+      }
+
+      expect([...literal, ...matched].sort()).toEqual(TOPIC_ROUTES.map((r) => r.route).sort())
     })
 
     it('refuses to list topics for a caller that names no session at all', async () => {
