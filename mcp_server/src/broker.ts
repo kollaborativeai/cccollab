@@ -64,9 +64,9 @@ function sseSubscribed(client: SSEClient, channel: string): boolean {
  * is a separate decision from this one — it must stay wide, or a leak INTO it
  * stops being observable.
  *
- * Like the route guards this is not authentication: the broker is
- * loopback-only and any local process may still name any session. It makes the
- * stream answer to the same subscription rule the routes already answer to.
+ * Like the route guards this is not authentication — see `requireSubscribed`
+ * for what naming a session is actually worth. It makes the stream answer to
+ * the same subscription rule the routes already answer to, nothing more.
  */
 function broadcast(data: string, channel?: string): void {
   const payload = `data: ${data}\n\n`
@@ -199,17 +199,30 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
  * handed the same session that topic's full text. Keeping the rule in one place
  * is what stops the two drifting apart again.
  *
- * Takes the channel rather than the topic so the listing route can use it too:
- * `GET /topics` gates on a channel with no topic in hand.
+ * Takes the channel rather than the topic so the routes that have no topic in
+ * hand can use it too: `GET /topics` gates on the requested channel, `POST
+ * /topics` and `POST /broadcast` on the one being written to. Those last two
+ * kept their own copy of the rule and answered 400 where the helper answers
+ * 403 — cosmetic drift, but drift on the two routes the ticket exists to stop
+ * drifting.
  *
  * Returns the validated session id, or null when it has already answered `res`
  * and the caller must stop. Mirrors the order `GET /topics/:id` already used —
  * topic-existence (404) is checked by the caller first, then missing id (400),
  * then subscription (403) — so an unknown topic still 404s regardless of session.
  *
- * NOTE: this is not authentication. The broker is loopback-only and any local
- * process may name any session, which is the documented honor-system model.
- * This only enforces that routes on the same resource agree on the same rule.
+ * NOTE: this is not authentication, and it buys less than it looks like it
+ * does. Entitlement is a session name, and names are free: `POST /channels/join`
+ * is unauthenticated and `ensureSession` creates whatever it is handed, so one
+ * call mints an entitled identity for any channel. `server.ts` also auto-joins
+ * under the OS username before `introduce` runs, so a session nothing
+ * legitimate reads as (the listener stays anonymous until it has a name) sits
+ * subscribed in every deployment, and `GET /sessions` hands out its name.
+ *
+ * So: this makes the routes on one resource agree on one rule, which is what
+ * KAI-446 is about. It does NOT keep a determined local process out, and it
+ * does not guarantee that an unauthorized read leaves a trace — borrowing an
+ * existing name is quieter than joining. Only broker authentication would.
  */
 function requireSubscribed(res: ServerResponse, channel: string, sessionId: string | undefined | null): string | null {
   if (!sessionId) {
@@ -368,11 +381,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'text, sender and channel are required' })
           return
         }
-        const info = sessions.get(body.sender)
-        if (!info || !info.channels.has(channel)) {
-          jsonResponse(res, 400, { error: `Sender is not subscribed to channel "${channel}".` })
-          return
-        }
+        if (!requireSubscribed(res, channel, body.sender)) return
         const event = {
           source: 'local' as const,
           type: 'broadcast' as const,
@@ -400,11 +409,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'topic, creator and channel are required' })
           return
         }
-        const info = sessions.get(body.creator)
-        if (!info || !info.channels.has(channel)) {
-          jsonResponse(res, 400, { error: `Creator is not subscribed to channel "${channel}".` })
-          return
-        }
+        if (!requireSubscribed(res, channel, body.creator)) return
         const wanted = body.topic.trim().toLowerCase()
         for (const t of topics.values()) {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {

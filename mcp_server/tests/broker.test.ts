@@ -216,7 +216,10 @@ describe('Broker: isolation guards and invariants', () => {
       await joinChannel(port, 'guard-bcast-1', 'guard-bcast-ch')
       await registerSession(port, 'guard-bcast-2')
       const res = await broadcast(port, 'guard-bcast-2', 'guard-bcast-ch', 'should fail')
-      expect(res.status).toBe(400)
+      // 403, not the 400 this route used to answer from its own copy of the
+      // rule: it is refused, not malformed, and it now says so the way every
+      // other subscription-gated route does (KAI-446).
+      expect(res.status).toBe(403)
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/not subscribed/i)
     })
@@ -234,7 +237,8 @@ describe('Broker: isolation guards and invariants', () => {
       await registerSession(port, 'guard-st-1')
       // No joinChannel for guard-st-1
       const res = await createTopic(port, 'guard-st-1', 'denied-topic', 'guard-st-ch')
-      expect(res.status).toBe(400)
+      // 403 for the same reason as the broadcast guard above.
+      expect(res.status).toBe(403)
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/not subscribed/i)
     })
@@ -859,7 +863,7 @@ describe('Broker: isolation guards and invariants', () => {
     const TOPIC_ROUTES: Array<{ route: string; status: number; probe: (topicId: string) => Promise<Response> }> = [
       {
         route: 'POST /topics',
-        status: 400,
+        status: 403,
         probe: () => createTopic(port, ATTACKER, 'k446sweep-intruder', SECRET_CHANNEL),
       },
       { route: 'GET /topics', status: 200, probe: () => listTopics(port, { sessionId: ATTACKER }) },
