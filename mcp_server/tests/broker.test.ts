@@ -504,6 +504,14 @@ describe('Broker: isolation guards and invariants', () => {
       return { status: res.status, body: (await res.json()) as Record<string, unknown> }
     }
 
+    /** The topic's state as its owner sees it — the after-state a refused
+     *  archive/unarchive has to leave untouched. */
+    async function topicState(topicId: string, sessionId: string): Promise<string> {
+      const res = await fetch(`http://127.0.0.1:${port}/topics/${topicId}?sessionId=${encodeURIComponent(sessionId)}`)
+      const { topic } = (await res.json()) as { topic: { state: string } }
+      return topic.state
+    }
+
     async function leaveTopic(topicId: string, sessionId: string): Promise<Response> {
       return fetch(`http://127.0.0.1:${port}/topics/${topicId}/leave`, {
         method: 'POST',
@@ -573,9 +581,7 @@ describe('Broker: isolation guards and invariants', () => {
       // ...and the archive did not happen. This has to read `state`: read-history
       // serves an archived topic identically, so asserting `messages` is defined
       // stays green even when the guard lets the mutation through.
-      const after = await fetch(`http://127.0.0.1:${port}/topics/${topicId}?sessionId=${encodeURIComponent(victim)}`)
-      const { topic } = (await after.json()) as { topic: { state: string } }
-      expect(topic.state).toBe('active')
+      expect(await topicState(topicId, victim)).toBe('active')
     })
 
     it('rejects unarchive from a session not subscribed to the channel', async () => {
@@ -583,6 +589,10 @@ describe('Broker: isolation guards and invariants', () => {
       expect((await archiveTopic(port, topicId, victim)).status).toBe(200)
       const res = await unarchiveTopic(port, topicId, attacker)
       expect(res.status).toBe(403)
+      // ...and the topic is still archived. Status alone would pass a guard that
+      // answers 403 *after* doing the work — the same hole the archive test above
+      // was fixed for, and it is only a mutation away on either route.
+      expect(await topicState(topicId, victim)).toBe('archived')
     })
 
     /**
@@ -591,6 +601,11 @@ describe('Broker: isolation guards and invariants', () => {
      * to remove and the loopback broker has no caller identity, so "attacker
      * evicts victim" is indistinguishable from "victim leaves". That is the
      * documented honor-system model and is out of scope here.
+     *
+     * Status is also all this can assert, unlike its archive/unarchive siblings:
+     * `t.joinedSessions` is written by join/leave and read by nothing in the
+     * broker, so a guard that evicts before refusing has no observable effect to
+     * catch — over HTTP or otherwise.
      */
     it('rejects leave from a session not subscribed to the channel', async () => {
       const { topicId, attacker } = await setup('leave')
