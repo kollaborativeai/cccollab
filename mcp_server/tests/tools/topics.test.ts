@@ -695,7 +695,10 @@ describe('Topic Tools', () => {
 
         expect(result.error).toBeDefined()
         expect(result.messages).toBeUndefined()
-        // The point of "at the tool layer": the read never leaves the process.
+        // The point of "at the tool layer": the HISTORY read never leaves the
+        // process. Resolving the topic still may — `getTopicById` is a backend
+        // query on the remote transport — so the claim is about the message
+        // text, not about zero outbound calls.
         expect(readTopicMessages).not.toHaveBeenCalled()
       })
 

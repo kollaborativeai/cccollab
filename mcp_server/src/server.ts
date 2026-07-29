@@ -177,6 +177,19 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // handles non-local locations; the local broker path stays inline
   // because it doesn't need the transport-factory / introduce-first
   // dance. Logic is intentionally identical to the pre-refactor loop.
+  //
+  // KAI-446 ceiling, left as-is deliberately: before `introduce`,
+  // `displayName` is the OS username, so this subscribes a session by that
+  // name and `introduce` then re-joins under the chosen one without removing
+  // it. Since the broker gates the `/events` stream on session name, that
+  // leftover is a standing entitled identity nothing legitimate reads as —
+  // the listener stays anonymous until it has a name (broker-event-listener.ts
+  // :91). Dropping the join when `hasName()` is false is the obvious fix and
+  // matches the `introduce` call above, but it also silently narrows
+  // pre-introduce discovery (`list_channels`/`list_topics` would answer empty),
+  // and nothing here is import-testable to prove either way. Follow-up, not
+  // this branch — and it changes no exploitability: `POST /channels/join`
+  // mints an entitled name for anyone who asks.
   for (const location of resolved.locations) {
     if (!location.isLocal) continue
     const transport = router.all().find((t) => t.source === location.name)
