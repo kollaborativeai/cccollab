@@ -168,6 +168,15 @@ jobs:
   #   * On workflow_dispatch: always release (manual trigger, no path filter).
   #   * On push to main: require mcp_server paths to have changed and skip
   #     the auto-bump commit.
+  #
+  # `|| '[]'` on the outputs: detect-changes is skipped on workflow_dispatch, so
+  # that output is an empty string there. fromJSON('') is not a safe no-op, and a
+  # manual release must not depend on `||` short-circuiting past it.
+  #
+  # Note the `if:` below is a literal block scalar - its whole body is one
+  # GitHub expression, and expressions have no comment syntax. A `#` line inside
+  # it is not a YAML comment; it becomes part of the expression and breaks the
+  # workflow. Keep commentary out here, above the key.
   release:
     needs: [format, lint, typecheck, test, build, detect-changes]
     if: |
@@ -180,9 +189,6 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
-          # `|| '[]'` because detect-changes is skipped on workflow_dispatch, which
-          # leaves this output an empty string. fromJSON('') is not a safe no-op, and
-          # a manual release must not depend on `||` short-circuiting to avoid it.
           contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'mcp_server') &&
           !startsWith(github.event.head_commit.message, 'chore: bump version to')))
     runs-on: ubuntu-latest
