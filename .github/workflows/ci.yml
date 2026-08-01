@@ -8,11 +8,15 @@
 # -------------------------------------------------------------------
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
 #
+#   Publishing uses npm Trusted Publishing (OIDC), not a stored token. The
+#   runner presents a short-lived identity token and npm exchanges it for
+#   publish rights, so there is no NPM_TOKEN to leak, rotate, or expire. The
+#   trusted publisher is configured on the package at npmjs.com and must name
+#   this repository and this workflow file (ci.yml). npm does not validate that
+#   configuration when it is saved, so a mismatch appears only as a failed
+#   publish.
+#
 #   Secrets:
-#     NPM_TOKEN    - REQUIRED. An npmjs.com automation token with publish
-#                    rights on the `cccollab` package. Without it the release
-#                    job fails at `npm publish`. Not auto-provided: create it
-#                    at npmjs.com and add it under Settings > Secrets > Actions.
 #     GITHUB_TOKEN - auto-provided by Actions; used for the version-bump
 #                    commit/tag/push and the GitHub Release. No longer used
 #                    for publishing.
@@ -142,7 +146,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
+      # Mints the short-lived OIDC token npm exchanges for publish rights.
+      # Without this the publish fails with an auth error even when the
+      # trusted publisher is configured correctly on npmjs.com.
+      id-token: write
 
     steps:
       - uses: actions/checkout@v6
@@ -156,6 +163,21 @@ jobs:
 
       - name: Enable Corepack
         run: corepack enable
+
+      # Trusted Publishing requires npm CLI >= 11.5.1. Rather than depend on
+      # whatever ships with the runner's Node, upgrade only when it is older —
+      # a version check is cheaper than an unconditional global install, and
+      # failing here is far clearer than an opaque auth error at publish time.
+      - name: Ensure npm supports Trusted Publishing
+        run: |
+          set -euo pipefail
+          need=11.5.1
+          have=$(npm --version)
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            echo "npm $have is older than $need; upgrading"
+            npm install -g npm@latest
+          fi
+          npm --version
 
       - name: Get next version (from commits)
         if: github.event_name != 'workflow_dispatch' || inputs.version == ''
@@ -214,12 +236,14 @@ jobs:
         if: steps.semver.outputs.nextStrict != ''
         working-directory: mcp_server
         run: npm publish
-        env:
-          # cccollab publishes to the public npmjs.com registry, not GitHub
-          # Packages, because GitHub Packages requires an auth token even for
-          # public packages — which would put a GitHub login in front of every
-          # `npm i -g cccollab`. npmjs.com needs an explicit automation token.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No NODE_AUTH_TOKEN. Publishing authenticates via Trusted Publishing
+        # (OIDC): the runner presents a short-lived identity token and npm
+        # exchanges it for publish rights, so there is no stored credential to
+        # leak, rotate, or expire. The trusted publisher is configured on the
+        # package at npmjs.com and must name this repo and this workflow file.
+        #
+        # npm does not validate that configuration when it is saved, so a wrong
+        # workflow filename surfaces only as a failed publish here.
 
       - name: Commit, tag, and push
         if: steps.semver.outputs.nextStrict != ''
