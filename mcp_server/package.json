@@ -1,5 +1,5 @@
 {
-  "name": "@kollaborativeai/cccollab",
+  "name": "cccollab",
   "version": "3.2.3",
   "license": "Apache-2.0",
   "type": "module",
@@ -15,8 +15,8 @@
     "url": "git+https://github.com/kollaborativeai/cccollab.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   },
   "scripts": {
     "start": "npx tsx src/server.ts",
@@ -47,5 +47,8 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.4"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

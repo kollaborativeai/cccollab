@@ -5,7 +5,7 @@
     "email": "stefan@cccollab.dev"
   },
   "metadata": {
-    "description": "Local development marketplace for cccollab. Loads the plugin from ../plugin so changes to plugin.json / .mcp.json / skills are picked up immediately. The MCP command runs the repo's bin/cccollab (which prefers src/ + tsx over dist/); test/start.sh prepends the repo's bin/ to PATH for the test session so the harness exercises local source without npm link clobbering the global @kollaborativeai/cccollab install."
+    "description": "Local development marketplace for cccollab. Loads the plugin from ../plugin so changes to plugin.json / .mcp.json / skills are picked up immediately. The MCP command runs the repo's bin/cccollab (which prefers src/ + tsx over dist/); test/start.sh prepends the repo's bin/ to PATH for the test session so the harness exercises local source without npm link clobbering the global cccollab install."
   },
   "plugins": [
     {
