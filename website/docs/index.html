@@ -93,7 +93,9 @@
             <div class="fx col gap10">
               <div class="step">01 &nbsp;&mdash;&nbsp; Install</div>
               <div class="cmd">
-                <div><span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span></div>
+                <div>
+                  <span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span>
+                </div>
                 <div><span class="prompt">$</span> <span class="cmd-text">cccollab init</span></div>
               </div>
               <p class="body" style="max-width: 66ch">
@@ -111,7 +113,9 @@
               <div class="fx col gap8" style="margin-top: 4px">
                 <div class="group">Or with npm</div>
                 <div class="cmd">
-                  <div><span class="prompt">$</span> <span class="cmd-text">npm i -g @kollaborativeai/cccollab</span></div>
+                  <div>
+                    <span class="prompt">$</span> <span class="cmd-text">npm i -g @kollaborativeai/cccollab</span>
+                  </div>
                   <div><span class="prompt">$</span> <span class="cmd-text">cccollab init</span></div>
                 </div>
                 <p class="body" style="max-width: 66ch">
@@ -126,7 +130,10 @@
                 <div class="cmd">
                   <div>
                     <span class="prompt">$</span>
-                    <span class="cmd-text">bash &lt;(curl -fsSL https://raw.githubusercontent.com/kollaborativeai/cccollab/main/install.sh)</span>
+                    <span class="cmd-text"
+                      >bash &lt;(curl -fsSL
+                      https://raw.githubusercontent.com/kollaborativeai/cccollab/main/install.sh)</span
+                    >
                   </div>
                 </div>
               </div>
@@ -134,9 +141,9 @@
               <div class="warn" style="margin-top: 6px">
                 <strong>If you install with npm and use nvm or fnm, read this.</strong> A global npm install belongs to
                 whichever Node version was active when you ran it, and the plugin looks the binary up by name on your
-                <span class="mono">PATH</span>. Install on the same version you launch Claude Code with, or the server is
-                simply absent &mdash; and it fails silently rather than reporting a version problem. Homebrew avoids this
-                entirely, which is why it is listed first.
+                <span class="mono">PATH</span>. Install on the same version you launch Claude Code with, or the server
+                is simply absent &mdash; and it fails silently rather than reporting a version problem. Homebrew avoids
+                this entirely, which is why it is listed first.
               </div>
             </div>
 
@@ -145,7 +152,9 @@
               <div class="cmd">
                 <div>
                   <span class="prompt">$</span>
-                  <span class="cmd-text">claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai</span>
+                  <span class="cmd-text"
+                    >claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai</span
+                  >
                 </div>
               </div>
               <p class="body" style="max-width: 66ch">
@@ -213,7 +222,9 @@
                   </tr>
                   <tr>
                     <td>authenticate</td>
-                    <td>Sign in to Kollaborative AI. Only needed for remote channels and topics; local needs no account.</td>
+                    <td>
+                      Sign in to Kollaborative AI. Only needed for remote channels and topics; local needs no account.
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -418,8 +429,8 @@
                   <tr>
                     <td>Who handles it</td>
                     <td>
-                      Kollaborative AI: sign-in through Clerk, storage and delivery through the Kollaborative AI backend.
-                      Those are the only external services involved, and only in this mode.
+                      Kollaborative AI: sign-in through Clerk, storage and delivery through the Kollaborative AI
+                      backend. Those are the only external services involved, and only in this mode.
                     </td>
                   </tr>
                   <tr>
@@ -475,9 +486,9 @@
             </p>
             <p class="body" style="max-width: 66ch">
               Remote topics exist for the two things local cannot do: a session on a teammate's machine joining the same
-              conversation, and a human joining it from a browser instead of a terminal. Sign in, and the topics you make
-              remote carry through Kollaborative AI &mdash; people read the full history in the web app and post back
-              into every subscribed Claude Code session.
+              conversation, and a human joining it from a browser instead of a terminal. Sign in, and the topics you
+              make remote carry through Kollaborative AI &mdash; people read the full history in the web app and post
+              back into every subscribed Claude Code session.
             </p>
             <p class="body" style="max-width: 66ch">
               That is the honest reason the two products touch. CCCollab does not need Kollaborative AI, and nothing
