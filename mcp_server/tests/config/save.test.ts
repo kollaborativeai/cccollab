@@ -26,28 +26,28 @@ describe('saveLocationAuth', () => {
   })
 
   it('writes auth fields under the named location in the user-level file', () => {
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://wonderful-narwhal-409.convex.cloud',
       accessToken: 'jwt-abc',
       refreshToken: 'refresh-xyz',
       idToken: 'id-abc',
       accessTokenExpiresAt: 1_700_000_000_000,
-      userEmail: 'stefan@flatout.solutions',
+      userEmail: 'stefan@cccollab.dev',
       userId: 'abc123',
       updatedAt: 1_700_000_000_000,
     })
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(true)
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
-    expect(content.locations.flatout.accessToken).toBe('jwt-abc')
-    expect(content.locations.flatout.refreshToken).toBe('refresh-xyz')
-    expect(content.locations.flatout.userEmail).toBe('stefan@flatout.solutions')
-    expect(content.locations.flatout.url).toBe('https://wonderful-narwhal-409.convex.cloud')
-    expect(content.locations.flatout.updatedAt).toBe(1_700_000_000_000)
+    expect(content.locations.acme.accessToken).toBe('jwt-abc')
+    expect(content.locations.acme.refreshToken).toBe('refresh-xyz')
+    expect(content.locations.acme.userEmail).toBe('stefan@cccollab.dev')
+    expect(content.locations.acme.url).toBe('https://wonderful-narwhal-409.convex.cloud')
+    expect(content.locations.acme.updatedAt).toBe(1_700_000_000_000)
   })
 
   it('writes the file with mode 0600', () => {
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
@@ -70,7 +70,7 @@ describe('saveLocationAuth', () => {
         {
           name: 'cccollab maintainer',
           locations: {
-            flatout: {
+            acme: {
               url: 'https://a.convex.cloud',
               accessToken: 'old-token',
               refreshToken: 'old-refresh',
@@ -88,7 +88,7 @@ describe('saveLocationAuth', () => {
       ),
       { mode: 0o600 },
     )
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       accessToken: 'new-token',
       refreshToken: 'new-refresh',
@@ -97,18 +97,18 @@ describe('saveLocationAuth', () => {
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
     expect(content.name).toBe('cccollab maintainer')
-    expect(content.locations.flatout.accessToken).toBe('new-token')
-    expect(content.locations.flatout.refreshToken).toBe('new-refresh')
+    expect(content.locations.acme.accessToken).toBe('new-token')
+    expect(content.locations.acme.refreshToken).toBe('new-refresh')
     // Fields not provided in the update survive.
-    expect(content.locations.flatout.url).toBe('https://a.convex.cloud')
-    expect(content.locations.flatout.userEmail).toBe('user@example.com')
+    expect(content.locations.acme.url).toBe('https://a.convex.cloud')
+    expect(content.locations.acme.userEmail).toBe('user@example.com')
     // Other locations untouched.
     expect(content.locations.other.accessToken).toBe('other-token')
   })
 
   it('creates the file when it does not yet exist', () => {
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(false)
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'a',
@@ -134,7 +134,7 @@ describe('saveLocationAuth', () => {
     const ancient = (Date.now() - 60_000) / 1000
     utimesSync(lockPath, ancient, ancient)
 
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'after-stale',
@@ -143,7 +143,7 @@ describe('saveLocationAuth', () => {
       accessTokenExpiresAt: 1_700_000_000_000,
     })
     const content = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
-    expect(content.locations.flatout.accessToken).toBe('after-stale')
+    expect(content.locations.acme.accessToken).toBe('after-stale')
     expect(existsSync(lockPath)).toBe(false)
   })
 
@@ -162,7 +162,7 @@ describe('saveLocationAuth', () => {
 
     const start = Date.now()
     expect(() =>
-      saveLocationAuth('flatout', {
+      saveLocationAuth('acme', {
         authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'should-not-write',
@@ -201,7 +201,7 @@ describe('saveLocationAuth', () => {
     writeFileSync(CCCOLLAB_CONFIG_FILE, corrupt, { mode: 0o600 })
 
     expect(() =>
-      saveLocationAuth('flatout', {
+      saveLocationAuth('acme', {
         authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'new-token',

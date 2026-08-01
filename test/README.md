@@ -23,7 +23,7 @@ production sessions outside the harness keep using the globally installed
 `@kollaborativeai/cccollab`.
 
 `test/.claude/settings.json` enables `cccollab@cccollab-test` and disables the
-production `cccollab@flatoutsolutions` plugin so the two never collide in this
+production `cccollab@kollaborativeai` plugin so the two never collide in this
 project.
 
 ## Launching two sessions

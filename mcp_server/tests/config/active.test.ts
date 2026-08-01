@@ -15,7 +15,7 @@ describe('resolveActive - cascade', () => {
     const config: CccollabConfig = {
       locations: {
         local: { active: true },
-        flatout: { url: 'https://a.convex.cloud' },
+        acme: { url: 'https://a.convex.cloud' },
       },
     }
     expect(resolveActive(config).activeLocation).toBe('local')
@@ -24,7 +24,7 @@ describe('resolveActive - cascade', () => {
   it('cascades: active topic implies its channel and location are active', () => {
     const config: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: {
             'cccollab-dev': {
@@ -35,23 +35,23 @@ describe('resolveActive - cascade', () => {
       },
     }
     const result = resolveActive(config)
-    expect(result.activeLocation).toBe('flatout')
-    expect(result.activeChannel).toEqual({ location: 'flatout', name: 'cccollab-dev' })
-    expect(result.activeTopic).toEqual({ location: 'flatout', channel: 'cccollab-dev', name: 'ccc-3' })
+    expect(result.activeLocation).toBe('acme')
+    expect(result.activeChannel).toEqual({ location: 'acme', name: 'cccollab-dev' })
+    expect(result.activeTopic).toEqual({ location: 'acme', channel: 'cccollab-dev', name: 'ccc-3' })
   })
 
   it('cascades: active channel implies its location is active', () => {
     const config: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: { 'cccollab-dev': { active: true } },
         },
       },
     }
     const result = resolveActive(config)
-    expect(result.activeLocation).toBe('flatout')
-    expect(result.activeChannel).toEqual({ location: 'flatout', name: 'cccollab-dev' })
+    expect(result.activeLocation).toBe('acme')
+    expect(result.activeChannel).toEqual({ location: 'acme', name: 'cccollab-dev' })
     expect(result.activeTopic).toBeUndefined()
   })
 
@@ -59,7 +59,7 @@ describe('resolveActive - cascade', () => {
     const config: CccollabConfig = {
       locations: {
         local: { active: true },
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           // channels present but no active flags anywhere below - no cascade.
           channels: { dev: {} },
@@ -75,7 +75,7 @@ describe('resolveActive - errors', () => {
     const config: CccollabConfig = {
       locations: {
         local: { active: true },
-        flatout: { url: 'https://a.convex.cloud', active: true },
+        acme: { url: 'https://a.convex.cloud', active: true },
       },
     }
     expect(() => resolveActive(config)).toThrow(/exactly one active location/i)
@@ -127,7 +127,7 @@ describe('resolveActive - errors', () => {
 
   it('throws when a non-local location is missing url', () => {
     const config: CccollabConfig = {
-      locations: { flatout: { active: true } },
+      locations: { acme: { active: true } },
     }
     expect(() => resolveActive(config)).toThrow(/url/i)
   })
@@ -141,13 +141,13 @@ describe('resolveActive - errors', () => {
     const config: CccollabConfig = {
       locations: {
         local: { active: true },
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: { 'cccollab-dev': { active: true } },
         },
       },
     }
-    // `local` is explicitly active, and `flatout` becomes implicitly
+    // `local` is explicitly active, and `acme` becomes implicitly
     // active via the channel cascade - that's two active locations.
     expect(() => resolveActive(config)).toThrow(/exactly one active location/i)
   })
