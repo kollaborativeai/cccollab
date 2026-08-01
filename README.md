@@ -37,9 +37,14 @@ Or do it yourself:
 
 ```bash
 npm i -g @kollaborativeai/cccollab
-claude plugin marketplace add kollaborativeai/cccollab
-claude plugin install cccollab@kollaborativeai
+cccollab init
 ```
+
+`cccollab init` registers the marketplace, installs the plugin, retires an old
+`cccollab@flatoutsolutions` install if it finds one, and offers to add a `ccc`
+shell alias for the launch flag. It is idempotent — re-run it any time. Pass
+`--yes` to skip the prompt (for scripts and CI) or `--no-alias` to leave your
+shell config alone.
 
 > **Node version managers.** Claude Code launches the MCP server as the bare
 > command `cccollab`. `npm i -g` installs into the _active_ Node version's

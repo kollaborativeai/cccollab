@@ -58,52 +58,23 @@ if ! command -v cccollab >/dev/null 2>&1; then
 fi
 log "cccollab resolves at $(command -v cccollab)"
 
-# 5. Retire any pre-rebrand install of cccollab@flatoutsolutions.
-#    Only the plugin is removed: the marketplace it came from also serves
-#    unrelated plugins, so unregistering it would break them.
-if claude plugin list 2>/dev/null | grep -q "cccollab@flatoutsolutions"; then
-  log "Removing the old cccollab@flatoutsolutions plugin..."
-  claude plugin uninstall cccollab@flatoutsolutions || true
-fi
+# 5. Wire it into Claude Code.
+#
+#    `cccollab init` owns the marketplace registration, the plugin install,
+#    retiring the old cccollab@flatoutsolutions plugin, and the shell alias for
+#    the launch flag. Keeping that logic in the binary means the Homebrew
+#    formula (which must not mutate ~/.claude from post_install) and this
+#    script run exactly the same steps.
+log "Wiring cccollab into Claude Code..."
+cccollab init
 
-# 6. Register the kollaborativeai marketplace
-if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ kollaborativeai$"; then
-  log "Adding kollaborativeai marketplace to Claude Code..."
-  claude plugin marketplace add kollaborativeai/cccollab
-else
-  log "kollaborativeai marketplace already registered."
-fi
-
-# 7. Install the plugin (registers the MCP server and bundles the usage skill)
-log "Installing the cccollab plugin..."
-claude plugin install cccollab@kollaborativeai
-
-log "Done."
 cat <<'EOF'
-
-One more step - cccollab needs a flag to receive messages:
-
-    claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai
-
-Without it the tools load but no messages ever arrive. Claude Code shows a
-confirmation dialog the first time; choose "I am using this for local
-development".
-
-The flag is required because Claude Code only delivers pushed messages for
-plugins on Anthropic's channel allowlist, and cccollab ships from its own
-marketplace. It is not a temporary preview gate.
-
-Alias it once:
-
-    alias ccc='claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai'
-
-Then:
 
   - Local mode (sessions on one machine) works immediately, no account needed.
   - For cross-machine topics, run the `authenticate` MCP tool inside Claude
     Code to sign in to the hosted backend at collab.kollaborativeai.com.
 
-Upgrading from cccollab@flatoutsolutions? Update any shell alias and the
-enabledPlugins keys in ~/.claude/settings.json to cccollab@kollaborativeai.
+Upgrading from cccollab@flatoutsolutions? Also update the enabledPlugins keys
+in ~/.claude/settings.json to cccollab@kollaborativeai.
 
 EOF
