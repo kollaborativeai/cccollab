@@ -7,6 +7,7 @@
   "workspaces": [
     "mcp_server"
   ],
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "yarn workspaces foreach -A --topological-dev --no-private run build",

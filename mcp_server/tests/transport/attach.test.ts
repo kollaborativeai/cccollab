@@ -581,7 +581,7 @@ describe('planStartupAttachments', () => {
   it('mirrors the real polluted config: local active + dormant KAI remotes → attach nothing, all quiet', () => {
     const locations = [
       loc({ name: 'remote' }), // KAI, constructable, dormant
-      loc({ name: 'tow123', clerkIssuer: undefined, clerkClientId: undefined }), // KAI deploy, no Clerk pointer, dormant
+      loc({ name: 'selfhosted', clerkIssuer: undefined, clerkClientId: undefined }), // remote deploy, no Clerk pointer, dormant
       localLoc([{ name: 'cccollab', topics: [] }]),
     ]
     const plan = planStartupAttachments(locations, 'local')

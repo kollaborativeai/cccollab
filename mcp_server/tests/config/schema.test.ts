@@ -24,7 +24,7 @@ describe('CccollabConfigSchema', () => {
     const parsed = CccollabConfigSchema.parse({
       locations: {
         acme: {
-          url: 'https://wonderful-narwhal-409.convex.cloud',
+          url: 'https://example-deployment-123.convex.cloud',
           active: true,
           accessToken: 'jwt-abc',
           refreshToken: 'refresh-xyz',
@@ -40,7 +40,7 @@ describe('CccollabConfigSchema', () => {
         },
       },
     })
-    expect(parsed.locations?.acme?.url).toBe('https://wonderful-narwhal-409.convex.cloud')
+    expect(parsed.locations?.acme?.url).toBe('https://example-deployment-123.convex.cloud')
     expect(parsed.locations?.acme?.channels?.['cccollab-dev']?.topics?.['ccc-3-testing']?.active).toBe(true)
   })
 

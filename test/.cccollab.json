@@ -9,7 +9,7 @@
       }
     },
     "acme-dev": {
-      "url": "https://wonderful-narwhal-409.convex.cloud",
+      "url": "https://example-deployment-123.convex.cloud",
       "channels": {
         "test-remote": {}
       }
