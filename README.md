@@ -28,9 +28,11 @@ That command:
 - Configures the `@kollaborativeai` npm registry + auth in `~/.npmrc`
   (idempotent).
 - Installs `@kollaborativeai/cccollab` globally.
-- Registers the `flatoutsolutions` Claude Code marketplace and installs the
+- Registers the `kollaborativeai` Claude Code marketplace and installs the
   `cccollab` plugin (which auto-registers the MCP server and bundles the
   usage skill).
+- Uninstalls the retired `cccollab@flatoutsolutions` plugin if you have it.
+  See the migration notes below for the parts it can't do for you.
 
 After install, Claude Code has cccollab available immediately in local mode.
 No authentication is required for local mode. The hosted backend at
@@ -46,15 +48,31 @@ The MCP server pushes messages from other sessions to Claude via the Claude
 Code Channel protocol. That protocol is opt-in, so launch Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions
+claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai
 ```
 
 Without this flag the tools still work, but inbound messages won't appear as
 `<channel>` tags in your session. Consider aliasing:
 
 ```bash
-alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions'
+alias ccc='claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai'
 ```
+
+### Migrating from `cccollab@flatoutsolutions`
+
+cccollab used to ship as `cccollab@flatoutsolutions`. It now ships as
+`cccollab@kollaborativeai`. Re-running the install command above uninstalls
+the old plugin and installs the new one, but three things point at the
+retired name and have to be updated by hand:
+
+1. **Shell aliases.** Swap `plugin:cccollab@flatoutsolutions` for
+   `plugin:cccollab@kollaborativeai` wherever you aliased it.
+2. **`~/.claude/settings.json`.** Rename the `enabledPlugins` key
+   `"cccollab@flatoutsolutions"` to `"cccollab@kollaborativeai"`.
+3. **Per-project `.claude/settings.json`.** Same key, same rename.
+
+The old marketplace itself stays registered - it serves other plugins. Only
+the `cccollab` plugin moves.
 
 ## Repo layout
 
@@ -134,7 +152,7 @@ Add a location to `~/.cccollab/config.json`:
 ```json
 {
   "locations": {
-    "flatout": {
+    "acme": {
       "url": "https://<your-deployment>.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli"
@@ -143,9 +161,9 @@ Add a location to `~/.cccollab/config.json`:
 }
 ```
 
-Then call `authenticate({ location: "flatout" })` in Claude Code. A browser
+Then call `authenticate({ location: "acme" })` in Claude Code. A browser
 opens for Clerk sign-in (PKCE). After sign-in the tokens are persisted
-back to the same file under `locations.flatout` and the remote transport
+back to the same file under `locations.acme` and the remote transport
 hot-attaches to the running session - no restart needed.
 
 `authType: "clerk"` is also accepted (and is what `authenticate` writes
@@ -158,7 +176,7 @@ Channels configured under a remote location auto-subscribe on startup:
 ```json
 {
   "locations": {
-    "flatout": {
+    "acme": {
       "url": "https://<your-deployment>.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
@@ -280,7 +298,7 @@ claude plugin install cccollab@cccollab-test
 
 The repo ships a `test-marketplace/` that references `plugin/` via symlink,
 plus a `test/` project with `.claude/settings.json` that disables
-`@flatoutsolutions` and enables the local build. Run `cd test` and launch
+`cccollab@kollaborativeai` and enables the local build. Run `cd test` and launch
 with the local channel target:
 
 ```bash

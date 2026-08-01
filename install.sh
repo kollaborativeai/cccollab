@@ -42,17 +42,26 @@ fi
 log "Installing @kollaborativeai/cccollab..."
 npm i -g @kollaborativeai/cccollab
 
-# 5. Ensure the flatoutsolutions marketplace is registered with Claude Code
-if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ flatoutsolutions$"; then
-  log "Adding flatoutsolutions marketplace to Claude Code..."
-  claude plugin marketplace add flatoutsolutions/ai_instructions
-else
-  log "flatoutsolutions marketplace already registered."
+# 5. Retire any pre-rebrand install of cccollab@flatoutsolutions.
+#    Only the plugin is removed: the marketplace it came from also serves
+#    unrelated plugins (development, jira, ...), so unregistering it would
+#    break them.
+if claude plugin list 2>/dev/null | grep -q "cccollab@flatoutsolutions"; then
+  log "Removing the old cccollab@flatoutsolutions plugin..."
+  claude plugin uninstall cccollab@flatoutsolutions || true
 fi
 
-# 6. Install the plugin (auto-registers the MCP server and bundles the usage skill)
+# 6. Ensure the kollaborativeai marketplace is registered with Claude Code
+if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ kollaborativeai$"; then
+  log "Adding kollaborativeai marketplace to Claude Code..."
+  claude plugin marketplace add kollaborativeai/cccollab
+else
+  log "kollaborativeai marketplace already registered."
+fi
+
+# 7. Install the plugin (auto-registers the MCP server and bundles the usage skill)
 log "Installing the cccollab plugin..."
-claude plugin install cccollab@flatoutsolutions
+claude plugin install cccollab@kollaborativeai
 
 log "Done."
 cat <<'EOF'
@@ -61,6 +70,11 @@ Next step:
   Start Claude Code. cccollab works out of the box:
 
   - Local mode (two sessions on the same machine) needs no setup.
+  - Upgrading from cccollab@flatoutsolutions? The old plugin was
+    uninstalled above, but a shell alias or ~/.claude/settings.json
+    pinned to it still points at the retired name. Swap any
+    `plugin:cccollab@flatoutsolutions` for
+    `plugin:cccollab@kollaborativeai`.
   - The hosted backend at collab.kollaborativeai.com is wired in by
     default — just run the `authenticate` MCP tool inside Claude Code
     to sign in with your KAI account.

@@ -8,7 +8,7 @@
         }
       }
     },
-    "flatout-dev": {
+    "acme-dev": {
       "url": "https://wonderful-narwhal-409.convex.cloud",
       "channels": {
         "test-remote": {}
