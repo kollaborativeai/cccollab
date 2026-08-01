@@ -32,3 +32,8 @@ test/.claude/settings.local.json
 
 # Python bytecode from the cctree tests
 cctree/__pycache__/
+
+# Wrangler's local cache, written by any `wrangler pages deploy` run against
+# website/. Machine-specific and account-specific - never commit it, and keep it
+# out of prettier's way.
+.wrangler/

@@ -2,8 +2,12 @@
 #
 # Pipeline shape:
 #   Phase I   - Always-run checks (format, lint, typecheck, test, build) in parallel
-#   Phase II  - Detect which paths changed via dorny/paths-filter (push-only)
+#   Phase II  - Detect which paths changed (push and pull_request)
 #   Phase III - release (npm publish + tag) when mcp_server/plugin paths changed
+#   Phase IV  - deploy cccollab.dev when website/ changed; preview on same-repo PRs
+#
+# The two halves are independent: a website-only commit never publishes to npm,
+# and an mcp_server-only commit never redeploys the site.
 #
 # -------------------------------------------------------------------
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
@@ -25,6 +29,19 @@
 #                    formula after each publish. GITHUB_TOKEN cannot do this:
 #                    it is scoped to this repository. When absent the tap
 #                    step is skipped and the formula must be bumped by hand.
+#     CLOUDFLARE_API_TOKEN - required by Phase IV. Cloudflare has no OIDC path
+#                    for Pages, so unlike npm above this must be a long-lived
+#                    token. Its permission (Account -> Cloudflare Pages -> Edit)
+#                    cannot be narrowed to one project and therefore reaches
+#                    every Pages project in the account, including the
+#                    production kollaborativeai.com site. Use a dedicated token
+#                    used by nothing else so it can be revoked without
+#                    collateral. This repository is public; fork PRs receive no
+#                    secrets, and `website-preview` is gated to same-repo PRs so
+#                    it skips rather than fails for outside contributors.
+#
+#   Variables:
+#     CLOUDFLARE_ACCOUNT_ID - Kollaborative AI account. Not a secret.
 # -------------------------------------------------------------------
 
 name: CI
@@ -103,22 +120,44 @@ jobs:
   # ============================================
   # Phase II - Detect which components changed
   # ============================================
+  # Runs on pull_request as well as push: `website-preview` needs the filter
+  # result on PRs. `release` gates on `github.event_name == 'push'` itself, so
+  # running here on a PR cannot cause a publish.
+  #
+  # `changes` is a JSON array of the filter names that matched. Gate with
+  # `contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), '<name>')`.
   detect-changes:
     needs: [format, lint, typecheck, test, build]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
-      mcp_server: ${{ steps.filter.outputs.mcp_server }}
+      changes: ${{ steps.filter.outputs.changes }}
     steps:
       - uses: actions/checkout@v6
       - id: filter
-        uses: dorny/paths-filter@v4
+        # Pinned to a SHA rather than @v1: the tag is mutable and was in fact moved
+        # onto this commit while this PR was open. A tag can change what runs here
+        # with no change to this repository.
+        uses: flatoutsolutions/github-actions/changes@2874de805f168839b5073866eeec7a751636e7ed # v1.5.0
         with:
           filters: |
             mcp_server:
               - 'mcp_server/**'
               - 'plugin/**'
               - 'yarn.lock'
+            website:
+              - 'website/**'
+
+  # DO NOT add `yarn.lock` (or any root-level dependency file) to the `website`
+  # filter, and do not give `website/` a package.json that feeds the root
+  # lockfile.
+  #
+  # `yarn.lock` is in the `mcp_server` filter so a transitive security bump to a
+  # published dependency still ships a release. If website work could move the
+  # root lockfile, adding a front-end dependency would fire the release job and
+  # publish a new version of @kollaborativeai/cccollab whose only real change is
+  # a marketing-site dependency. The site is deliberately plain HTML and CSS with
+  # no build step and no dependencies, which keeps the two trees separate.
 
   # ============================================
   # Phase III - Release @kollaborativeai/cccollab to npmjs.com
@@ -129,6 +168,15 @@ jobs:
   #   * On workflow_dispatch: always release (manual trigger, no path filter).
   #   * On push to main: require mcp_server paths to have changed and skip
   #     the auto-bump commit.
+  #
+  # `|| '[]'` on the outputs: detect-changes is skipped on workflow_dispatch, so
+  # that output is an empty string there. fromJSON('') is not a safe no-op, and a
+  # manual release must not depend on `||` short-circuiting past it.
+  #
+  # Note the `if:` below is a literal block scalar - its whole body is one
+  # GitHub expression, and expressions have no comment syntax. A `#` line inside
+  # it is not a YAML comment; it becomes part of the expression and breaks the
+  # workflow. Keep commentary out here, above the key.
   release:
     needs: [format, lint, typecheck, test, build, detect-changes]
     if: |
@@ -141,7 +189,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
-          needs.detect-changes.outputs.mcp_server == 'true' &&
+          contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'mcp_server') &&
           !startsWith(github.event.head_commit.message, 'chore: bump version to')))
     runs-on: ubuntu-latest
     permissions:
@@ -327,3 +375,63 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -am "chore: cccollab ${VERSION}"
           git push origin main
+
+  # ============================================
+  # Phase IV - Deploy cccollab.dev (website/ only)
+  # ============================================
+  # The site is static HTML/CSS with no build step, so there is nothing to
+  # compile - the directory is uploaded as-is.
+  #
+  # Credential note: Cloudflare API tokens cannot be scoped to a single Pages
+  # project; `Account -> Cloudflare Pages -> Edit` is account-level and reaches
+  # every Pages project in the account. CLOUDFLARE_API_TOKEN should therefore be
+  # a dedicated token used by nothing else, so it can be revoked without
+  # collateral. Cloudflare Pages has no OIDC path for CI, so unlike the npm
+  # publish above this cannot be a short-lived token.
+  deploy-website:
+    needs: [format, lint, typecheck, test, build, detect-changes]
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'website')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # npm, not the repo's yarn. The action picks a package manager from
+          # the lockfile and would shell out to the runner's global yarn 1.x,
+          # which refuses to run because package.json pins yarn@4 via Corepack.
+          # A static upload needs no repo dependencies, so npm sidesteps it.
+          packageManager: npm
+          wranglerVersion: '4.118.0'
+          command: pages deploy website --project-name=cccollab --branch=main
+
+  # Preview deploy for pull requests that touch the site.
+  #
+  # Gated on the PR coming from a branch in this repository: fork PRs receive no
+  # secrets, so this job would fail rather than skip, and a red X on every
+  # external contribution is a poor first impression on a public repo. Fork PRs
+  # still get the full Phase I checks; they just do not get a preview URL.
+  website-preview:
+    needs: [format, lint, typecheck, test, build, detect-changes]
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'website')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Deploy preview to Cloudflare Pages
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: npm
+          wranglerVersion: '4.118.0'
+          # Preview URLs are derived from the branch name. head_ref is only
+          # interpolated into an action input here, never into a shell command.
+          command: pages deploy website --project-name=cccollab --branch=${{ github.head_ref }}
