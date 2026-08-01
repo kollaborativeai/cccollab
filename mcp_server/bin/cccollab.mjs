@@ -17,6 +17,13 @@ const DIR = resolve(here, '..')
 // the no-argument case — starts the stdio MCP server, because that is how
 // Claude Code spawns this binary (plugin/.mcp.json runs bare `cccollab`).
 // Adding a subcommand must never intercept that path.
+// --version is handled here rather than as a subcommand entry: it must stay
+// offline and side-effect free, because `brew test` runs it on every install.
+if (['--version', '-v'].includes(process.argv[2])) {
+  console.log(require(join(DIR, 'package.json')).version)
+  process.exit(0)
+}
+
 const SUBCOMMANDS = { init: 'init-cli' }
 const subcommand = SUBCOMMANDS[process.argv[2]]
 const entryName = subcommand ?? 'server'
