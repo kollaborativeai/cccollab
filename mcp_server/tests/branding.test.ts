@@ -23,12 +23,6 @@ const ALLOWED_PATHS = new Set([
   // Shared CI tooling, adopted deliberately in KAI-251 and public, so it
   // keeps working once this repo goes public (KAI-555).
   '.github/workflows/ci.yml',
-  // The KAI Jira space genuinely lives on the FlatOut Solutions Jira site,
-  // so the ticket URLs are accurate. KAI-556 depersonalises this file.
-  'cctree/README.md',
-  // Local directory-name -> display-label map for the author's machine.
-  // KAI-556 makes it user-configurable.
-  'cctree/cctree',
   // This file names the strings it is searching for.
   'mcp_server/tests/branding.test.ts',
 ])
@@ -45,6 +39,21 @@ const FORBIDDEN = [
   ['flatout', '.', 'solutions'].join(''),
   ['FlatOut', ' ', 'Solutions'].join(''),
 ]
+
+/**
+ * Names of the author's other companies and clients. These have no business
+ * in a public repo, and they leaked in twice: once as fixture location names
+ * and once as a display-label map in cctree. Word-bounded so ordinary words
+ * that happen to contain them are not flagged.
+ */
+const FORBIDDEN_CLIENT_NAMES = [
+  ['tow', '123'].join(''),
+  ['rad', 'pitcrew'].join(''),
+  ['pit', 'crew'].join(''),
+  ['ta', 'la'].join(''),
+]
+
+const clientNamePattern = (needle: string) => new RegExp(`\\b${needle}\\b`, 'i')
 
 function trackedFiles(): string[] {
   const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
@@ -86,9 +95,22 @@ describe('branding', () => {
         const line = scanned.split('\n').findIndex((l) => l.includes(needle)) + 1
         offenders.push(`${path}:${line} contains "${needle}"`)
       }
+
+      for (const needle of FORBIDDEN_CLIENT_NAMES) {
+        const re = clientNamePattern(needle)
+        if (!re.test(scanned)) continue
+        const line = scanned.split('\n').findIndex((l) => re.test(l)) + 1
+        offenders.push(`${path}:${line} contains client name "${needle}"`)
+      }
     }
 
     expect(offenders).toEqual([])
+  })
+
+  it('flags a client name but not a word that merely contains it', () => {
+    const name = ['ta', 'la'].join('')
+    expect(clientNamePattern(name).test(`locations: { ${name}: {} }`)).toBe(true)
+    expect(clientNamePattern(name).test('const catalared = 1')).toBe(false)
   })
 
   it('scans a meaningful number of files (guards against a broken git call)', () => {

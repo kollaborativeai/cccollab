@@ -164,7 +164,7 @@ and an active topic of `planning`.
       }
     },
     "acme": {
-      "url": "https://wonderful-narwhal-409.convex.cloud",
+      "url": "https://example-deployment-123.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
       "channels": {

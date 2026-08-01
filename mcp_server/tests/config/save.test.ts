@@ -28,7 +28,7 @@ describe('saveLocationAuth', () => {
   it('writes auth fields under the named location in the user-level file', () => {
     saveLocationAuth('acme', {
       authType: 'clerk',
-      url: 'https://wonderful-narwhal-409.convex.cloud',
+      url: 'https://example-deployment-123.convex.cloud',
       accessToken: 'jwt-abc',
       refreshToken: 'refresh-xyz',
       idToken: 'id-abc',
@@ -42,7 +42,7 @@ describe('saveLocationAuth', () => {
     expect(content.locations.acme.accessToken).toBe('jwt-abc')
     expect(content.locations.acme.refreshToken).toBe('refresh-xyz')
     expect(content.locations.acme.userEmail).toBe('stefan@cccollab.dev')
-    expect(content.locations.acme.url).toBe('https://wonderful-narwhal-409.convex.cloud')
+    expect(content.locations.acme.url).toBe('https://example-deployment-123.convex.cloud')
     expect(content.locations.acme.updatedAt).toBe(1_700_000_000_000)
   })
 
