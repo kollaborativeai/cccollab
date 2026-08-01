@@ -3,7 +3,7 @@
 # Pipeline shape:
 #   Phase I   - Always-run checks (format, lint, typecheck, test, build) in parallel
 #   Phase II  - Detect which paths changed via dorny/paths-filter (push-only)
-#   Phase III - release-mcp (npm publish + tag) when mcp_server/plugin paths changed
+#   Phase III - release (npm publish + tag) when mcp_server/plugin paths changed
 #
 # -------------------------------------------------------------------
 # Secrets/vars the workflow expects (provision in GitHub repo settings):
@@ -120,7 +120,7 @@ jobs:
   #   * On workflow_dispatch: always release (manual trigger, no path filter).
   #   * On push to main: require mcp_server paths to have changed and skip
   #     the auto-bump commit.
-  release-mcp:
+  release:
     needs: [format, lint, typecheck, test, build, detect-changes]
     if: |
       !cancelled() &&
