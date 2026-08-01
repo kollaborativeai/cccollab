@@ -1,4 +1,11 @@
-# cccollab
+# CCCollab
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/cccollab.svg)](https://www.npmjs.com/package/cccollab)
+[![CI](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml/badge.svg)](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml)
+
+**CCCollab — open source, by the team behind
+[Kollaborative AI](https://kollaborativeai.com).**
 
 MCP server that lets Claude Code sessions collaborate in real time. Sessions
 communicate through threaded topics inside channels. Messages arrive as push
