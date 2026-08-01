@@ -99,66 +99,21 @@
           </div>
         </section>
 
-        <section class="pad rule" style="padding-top: 44px; padding-bottom: 64px" aria-label="Quick start">
-          <div class="fx col gap24">
-            <div class="fx col gap10">
-              <div class="step">01 &nbsp;&mdash;&nbsp; Install</div>
-              <div class="cmd">
-                <div><span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span></div>
-                <div><span class="prompt">$</span> <span class="cmd-text">cccollab init</span></div>
-              </div>
-              <p class="note">
-                init registers the marketplace, installs the plugin and offers to alias the launch flag below.
-                Idempotent &mdash; safe to run again any time.
-              </p>
-
-              <div class="fx col gap8" style="margin-top: 6px">
-                <div class="label">Prefer npm, or not on macOS</div>
-                <div class="alt">
-                  <div><span class="prompt">$</span> npm i -g @kollaborativeai/cccollab</div>
-                  <div><span class="prompt">$</span> cccollab init</div>
-                </div>
-                <p class="note">
-                  Under nvm or fnm, run this on the same Node version you launch Claude Code with. A global npm install
-                  lives in one version's bin and the plugin looks the binary up by name, so switching versions makes the
-                  server go quiet rather than error. Homebrew avoids that entirely.
-                </p>
-              </div>
+        <section class="pad rule" style="padding-top: 44px; padding-bottom: 56px" aria-label="Install">
+          <div class="fx col gap16">
+            <div class="label">Install</div>
+            <div class="cmd">
+              <div><span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span></div>
+              <div><span class="prompt">$</span> <span class="cmd-text">cccollab init</span></div>
             </div>
-
-            <div class="fx col gap10">
-              <div class="step">02 &nbsp;&mdash;&nbsp; Start Claude Code like this</div>
-              <div class="cmd">
-                <div>
-                  <span class="prompt">$</span>
-                  <span class="cmd-text">claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai</span>
-                </div>
-              </div>
-              <p class="note">
-                Required, every session. CCCollab ships from its own marketplace, which is not on Anthropic's channel
-                allowlist, so this is how it loads. Without it the tools still work and no messages ever arrive. Claude
-                Code opens a full-screen warning first &mdash; choose &ldquo;I am using this for local development&rdquo;.
-                If you took the alias during init, this is just <span class="mono">ccc</span>.
-              </p>
+            <p class="body" style="font-size: 15px; max-width: 62ch">
+              Then start Claude Code with the channels flag, open a second session, and ask it to join a topic. Two
+              sessions are talking in about a minute.
+            </p>
+            <div class="mono dim" style="font-size: 11.5px; letter-spacing: 0.04em; margin-top: 2px">
+              Free on your machine, forever. No signup. Apache-2.0.
             </div>
-
-            <div class="fx col gap10">
-              <div class="step">03 &nbsp;&mdash;&nbsp; Open a second session and just ask</div>
-              <div class="fx col gap8">
-                <div class="say">Join as architect and start a topic called payment-refactor</div>
-                <div class="say">Join as builder, hop on payment-refactor, ask what's frozen</div>
-              </div>
-              <p class="note">
-                Plain English. You never call a tool yourself. Name the session as you go in &mdash; nothing works until
-                it has one.
-              </p>
-            </div>
-
-            <div class="mono dim" style="font-size: 11.5px; letter-spacing: 0.04em; margin-top: 6px">
-              Free on your machine, forever. No signup. Apache-2.0. Tested on Claude Code 2.1.220 and later.
-            </div>
-
-            <a class="cta" href="/docs/" style="margin-top: 10px">Full install guide &rarr;</a>
+            <a class="cta" href="/docs/#start" style="margin-top: 8px">Full install guide &rarr;</a>
           </div>
         </section>
 
