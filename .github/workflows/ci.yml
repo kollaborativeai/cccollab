@@ -16,6 +16,11 @@
 #     GITHUB_TOKEN - auto-provided by Actions; used for the version-bump
 #                    commit/tag/push and the GitHub Release. No longer used
 #                    for publishing.
+#     TAP_GITHUB_TOKEN - OPTIONAL. A token with contents:write on
+#                    kollaborativeai/homebrew-tap, used to bump the Homebrew
+#                    formula after each publish. GITHUB_TOKEN cannot do this:
+#                    it is scoped to this repository. When absent the tap
+#                    step is skipped and the formula must be bumped by hand.
 # -------------------------------------------------------------------
 
 name: CI
@@ -244,3 +249,57 @@ jobs:
           else
             gh release create "${TAG}" --title "${TAG}" --generate-notes
           fi
+
+      # ------------------------------------------------------------------
+      # Keep the Homebrew formula in step with the published package.
+      #
+      # Skipped when TAP_GITHUB_TOKEN is absent, so the release itself never
+      # fails over tap automation. Without the secret the formula simply has
+      # to be bumped by hand, which is a stale formula rather than a broken
+      # release. GITHUB_TOKEN cannot be used here: it is scoped to this
+      # repository and the tap is a different one.
+      #
+      # The sha256 is computed from the tarball npm actually served, not from
+      # a local build, so the formula can only ever point at bytes that exist
+      # on the registry.
+      # ------------------------------------------------------------------
+      - name: Update the Homebrew tap
+        if: steps.semver.outputs.nextStrict != '' && env.TAP_TOKEN != ''
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          VERSION: ${{ steps.semver.outputs.nextStrict }}
+        run: |
+          set -euo pipefail
+          TARBALL="https://registry.npmjs.org/@kollaborativeai/cccollab/-/cccollab-${VERSION}.tgz"
+
+          # npm's registry can lag a few minutes on a fresh publish. Fail the
+          # step rather than write a sha256 for a tarball that is not there.
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "$TARBALL" -o /tmp/pkg.tgz; then break; fi
+            echo "tarball not on the registry yet (attempt ${attempt}); waiting"
+            sleep 20
+          done
+          test -s /tmp/pkg.tgz || { echo "::error::${TARBALL} never became available"; exit 1; }
+
+          SHA=$(sha256sum /tmp/pkg.tgz | cut -d' ' -f1)
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/kollaborativeai/homebrew-tap.git" /tmp/tap
+          cd /tmp/tap
+
+          python3 - "$VERSION" "$SHA" <<'PY'
+          import re, sys
+          version, sha = sys.argv[1], sys.argv[2]
+          path = "Formula/cccollab.rb"
+          src = open(path).read()
+          src = re.sub(r'cccollab-\d+\.\d+\.\d+\.tgz', f'cccollab-{version}.tgz', src)
+          src = re.sub(r'sha256 "[0-9a-f]{64}"', f'sha256 "{sha}"', src)
+          open(path, "w").write(src)
+          PY
+
+          if git diff --quiet; then
+            echo "Formula already at ${VERSION}, nothing to push."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: cccollab ${VERSION}"
+          git push origin main
