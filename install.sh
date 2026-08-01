@@ -16,11 +16,27 @@ command -v claude >/dev/null 2>&1 || err "claude (Claude Code CLI) is required. 
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 [ "$NODE_MAJOR" -ge 20 ] || err "Node.js 20+ is required (found $(node --version))."
 
-# 2. Install the package from the public npm registry
+# 2. Remove the scope mapping written by the pre-npmjs installer.
+#
+#    Earlier versions of this script wrote
+#      @kollaborativeai:registry=https://npm.pkg.github.com
+#    into ~/.npmrc, back when the package was published to GitHub Packages.
+#    That line silently wins over the public registry, so an upgrade would
+#    reinstall the old private build — or fail with a 404 once the GitHub
+#    Packages version is gone. Nothing else in cccollab needs a scope mapping.
+NPMRC="${HOME}/.npmrc"
+if [ -f "$NPMRC" ] && grep -q '^@kollaborativeai:registry=https://npm\.pkg\.github\.com' "$NPMRC"; then
+  log "Removing the stale @kollaborativeai -> GitHub Packages mapping from ~/.npmrc"
+  tmpfile=$(mktemp)
+  grep -v '^@kollaborativeai:registry=https://npm\.pkg\.github\.com' "$NPMRC" >"$tmpfile"
+  mv "$tmpfile" "$NPMRC"
+fi
+
+# 3. Install the package from the public npm registry
 log "Installing @kollaborativeai/cccollab..."
 npm i -g @kollaborativeai/cccollab
 
-# 3. Verify the binary is actually reachable on PATH.
+# 4. Verify the binary is actually reachable on PATH.
 #
 #    Claude Code spawns the MCP server as the bare command `cccollab` (see
 #    plugin/.mcp.json). Node version managers - volta, nvm, fnm, asdf - install
@@ -42,7 +58,7 @@ if ! command -v cccollab >/dev/null 2>&1; then
 fi
 log "cccollab resolves at $(command -v cccollab)"
 
-# 4. Retire any pre-rebrand install of cccollab@flatoutsolutions.
+# 5. Retire any pre-rebrand install of cccollab@flatoutsolutions.
 #    Only the plugin is removed: the marketplace it came from also serves
 #    unrelated plugins, so unregistering it would break them.
 if claude plugin list 2>/dev/null | grep -q "cccollab@flatoutsolutions"; then
@@ -50,7 +66,7 @@ if claude plugin list 2>/dev/null | grep -q "cccollab@flatoutsolutions"; then
   claude plugin uninstall cccollab@flatoutsolutions || true
 fi
 
-# 5. Register the kollaborativeai marketplace
+# 6. Register the kollaborativeai marketplace
 if ! claude plugin marketplace list 2>/dev/null | grep -q "^  ❯ kollaborativeai$"; then
   log "Adding kollaborativeai marketplace to Claude Code..."
   claude plugin marketplace add kollaborativeai/cccollab
@@ -58,7 +74,7 @@ else
   log "kollaborativeai marketplace already registered."
 fi
 
-# 6. Install the plugin (registers the MCP server and bundles the usage skill)
+# 7. Install the plugin (registers the MCP server and bundles the usage skill)
 log "Installing the cccollab plugin..."
 claude plugin install cccollab@kollaborativeai
 

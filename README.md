@@ -78,14 +78,20 @@ alias ccc='claude --dangerously-load-development-channels plugin:cccollab@kollab
 
 cccollab used to ship as `cccollab@flatoutsolutions`. It now ships as
 `cccollab@kollaborativeai`. Re-running the install command above uninstalls
-the old plugin and installs the new one, but three things point at the
-retired name and have to be updated by hand:
+the old plugin and installs the new one, but four things point at the
+retired setup and have to be updated by hand:
 
-1. **Shell aliases.** Swap `plugin:cccollab@flatoutsolutions` for
+1. **`~/.npmrc`.** Delete any
+   `@kollaborativeai:registry=https://npm.pkg.github.com` line. Older
+   installers wrote it when the package lived on GitHub Packages, and it
+   silently overrides the public registry — so `npm i -g` would reinstall the
+   old private build instead of the published one. The installer removes it
+   for you.
+2. **Shell aliases.** Swap `plugin:cccollab@flatoutsolutions` for
    `plugin:cccollab@kollaborativeai` wherever you aliased it.
-2. **`~/.claude/settings.json`.** Rename the `enabledPlugins` key
+3. **`~/.claude/settings.json`.** Rename the `enabledPlugins` key
    `"cccollab@flatoutsolutions"` to `"cccollab@kollaborativeai"`.
-3. **Per-project `.claude/settings.json`.** Same key, same rename.
+4. **Per-project `.claude/settings.json`.** Same key, same rename.
 
 The old marketplace itself stays registered - it serves other plugins. Only
 the `cccollab` plugin moves.
