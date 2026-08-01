@@ -564,6 +564,29 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@kollaborativeai/cccollab@workspace:mcp_server":
+  version: 0.0.0-use.local
+  resolution: "@kollaborativeai/cccollab@workspace:mcp_server"
+  dependencies:
+    "@eslint/js": "npm:^10.0.1"
+    "@modelcontextprotocol/sdk": "npm:^1.29.0"
+    "@types/node": "npm:^25.6.0"
+    convex: "npm:^1.35.1"
+    cosmiconfig: "npm:^9.0.1"
+    deepmerge: "npm:^4.3.1"
+    eslint: "npm:^10.2.1"
+    globals: "npm:^17.5.0"
+    prettier: "npm:^3.8.3"
+    tsx: "npm:^4.21.0"
+    typescript: "npm:^6.0.3"
+    typescript-eslint: "npm:^8.58.2"
+    vitest: "npm:^4.1.4"
+    zod: "npm:^4.3.6"
+  bin:
+    cccollab: bin/cccollab.mjs
+  languageName: unknown
+  linkType: soft
+
 "@modelcontextprotocol/sdk@npm:^1.29.0":
   version: 1.29.0
   resolution: "@modelcontextprotocol/sdk@npm:1.29.0"
@@ -1267,29 +1290,6 @@ __metadata:
     lint-staged: "npm:^16.4.0"
     prettier: "npm:^3.8.3"
     typescript: "npm:^6.0.3"
-  languageName: unknown
-  linkType: soft
-
-"cccollab@workspace:mcp_server":
-  version: 0.0.0-use.local
-  resolution: "cccollab@workspace:mcp_server"
-  dependencies:
-    "@eslint/js": "npm:^10.0.1"
-    "@modelcontextprotocol/sdk": "npm:^1.29.0"
-    "@types/node": "npm:^25.6.0"
-    convex: "npm:^1.35.1"
-    cosmiconfig: "npm:^9.0.1"
-    deepmerge: "npm:^4.3.1"
-    eslint: "npm:^10.2.1"
-    globals: "npm:^17.5.0"
-    prettier: "npm:^3.8.3"
-    tsx: "npm:^4.21.0"
-    typescript: "npm:^6.0.3"
-    typescript-eslint: "npm:^8.58.2"
-    vitest: "npm:^4.1.4"
-    zod: "npm:^4.3.6"
-  bin:
-    cccollab: bin/cccollab.mjs
   languageName: unknown
   linkType: soft
 

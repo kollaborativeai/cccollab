@@ -12,7 +12,7 @@
   "scripts": {
     "build": "yarn workspaces foreach -A --topological-dev --no-private run build",
     "test": "yarn workspaces foreach -A --no-private run test",
-    "test:integration": "yarn workspace cccollab run test:integration",
+    "test:integration": "yarn workspace @kollaborativeai/cccollab run test:integration",
     "lint": "yarn workspaces foreach -A --no-private run lint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

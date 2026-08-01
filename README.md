@@ -1,7 +1,7 @@
 # CCCollab
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![npm](https://img.shields.io/npm/v/cccollab.svg)](https://www.npmjs.com/package/cccollab)
+[![npm](https://img.shields.io/npm/v/%40kollaborativeai%2Fcccollab.svg)](https://www.npmjs.com/package/@kollaborativeai/cccollab)
 [![CI](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml/badge.svg)](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml)
 
 **CCCollab — open source, by the team behind
@@ -36,7 +36,7 @@ do for you.
 Or do it yourself:
 
 ```bash
-npm i -g cccollab
+npm i -g @kollaborativeai/cccollab
 claude plugin marketplace add kollaborativeai/cccollab
 claude plugin install cccollab@kollaborativeai
 ```
@@ -93,13 +93,13 @@ the `cccollab` plugin moves.
 ## Repo layout
 
 This repo is a yarn 4 monorepo. Everything lands together under
-`cccollab` (the published npm package). The Convex backend
+`@kollaborativeai/cccollab` (the published npm package). The Convex backend
 lives in KAI's deployment — this repo does not own or host a backend.
 
-| Path          | What it holds                                                                                                                                                     |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `cccollab`. Owns the broker, transport abstraction, and all tool handlers.           |
-| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`. |
+| Path          | What it holds                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@kollaborativeai/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
+| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.        |
 
 See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
