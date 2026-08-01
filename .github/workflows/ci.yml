@@ -125,7 +125,7 @@ jobs:
   # running here on a PR cannot cause a publish.
   #
   # `changes` is a JSON array of the filter names that matched. Gate with
-  # `contains(fromJSON(needs.detect-changes.outputs.changes), '<name>')`.
+  # `contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), '<name>')`.
   detect-changes:
     needs: [format, lint, typecheck, test, build]
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -180,7 +180,10 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
-          contains(fromJSON(needs.detect-changes.outputs.changes), 'mcp_server') &&
+          # `|| '[]'` because detect-changes is skipped on workflow_dispatch, which
+          # leaves this output an empty string. fromJSON('') is not a safe no-op, and
+          # a manual release must not depend on `||` short-circuiting to avoid it.
+          contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'mcp_server') &&
           !startsWith(github.event.head_commit.message, 'chore: bump version to')))
     runs-on: ubuntu-latest
     permissions:
@@ -384,7 +387,7 @@ jobs:
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      contains(fromJSON(needs.detect-changes.outputs.changes), 'website')
+      contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'website')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -412,7 +415,7 @@ jobs:
     if: |
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON(needs.detect-changes.outputs.changes), 'website')
+      contains(fromJSON(needs.detect-changes.outputs.changes || '[]'), 'website')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
