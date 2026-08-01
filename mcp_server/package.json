@@ -1,5 +1,5 @@
 {
-  "name": "cccollab",
+  "name": "@kollaborativeai/cccollab",
   "version": "3.2.3",
   "license": "Apache-2.0",
   "type": "module",

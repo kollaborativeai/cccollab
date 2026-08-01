@@ -17,8 +17,8 @@ NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 [ "$NODE_MAJOR" -ge 20 ] || err "Node.js 20+ is required (found $(node --version))."
 
 # 2. Install the package from the public npm registry
-log "Installing cccollab..."
-npm i -g cccollab
+log "Installing @kollaborativeai/cccollab..."
+npm i -g @kollaborativeai/cccollab
 
 # 3. Verify the binary is actually reachable on PATH.
 #

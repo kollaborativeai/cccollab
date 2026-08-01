@@ -112,7 +112,7 @@ jobs:
               - 'yarn.lock'
 
   # ============================================
-  # Phase III - Release cccollab to npmjs.com
+  # Phase III - Release @kollaborativeai/cccollab to npmjs.com
   # ============================================
   # Gating:
   #   * Phase I jobs must have succeeded (explicit result checks because the
@@ -191,7 +191,7 @@ jobs:
 
       - name: Build
         if: steps.semver.outputs.nextStrict != ''
-        run: yarn workspace cccollab build
+        run: yarn workspace @kollaborativeai/cccollab build
 
       - name: Update version in mcp_server/package.json and plugin.json
         if: steps.semver.outputs.nextStrict != ''
