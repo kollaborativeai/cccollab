@@ -56,7 +56,8 @@ Report abusive, harassing, or otherwise unacceptable behaviour to the
 maintainers. The most reliable route is a
 [private vulnerability report](https://github.com/kollaborativeai/cccollab/security/advisories/new),
 which is private between you and the maintainers — it is labelled for security
-but works for any report that should not be public.
+but works for any report that should not be public. You can also email
+stefan@cccollab.dev.
 
 All complaints will be reviewed and investigated promptly and fairly. Maintainers
 are obligated to respect the privacy and security of the reporter of any
