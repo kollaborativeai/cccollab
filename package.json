@@ -1,8 +1,8 @@
 {
-  "name": "cccollab",
+  "name": "cccollab-monorepo",
   "version": "1.0.0",
   "private": true,
-  "description": "Monorepo root for the @kollaborativeai/cccollab MCP server workspace.",
+  "description": "Monorepo root for the cccollab MCP server workspace.",
   "packageManager": "yarn@4.12.0",
   "workspaces": [
     "mcp_server"
@@ -12,7 +12,7 @@
   "scripts": {
     "build": "yarn workspaces foreach -A --topological-dev --no-private run build",
     "test": "yarn workspaces foreach -A --no-private run test",
-    "test:integration": "yarn workspace @kollaborativeai/cccollab run test:integration",
+    "test:integration": "yarn workspace cccollab run test:integration",
     "lint": "yarn workspaces foreach -A --no-private run lint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -20,7 +20,7 @@ break every production cccollab session on the machine. Instead, `test/start.sh`
 prepends this repo's `mcp_server/bin/` to PATH for just the test session, so
 the spawned MCP server resolves to local `mcp_server/src/` via tsx while
 production sessions outside the harness keep using the globally installed
-`@kollaborativeai/cccollab`.
+`cccollab`.
 
 `test/.claude/settings.json` enables `cccollab@cccollab-test` and disables the
 production `cccollab@kollaborativeai` plugin so the two never collide in this

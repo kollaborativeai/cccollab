@@ -13,26 +13,33 @@ events via the Claude Code Channel protocol; no polling. Two modes:
 
 ## Install
 
-Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated
-(`gh auth login`), [Node.js](https://nodejs.org/) 20+, and
+Prerequisites: [Node.js](https://nodejs.org/) 20+ and
 [Claude Code](https://claude.com/claude-code).
 
 ```bash
-bash <(gh api /repos/kollaborativeai/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
+bash <(curl -fsSL https://raw.githubusercontent.com/kollaborativeai/cccollab/main/install.sh)
 ```
 
-That command:
+That script installs `cccollab` from npm, registers the `kollaborativeai`
+Claude Code marketplace, installs the plugin, and verifies the binary is
+reachable on `PATH`. It also removes the retired `cccollab@flatoutsolutions`
+plugin if you have it — see the migration notes below for the parts it can't
+do for you.
 
-- Adds the `read:packages` scope to your gh CLI token if missing (browser
-  consent, one-time).
-- Configures the `@kollaborativeai` npm registry + auth in `~/.npmrc`
-  (idempotent).
-- Installs `@kollaborativeai/cccollab` globally.
-- Registers the `kollaborativeai` Claude Code marketplace and installs the
-  `cccollab` plugin (which auto-registers the MCP server and bundles the
-  usage skill).
-- Uninstalls the retired `cccollab@flatoutsolutions` plugin if you have it.
-  See the migration notes below for the parts it can't do for you.
+Or do it yourself:
+
+```bash
+npm i -g cccollab
+claude plugin marketplace add kollaborativeai/cccollab
+claude plugin install cccollab@kollaborativeai
+```
+
+> **Node version managers.** Claude Code launches the MCP server as the bare
+> command `cccollab`. `npm i -g` installs into the _active_ Node version's
+> prefix, so under volta, nvm, fnm or asdf a later version switch leaves the
+> binary installed but off `PATH` — and Claude Code reports a dead MCP server
+> rather than anything diagnosable. Install from the Node version you launch
+> Claude Code with. The installer checks this for you and fails loudly.
 
 After install, Claude Code has cccollab available immediately in local mode.
 No authentication is required for local mode. The hosted backend at
@@ -51,8 +58,10 @@ Code Channel protocol. That protocol is opt-in, so launch Claude Code with:
 claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai
 ```
 
-Without this flag the tools still work, but inbound messages won't appear as
-`<channel>` tags in your session. Consider aliasing:
+Without this flag the tools still work, but no messages ever arrive — they
+won't appear as `<channel>` tags in your session. This is not a temporary
+preview gate: Claude Code only pushes to plugins on Anthropic's channel
+allowlist, and cccollab ships from its own marketplace. Alias it once:
 
 ```bash
 alias ccc='claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai'
@@ -77,13 +86,13 @@ the `cccollab` plugin moves.
 ## Repo layout
 
 This repo is a yarn 4 monorepo. Everything lands together under
-`@kollaborativeai/cccollab` (the published npm package). The Convex backend
+`cccollab` (the published npm package). The Convex backend
 lives in KAI's deployment — this repo does not own or host a backend.
 
-| Path          | What it holds                                                                                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `@kollaborativeai/cccollab`. Owns the broker, transport abstraction, and all tool handlers. |
-| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`.        |
+| Path          | What it holds                                                                                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp_server/` | The local stdio MCP server that Claude Code spawns per session. Published as `cccollab`. Owns the broker, transport abstraction, and all tool handlers.           |
+| `plugin/`     | The Claude Code plugin bundle (skills + `.mcp.json`) that registers the MCP server with Claude Code. Not a yarn workspace; version bumps ride with `mcp_server/`. |
 
 See [`docs/architecture/mcp-servers.md`](docs/architecture/mcp-servers.md) for
 why the local stdio server and the future hosted HTTP MCP server are two
