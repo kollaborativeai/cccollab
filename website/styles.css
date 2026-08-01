@@ -18,7 +18,7 @@
   --green: oklch(0.78 0.14 165);
   --violet: oklch(0.78 0.14 300);
   --amber: oklch(0.82 0.13 75);
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
   --sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
 }
 

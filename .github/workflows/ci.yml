@@ -135,7 +135,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - id: filter
-        uses: flatoutsolutions/github-actions/changes@v1
+        # Pinned to a SHA rather than @v1: the tag is mutable and was in fact moved
+        # onto this commit while this PR was open. A tag can change what runs here
+        # with no change to this repository.
+        uses: flatoutsolutions/github-actions/changes@2874de805f168839b5073866eeec7a751636e7ed # v1.5.0
         with:
           filters: |
             mcp_server:
@@ -386,7 +389,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -414,7 +417,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Deploy preview to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

@@ -92,6 +92,10 @@
 
             <div class="fx col gap10">
               <div class="step">01 &nbsp;&mdash;&nbsp; Install</div>
+              <p class="body" style="max-width: 66ch">
+                Needs <strong style="color: var(--fg); font-weight: 500">Node.js 20 or newer</strong> and Claude Code
+                already installed.
+              </p>
               <div class="cmd">
                 <div>
                   <span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span>
@@ -391,7 +395,9 @@
                     <td>On disk</td>
                     <td>
                       Only what is needed to find the broker again: a PID file and a small rendezvous file naming the
-                      port. Plus your own <span class="mono">cccollab.json</span>, if you write one.
+                      port. Plus your own <span class="mono">.cccollab.json</span>, if you write one, and
+                      <span class="mono">~/.cccollab/config.json</span> once you sign in &mdash; that is the only file
+                      tokens are written to.
                     </td>
                   </tr>
                   <tr>
@@ -461,7 +467,7 @@
               want without saying so each time.
             </p>
             <p class="body" style="max-width: 66ch">
-              A <span class="mono">cccollab.json</span> alongside your project declares the channels a session
+              A <span class="mono">.cccollab.json</span> alongside your project declares the channels a session
               subscribes to on start. Sessions that join that way report the config file as the source of the
               subscription, so <span class="mono">whoami</span> always tells you whether you are somewhere because you
               asked or because the project put you there.
