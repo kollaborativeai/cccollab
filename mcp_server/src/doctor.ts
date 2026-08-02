@@ -19,6 +19,7 @@
  * about what is loaded.
  */
 
+import { delimiter as pathDelimiter, join } from 'node:path'
 import {
   inspectVersions,
   driftWarning,
@@ -134,17 +135,26 @@ export function resolveOnPath(
   name: string,
   pathVar: string | undefined,
   deps: { isExecutable(path: string): boolean; realPath(path: string): string },
+  options: { extensions?: string[]; delimiter?: string } = {},
 ): string[] {
+  // Separator and extensions are injectable so both platforms' behaviour can be
+  // tested from either. Windows needs PATHEXT: without it the scan finds nothing
+  // and reports an empty PATH, which is indistinguishable from "not installed" —
+  // the same silent-empty this command exists to eliminate.
+  const sep = options.delimiter ?? pathDelimiter
+  const extensions = options.extensions ?? ['']
   const seen = new Set<string>()
   const found: string[] = []
-  for (const dir of (pathVar ?? '').split(':')) {
+  for (const dir of (pathVar ?? '').split(sep)) {
     if (!dir) continue
-    const candidate = `${dir.replace(/\/+$/, '')}/${name}`
-    if (!deps.isExecutable(candidate)) continue
-    const real = deps.realPath(candidate)
-    if (seen.has(real)) continue
-    seen.add(real)
-    found.push(candidate)
+    for (const ext of extensions) {
+      const candidate = join(dir, `${name}${ext}`)
+      if (!deps.isExecutable(candidate)) continue
+      const real = deps.realPath(candidate)
+      if (seen.has(real)) continue
+      seen.add(real)
+      found.push(candidate)
+    }
   }
   return found
 }

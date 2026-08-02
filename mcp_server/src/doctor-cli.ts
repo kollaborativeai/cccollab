@@ -55,23 +55,31 @@ function processDump(): string {
  * command reports when Claude Code runs it.
  */
 function listBinariesOnPath(): BinaryInstall[] {
-  const paths = resolveOnPath('cccollab', process.env.PATH, {
-    isExecutable(path) {
-      try {
-        accessSync(path, constants.X_OK)
-        return statSync(path).isFile()
-      } catch {
-        return false
-      }
+  const paths = resolveOnPath(
+    'cccollab',
+    process.env.PATH,
+    {
+      isExecutable(path) {
+        try {
+          // Windows has no execute bit; presence of a PATHEXT match is the test.
+          if (process.platform !== 'win32') accessSync(path, constants.X_OK)
+          return statSync(path).isFile()
+        } catch {
+          return false
+        }
+      },
+      realPath(path) {
+        try {
+          return realpathSync(path)
+        } catch {
+          return path
+        }
+      },
     },
-    realPath(path) {
-      try {
-        return realpathSync(path)
-      } catch {
-        return path
-      }
-    },
-  })
+    process.platform === 'win32'
+      ? { extensions: (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) }
+      : {},
+  )
 
   return paths.map((path) => {
     const asked = spawnSync(path, ['--version'], { encoding: 'utf8', timeout: 10_000 })

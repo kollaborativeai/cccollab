@@ -367,3 +367,29 @@ describe('resolveOnPath', () => {
     expect(found).toHaveLength(2)
   })
 })
+
+describe('resolveOnPath across platforms', () => {
+  const fs = (executables: string[]) => ({
+    isExecutable: (path: string) => executables.includes(path),
+    realPath: (path: string) => path,
+  })
+
+  it('splits on the separator it is given, not the host platform default', () => {
+    const found = resolveOnPath('cccollab', 'C:\\tools;C:\\other', fs(['C:\\tools/cccollab.CMD']), {
+      delimiter: ';',
+      extensions: ['.COM', '.EXE', '.CMD'],
+    })
+    expect(found).toEqual(['C:\\tools/cccollab.CMD'])
+  })
+
+  it('tries each PATHEXT extension in order', () => {
+    const found = resolveOnPath('cccollab', '/tools', fs(['/tools/cccollab.EXE', '/tools/cccollab.CMD']), {
+      extensions: ['.COM', '.EXE', '.CMD'],
+    })
+    expect(found).toEqual(['/tools/cccollab.EXE', '/tools/cccollab.CMD'])
+  })
+
+  it('finds nothing when no extension matches, rather than throwing', () => {
+    expect(resolveOnPath('cccollab', '/tools', fs(['/tools/cccollab']), { extensions: ['.EXE'] })).toEqual([])
+  })
+})
