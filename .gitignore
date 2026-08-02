@@ -37,3 +37,11 @@ cctree/__pycache__/
 # website/. Machine-specific and account-specific - never commit it, and keep it
 # out of prettier's way.
 .wrangler/
+
+# Repo-root docs staged into the npm package by mcp_server's `prepack`. npm only
+# renders a README it finds inside the package directory, so these are copies of
+# the canonical files at the repo root - regenerated on every pack, never edited
+# here, and never committed (two copies of a README drift, and only one is read).
+mcp_server/README.md
+mcp_server/LICENSE
+mcp_server/NOTICE
