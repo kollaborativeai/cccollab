@@ -1,7 +1,7 @@
 {
   "name": "cccollab",
   "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics",
-  "version": "3.6.3",
+  "version": "3.6.4",
   "author": {
     "name": "Kollaborative AI",
     "email": "stefan@cccollab.dev"
