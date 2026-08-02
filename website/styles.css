@@ -307,7 +307,10 @@ label[for],
   border-bottom: 1px solid var(--line);
   padding: 8px 13px;
   font-size: 9.5px;
-  letter-spacing: 0.18em;
+  /* 0.12em, not the 0.28em used elsewhere: these bars now carry the joined
+     topics, and the longest runs ~55 characters. Wider tracking overflows
+     the half-width panel. */
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--fg-faint);
 }
