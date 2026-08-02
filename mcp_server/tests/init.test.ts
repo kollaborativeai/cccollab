@@ -108,17 +108,54 @@ describe('runInit', () => {
     expect(ran(h.calls, 'plugin install cccollab@kollaborativeai')).toBe(true)
   })
 
-  it('is idempotent: skips both steps when already configured', async () => {
-    const h = harness({
-      results: {
-        'plugin list': { code: 0, stdout: 'cccollab@kollaborativeai' },
-        'plugin marketplace list': { code: 0, stdout: '  ❯ kollaborativeai' },
-      },
-    })
+  const alreadyConfigured = {
+    'plugin list': { code: 0, stdout: 'cccollab@kollaborativeai' },
+    'plugin marketplace list': { code: 0, stdout: '  ❯ kollaborativeai' },
+  }
+
+  it('does not re-add or re-install what is already configured', async () => {
+    const h = harness({ results: alreadyConfigured })
     expect(await runInit({ yes: true, noAlias: true }, h.deps)).toBe(0)
     expect(ran(h.calls, 'marketplace add')).toBe(false)
     expect(ran(h.calls, 'plugin install')).toBe(false)
     expect(h.logs.join('\n')).toContain('already registered')
+  })
+
+  it('refreshes the marketplace before updating, so a new version is visible', async () => {
+    // `plugin update` resolves against the local marketplace clone. Without
+    // this refresh it compares to a stale catalogue and reports "up to date"
+    // while a newer version exists upstream.
+    const h = harness({ results: alreadyConfigured })
+    await runInit({ yes: true, noAlias: true }, h.deps)
+    expect(ran(h.calls, 'marketplace update kollaborativeai')).toBe(true)
+  })
+
+  it('updates an already-installed plugin instead of leaving it stale', async () => {
+    // The original bug behind KAI-571: init reported "already installed" and
+    // returned, so a machine sitting on an old plugin never moved off it no
+    // matter how many times init was re-run.
+    const h = harness({ results: alreadyConfigured })
+    await runInit({ yes: true, noAlias: true }, h.deps)
+    expect(ran(h.calls, 'plugin update cccollab@kollaborativeai')).toBe(true)
+  })
+
+  it('does not fail the whole init when the update call fails', async () => {
+    // Being unable to reach the marketplace is not a reason to leave a working
+    // install half-configured; the alias and the launch instructions still matter.
+    const h = harness({
+      results: {
+        ...alreadyConfigured,
+        'plugin update cccollab@kollaborativeai': { code: 1, stdout: 'network unreachable' },
+      },
+    })
+    expect(await runInit({ yes: true, noAlias: true }, h.deps)).toBe(0)
+    expect(h.logs.join('\n')).toContain('cccollab doctor')
+  })
+
+  it('points at doctor so stale cached copies can be found', async () => {
+    const h = harness()
+    await runInit({ yes: true, noAlias: true }, h.deps)
+    expect(h.logs.join('\n')).toContain('cccollab doctor')
   })
 
   it('uninstalls the retired plugin but never unregisters its marketplace', async () => {

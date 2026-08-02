@@ -24,7 +24,7 @@ if (['--version', '-v'].includes(process.argv[2])) {
   process.exit(0)
 }
 
-const SUBCOMMANDS = { init: 'init-cli' }
+const SUBCOMMANDS = { init: 'init-cli', doctor: 'doctor-cli' }
 const subcommand = SUBCOMMANDS[process.argv[2]]
 const entryName = subcommand ?? 'server'
 

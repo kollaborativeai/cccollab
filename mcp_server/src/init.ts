@@ -93,6 +93,10 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<num
   const marketplaces = deps.run('claude', ['plugin', 'marketplace', 'list'])
   if (hasMarketplace(marketplaces.stdout, MARKETPLACE)) {
     deps.log(`Marketplace "${MARKETPLACE}" already registered.`)
+    // Refresh the local clone before step 3 looks for updates. `plugin update`
+    // resolves against this clone, so without a refresh it compares against a
+    // stale catalogue and reports "up to date" while a newer version exists.
+    deps.run('claude', ['plugin', 'marketplace', 'update', MARKETPLACE])
   } else {
     deps.log(`Registering the "${MARKETPLACE}" marketplace...`)
     const added = deps.run('claude', ['plugin', 'marketplace', 'add', MARKETPLACE_SOURCE])
@@ -102,9 +106,19 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<num
     }
   }
 
-  // 3. Install the plugin.
+  // 3. Install the plugin, or bring an existing install up to date.
+  //    "Already installed" is not the same as "current": Claude Code keeps
+  //    every previously installed version cached and loads the one recorded as
+  //    installed, so an init that stops at "present" leaves a session reading a
+  //    skill several versions behind this binary, silently (KAI-571).
   if (installed.stdout.includes(PLUGIN)) {
-    deps.log(`Plugin ${PLUGIN} already installed.`)
+    deps.log(`Plugin ${PLUGIN} already installed; checking for updates...`)
+    const updated = deps.run('claude', ['plugin', 'update', PLUGIN])
+    if (updated.code !== 0) {
+      // Not fatal. A reachable-but-stale plugin still works; the rest of init
+      // (alias, launch instructions) is still worth completing.
+      deps.log(`warning: could not update ${PLUGIN}. Run \`cccollab doctor\` to check for version drift.`)
+    }
   } else {
     deps.log(`Installing ${PLUGIN}...`)
     const result = deps.run('claude', ['plugin', 'install', PLUGIN])
@@ -120,6 +134,12 @@ export async function runInit(options: InitOptions, deps: InitDeps): Promise<num
   if (!options.noAlias) {
     await handleAlias(options, deps)
   }
+
+  deps.log(
+    '\nTo check which plugin versions are on this machine, and remove the ones\n' +
+      'nothing is using:\n' +
+      '\n    cccollab doctor\n',
+  )
 
   deps.log(
     '\nDone. Start Claude Code with:\n' +
