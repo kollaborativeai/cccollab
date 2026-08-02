@@ -1,6 +1,6 @@
 {
   "name": "@kollaborativeai/cccollab",
-  "version": "3.6.2",
+  "version": "3.6.3",
   "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics.",
   "keywords": [
     "claude",
