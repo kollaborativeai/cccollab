@@ -1,6 +1,20 @@
 {
   "name": "@kollaborativeai/cccollab",
   "version": "3.6.2",
+  "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "collaboration",
+    "agents"
+  ],
+  "homepage": "https://cccollab.dev",
+  "bugs": {
+    "url": "https://github.com/kollaborativeai/cccollab/issues"
+  },
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/server.js",
@@ -8,7 +22,10 @@
   "bin": "bin/cccollab.mjs",
   "files": [
     "bin",
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "repository": {
     "type": "git",
@@ -28,7 +45,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "yarn build"
+    "prepublishOnly": "yarn build",
+    "prepack": "node scripts/stage-docs.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
