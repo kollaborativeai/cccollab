@@ -62,10 +62,19 @@ cccollab doctor
 ```
 
 It reports the binary version, the skill version the current session loaded,
-and every cached plugin copy on the machine — Claude Code keeps one directory
-per version it has ever installed and removes none of them, so these
-accumulate, and each carries its own `SKILL.md`. Copies that nothing is using
-can be removed:
+every `cccollab` on your `PATH`, and every cached plugin copy on the machine —
+Claude Code keeps one directory per version it has ever installed and removes
+none of them, so these accumulate, and each carries its own `SKILL.md`.
+
+It also names two things that are otherwise invisible. **A second `cccollab`
+earlier on `PATH`** silently wins for every session Claude Code starts —
+installing with both Homebrew and a Node version manager is the ordinary way to
+end up with two. And **a running server whose binary has since been
+uninstalled**, which keeps serving from the deleted file because the process
+holds it open; the version answering those sessions' tool calls is whatever it
+was at launch, and restarting them is the only fix.
+
+Copies that nothing is using can be removed:
 
 ```bash
 cccollab doctor --prune

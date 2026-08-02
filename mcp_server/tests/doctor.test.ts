@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
+  inspectBinaries,
   parseDoctorArgs,
   referencedInstallPaths,
+  resolveOnPath,
   scanCaches,
   prunable,
   runDoctor,
@@ -58,8 +60,10 @@ function harness(
       const match = /cccollab\/([^/]+)\/\.claude-plugin\/plugin\.json$/.exec(path)
       return match ? `{"version": "${match[1]}"}` : undefined
     },
+    fileExists: () => true,
     removeDir: (path) => removed.push(path),
-    runningPluginRoots: () => [],
+    processDump: () => '',
+    listBinariesOnPath: () => [{ path: '/opt/homebrew/bin/cccollab', version: '3.5.0' }],
     confirm: async () => true,
     log: (m) => logs.push(m),
     homeDir: HOME,
@@ -127,7 +131,7 @@ describe('scanCaches', () => {
     const stale = `${CACHE}/kollaborativeai/cccollab/3.4.0`
     const { deps } = harness({
       layout: { kollaborativeai: ['3.5.0', '3.4.0'] },
-      runningPluginRoots: () => [stale],
+      processDump: () => `node /opt/homebrew/bin/cccollab CLAUDE_PLUGIN_ROOT=${stale}`,
     })
     expect(scanCaches(deps).find((e) => e.version === '3.4.0')?.inUse).toBe(true)
   })
@@ -192,7 +196,7 @@ describe('runDoctor', () => {
     const held = `${CACHE}/kollaborativeai/cccollab/3.4.0`
     const { deps, removed, logs } = harness({
       layout: { kollaborativeai: ['3.5.0', '3.4.0'] },
-      runningPluginRoots: () => [held],
+      processDump: () => `node /opt/homebrew/bin/cccollab CLAUDE_PLUGIN_ROOT=${held}`,
     })
     await runDoctor({ prune: true, yes: true }, deps)
     expect(removed).toEqual([])
@@ -239,5 +243,127 @@ describe('runDoctor', () => {
     })
     await runDoctor({ prune: true, yes: true }, deps)
     expect(removed).toEqual([])
+  })
+})
+
+describe('inspectBinaries', () => {
+  it('flags more than one cccollab reachable on PATH', () => {
+    // A Homebrew install plus an npm global under a Node version manager is
+    // the ordinary way to end up with two. Claude Code runs the first, and
+    // nothing tells the session which one it got.
+    const { deps } = harness({
+      listBinariesOnPath: () => [
+        { path: '/opt/homebrew/bin/cccollab', version: '3.5.0' },
+        { path: '/Users/dev/.volta/bin/cccollab', version: '3.2.3' },
+      ],
+    })
+    const findings = inspectBinaries(deps)
+    expect(findings.shadowed).toBe(true)
+    expect(findings.onPath[0]!.path).toBe('/opt/homebrew/bin/cccollab')
+  })
+
+  it('does not flag a single install', () => {
+    expect(inspectBinaries(harness().deps).shadowed).toBe(false)
+  })
+
+  it('spots a session still serving from an uninstalled binary', () => {
+    const ghost = '/Users/dev/.volta/tools/image/packages/@kollaborativeai/cccollab/bin/cccollab'
+    const { deps } = harness({
+      processDump: () => `node ${ghost}\nnode /opt/homebrew/bin/cccollab`,
+      fileExists: (path: string) => path !== ghost,
+    })
+    expect(inspectBinaries(deps).vanished).toEqual([ghost])
+  })
+
+  it('reports nothing vanished when every running binary is still on disk', () => {
+    const { deps } = harness({ processDump: () => 'node /opt/homebrew/bin/cccollab' })
+    expect(inspectBinaries(deps).vanished).toEqual([])
+  })
+})
+
+describe('runDoctor binary findings', () => {
+  it('names the winning binary and exits non-zero when PATH is shadowed', async () => {
+    const { deps, logs } = harness({
+      listBinariesOnPath: () => [
+        { path: '/opt/homebrew/bin/cccollab', version: '3.5.0' },
+        { path: '/Users/dev/.volta/bin/cccollab', version: '3.2.3' },
+      ],
+    })
+    expect(await runDoctor({ prune: false, yes: false }, deps)).toBe(1)
+    const out = logs.join('\n')
+    expect(out).toContain('More than one cccollab is on PATH')
+    expect(out).toContain('wins')
+    expect(out).toContain('3.2.3')
+  })
+
+  it('reports a binary that no longer exists and exits non-zero', async () => {
+    const ghost = '/Users/dev/.volta/bin/cccollab'
+    const { deps, logs } = harness({
+      processDump: () => `node ${ghost}`,
+      fileExists: (path: string) => path !== ghost,
+    })
+    expect(await runDoctor({ prune: false, yes: false }, deps)).toBe(1)
+    expect(logs.join('\n')).toContain('no longer')
+  })
+
+  it('reports a binary whose version could not be determined', async () => {
+    const { deps, logs } = harness({ listBinariesOnPath: () => [{ path: '/usr/local/bin/cccollab' }] })
+    await runDoctor({ prune: false, yes: false }, deps)
+    expect(logs.join('\n')).toContain('version unknown')
+  })
+})
+
+describe('resolveOnPath', () => {
+  const fs = (executables: string[], links: Record<string, string> = {}) => ({
+    isExecutable: (path: string) => executables.includes(path),
+    realPath: (path: string) => links[path] ?? path,
+  })
+
+  it('returns matches in PATH order', () => {
+    const found = resolveOnPath(
+      'cccollab',
+      '/opt/homebrew/bin:/usr/local/bin',
+      fs(['/opt/homebrew/bin/cccollab', '/usr/local/bin/cccollab']),
+    )
+    expect(found).toEqual(['/opt/homebrew/bin/cccollab', '/usr/local/bin/cccollab'])
+  })
+
+  it('returns nothing when the command is not on PATH', () => {
+    expect(resolveOnPath('cccollab', '/usr/bin:/bin', fs([]))).toEqual([])
+  })
+
+  it('survives an unset or empty PATH', () => {
+    expect(resolveOnPath('cccollab', undefined, fs([]))).toEqual([])
+    expect(resolveOnPath('cccollab', '', fs([]))).toEqual([])
+  })
+
+  it('skips empty PATH segments rather than probing /cccollab', () => {
+    expect(resolveOnPath('cccollab', '/usr/bin::/bin', fs(['/cccollab']))).toEqual([])
+  })
+
+  it('tolerates trailing slashes on PATH entries', () => {
+    expect(resolveOnPath('cccollab', '/opt/bin/', fs(['/opt/bin/cccollab']))).toEqual(['/opt/bin/cccollab'])
+  })
+
+  it('counts two PATH entries symlinked to one file as a single install', () => {
+    // Otherwise every Homebrew install reads as "shadowed" against its own Cellar path.
+    const found = resolveOnPath(
+      'cccollab',
+      '/opt/homebrew/bin:/opt/homebrew/opt/cccollab/bin',
+      fs(['/opt/homebrew/bin/cccollab', '/opt/homebrew/opt/cccollab/bin/cccollab'], {
+        '/opt/homebrew/bin/cccollab': '/opt/homebrew/Cellar/cccollab/3.5.0/bin/cccollab',
+        '/opt/homebrew/opt/cccollab/bin/cccollab': '/opt/homebrew/Cellar/cccollab/3.5.0/bin/cccollab',
+      }),
+    )
+    expect(found).toEqual(['/opt/homebrew/bin/cccollab'])
+  })
+
+  it('keeps genuinely distinct installs apart', () => {
+    const found = resolveOnPath(
+      'cccollab',
+      '/opt/homebrew/bin:/Users/dev/.volta/bin',
+      fs(['/opt/homebrew/bin/cccollab', '/Users/dev/.volta/bin/cccollab']),
+    )
+    expect(found).toHaveLength(2)
   })
 })

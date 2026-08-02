@@ -4,11 +4,10 @@
  * rules can be tested without deleting anything.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline/promises'
-import { parseDoctorArgs, runDoctor, type DoctorDeps } from './doctor.js'
-import { extractPluginRoots } from './plugin-version.js'
+import { parseDoctorArgs, resolveOnPath, runDoctor, type BinaryInstall, type DoctorDeps } from './doctor.js'
 import { ownVersion } from './own-version.js'
 
 /**
@@ -21,30 +20,64 @@ import { ownVersion } from './own-version.js'
  * so any error path returns [] and the caller treats an empty result as a
  * reason to keep the safer default rather than as proof of absence.
  */
-function runningPluginRoots(): string[] {
-  const dumps: string[] = []
+function processDump(): string {
+  const result = spawnSync('ps', ['eww', '-A'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  if (result.stdout) return result.stdout
 
+  // BSD-style `ps eww` is unavailable or refused. On Linux the same two facts
+  // are in /proc: cmdline for the launcher path, environ for the plugin root.
   if (process.platform === 'linux') {
+    const parts: string[] = []
     try {
       for (const pid of readdirSync('/proc')) {
         if (!/^\d+$/.test(pid)) continue
-        try {
-          dumps.push(readFileSync(`/proc/${pid}/environ`, 'utf8'))
-        } catch {
-          // Process exited, or belongs to another user. Both are expected.
+        for (const file of ['cmdline', 'environ']) {
+          try {
+            parts.push(readFileSync(`/proc/${pid}/${file}`, 'utf8'))
+          } catch {
+            // Process exited, or belongs to another user. Both are expected.
+          }
         }
       }
     } catch {
-      // No /proc. Fall through to ps.
+      // No /proc either. Report nothing rather than guessing.
     }
+    return parts.join('\n')
   }
 
-  if (dumps.length === 0) {
-    const result = spawnSync('ps', ['eww', '-A'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-    if (result.stdout) dumps.push(result.stdout)
-  }
+  return ''
+}
 
-  return extractPluginRoots(dumps.join('\n')).filter((root) => root.includes('/cccollab/'))
+/**
+ * Every `cccollab` reachable on PATH, each asked its own version. Runs the
+ * candidate rather than reading a package.json beside it: the launcher resolves
+ * through symlinks and version-manager shims, and what matters is what that
+ * command reports when Claude Code runs it.
+ */
+function listBinariesOnPath(): BinaryInstall[] {
+  const paths = resolveOnPath('cccollab', process.env.PATH, {
+    isExecutable(path) {
+      try {
+        accessSync(path, constants.X_OK)
+        return statSync(path).isFile()
+      } catch {
+        return false
+      }
+    },
+    realPath(path) {
+      try {
+        return realpathSync(path)
+      } catch {
+        return path
+      }
+    },
+  })
+
+  return paths.map((path) => {
+    const asked = spawnSync(path, ['--version'], { encoding: 'utf8', timeout: 10_000 })
+    const version = (asked.stdout ?? '').trim()
+    return { path, ...(asked.status === 0 && version ? { version } : {}) }
+  })
 }
 
 const deps: DoctorDeps = {
@@ -69,10 +102,14 @@ const deps: DoctorDeps = {
       return false
     }
   },
+  fileExists(path) {
+    return existsSync(path)
+  },
   removeDir(path) {
     rmSync(path, { recursive: true, force: true })
   },
-  runningPluginRoots,
+  processDump,
+  listBinariesOnPath,
   async confirm(question) {
     // No TTY means nobody can answer. Decline rather than block, and never
     // treat silence as consent to delete; --yes is the way to opt in.

@@ -125,3 +125,25 @@ export function extractPluginRoots(dump: string): string[] {
   }
   return [...roots]
 }
+
+/**
+ * Every distinct cccollab launcher path running on this machine, taken from a
+ * `ps` dump of command lines.
+ *
+ * Two servers at different versions can serve different sessions on the same
+ * machine at the same time — a Homebrew install and an npm global under a Node
+ * version manager, say — and nothing tells either session which one it got.
+ * Worse, a process outlives the file it was exec'd from, so a binary uninstalled
+ * hours ago can still be answering tool calls.
+ *
+ * Anchored on a trailing boundary rather than \b so sibling paths that merely
+ * start with the launcher name (CLAUDE_PLUGIN_DATA's `cccollab-<marketplace>`)
+ * do not match.
+ */
+export function extractServerBinaries(dump: string): string[] {
+  const binaries = new Set<string>()
+  for (const match of dump.replace(/\0/g, '\n').matchAll(/(\/\S*\/cccollab(?:\.mjs)?)(?=\s|$)/gm)) {
+    binaries.add(match[1]!)
+  }
+  return [...binaries]
+}

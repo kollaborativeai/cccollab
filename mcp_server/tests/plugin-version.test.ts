@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   extractPluginRoots,
+  extractServerBinaries,
   inspectVersions,
   driftWarning,
   readPluginManifestVersion,
@@ -138,5 +139,45 @@ describe('extractPluginRoots', () => {
 
   it('does not match a variable that merely ends in CLAUDE_PLUGIN_ROOT', () => {
     expect(extractPluginRoots('MY_CLAUDE_PLUGIN_ROOT=/nope')).toEqual([])
+  })
+})
+
+describe('extractServerBinaries', () => {
+  it('pulls distinct launcher paths out of a ps dump', () => {
+    const dump = [
+      '28319 ?? Ss 0:01.20 /opt/homebrew/opt/node/bin/node /opt/homebrew/bin/cccollab',
+      '55021 ?? Ss 0:00.90 node /Users/dev/.volta/tools/image/packages/@kollaborativeai/cccollab/bin/cccollab',
+    ].join('\n')
+    expect(extractServerBinaries(dump).sort()).toEqual([
+      '/Users/dev/.volta/tools/image/packages/@kollaborativeai/cccollab/bin/cccollab',
+      '/opt/homebrew/bin/cccollab',
+    ])
+  })
+
+  it('matches the .mjs launcher run directly', () => {
+    expect(extractServerBinaries('node /repo/mcp_server/bin/cccollab.mjs doctor')).toEqual([
+      '/repo/mcp_server/bin/cccollab.mjs',
+    ])
+  })
+
+  it('does not mistake the plugin data directory for a launcher', () => {
+    // CLAUDE_PLUGIN_DATA ends in `cccollab-<marketplace>`; a \b anchor would
+    // match it and report a binary that does not exist.
+    const dump =
+      'node /opt/homebrew/bin/cccollab CLAUDE_PLUGIN_DATA=/Users/dev/.claude/plugins/data/cccollab-kollaborativeai'
+    expect(extractServerBinaries(dump)).toEqual(['/opt/homebrew/bin/cccollab'])
+  })
+
+  it('does not mistake a plugin cache root for a launcher', () => {
+    expect(extractServerBinaries('CLAUDE_PLUGIN_ROOT=/cache/mkt/cccollab/3.4.0')).toEqual([])
+  })
+
+  it('deduplicates the same launcher across many sessions', () => {
+    const dump = ['node /opt/homebrew/bin/cccollab', 'node /opt/homebrew/bin/cccollab'].join('\n')
+    expect(extractServerBinaries(dump)).toEqual(['/opt/homebrew/bin/cccollab'])
+  })
+
+  it('returns nothing when no cccollab is running', () => {
+    expect(extractServerBinaries('1234 ?? Ss 0:00.01 /usr/sbin/syslogd')).toEqual([])
   })
 })

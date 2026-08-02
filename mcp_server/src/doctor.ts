@@ -19,9 +19,32 @@
  * about what is loaded.
  */
 
-import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
+import {
+  inspectVersions,
+  driftWarning,
+  extractPluginRoots,
+  extractServerBinaries,
+  type VersionState,
+} from './plugin-version.js'
 
 const PLUGIN = 'cccollab'
+
+export interface BinaryInstall {
+  path: string
+  /** Undefined when the binary could not be run to ask. */
+  version?: string
+}
+
+export interface BinaryFindings {
+  /** Every `cccollab` resolvable on PATH, in PATH order. The first wins. */
+  onPath: BinaryInstall[]
+  /** Launcher paths of cccollab servers currently running. */
+  running: string[]
+  /** Running from a file that no longer exists on disk. */
+  vanished: string[]
+  /** More than one distinct `cccollab` is reachable on PATH. */
+  shadowed: boolean
+}
 
 export interface DoctorOptions {
   /** Remove unused cached copies. Never implied — reporting is the default. */
@@ -35,9 +58,14 @@ export interface DoctorDeps {
   /** Entries of a directory; empty when it does not exist. Never throws. */
   listDir(path: string): string[]
   isDirectory(path: string): boolean
+  fileExists(path: string): boolean
   removeDir(path: string): void
-  /** CLAUDE_PLUGIN_ROOT of every live cccollab server on this machine. */
-  runningPluginRoots(): string[]
+  /** A `ps` dump carrying both command lines and environments, read once and
+   *  parsed here so the two questions it answers — which plugin roots are
+   *  loaded, and which binaries are running — cannot disagree with each other. */
+  processDump(): string
+  /** Every `cccollab` resolvable on PATH, in PATH order, with its version. */
+  listBinariesOnPath(): BinaryInstall[]
   confirm(question: string): Promise<boolean>
   log(message: string): void
   homeDir: string
@@ -93,12 +121,61 @@ export function referencedInstallPaths(raw: string | undefined): string[] {
   return [...found]
 }
 
+/**
+ * Every `name` reachable on PATH, in PATH order, deduplicated by real path.
+ *
+ * Walks PATH directly rather than shelling out. `command -v -a` is not POSIX —
+ * bash's builtin rejects `-a` — so the shell form failed silently and reported
+ * an empty PATH on a machine that plainly had one on it. Deduplicating by real
+ * path keeps two PATH entries symlinked to the same file from reading as two
+ * competing installs.
+ */
+export function resolveOnPath(
+  name: string,
+  pathVar: string | undefined,
+  deps: { isExecutable(path: string): boolean; realPath(path: string): string },
+): string[] {
+  const seen = new Set<string>()
+  const found: string[] = []
+  for (const dir of (pathVar ?? '').split(':')) {
+    if (!dir) continue
+    const candidate = `${dir.replace(/\/+$/, '')}/${name}`
+    if (!deps.isExecutable(candidate)) continue
+    const real = deps.realPath(candidate)
+    if (seen.has(real)) continue
+    seen.add(real)
+    found.push(candidate)
+  }
+  return found
+}
+
+/**
+ * What is serving cccollab on this machine, as opposed to what is installed.
+ *
+ * Two failure modes live here and neither shows up anywhere else. A second
+ * `cccollab` earlier on PATH silently wins for every session Claude Code
+ * starts — a Homebrew install and an npm global under a Node version manager
+ * is the ordinary way to end up with both. And a running server keeps serving
+ * from a binary that has since been uninstalled, because the process holds the
+ * inode: the version that answers tool calls is then one no file on disk has.
+ */
+export function inspectBinaries(deps: DoctorDeps): BinaryFindings {
+  const onPath = deps.listBinariesOnPath()
+  const running = extractServerBinaries(deps.processDump())
+  return {
+    onPath,
+    running,
+    vanished: running.filter((path) => !deps.fileExists(path)),
+    shadowed: onPath.length > 1,
+  }
+}
+
 export function scanCaches(deps: DoctorDeps): CacheEntry[] {
   const root = cacheRoot(deps.homeDir)
   const referenced = new Set(
     referencedInstallPaths(deps.readFile(`${deps.homeDir}/.claude/plugins/installed_plugins.json`)),
   )
-  const inUse = new Set(deps.runningPluginRoots())
+  const inUse = new Set(extractPluginRoots(deps.processDump()))
 
   const entries: CacheEntry[] = []
   for (const marketplace of deps.listDir(root)) {
@@ -140,12 +217,35 @@ const escapeForRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promise<number> {
   const state = inspectVersions({ serverVersion: deps.serverVersion, env: deps.env, readFile: deps.readFile })
+  const binaries = inspectBinaries(deps)
   const entries = scanCaches(deps)
 
-  deps.log(report(state, entries, deps))
+  deps.log(report(state, binaries, entries, deps))
 
   const warning = driftWarning(state)
   if (warning) deps.log(`\n${warning}`)
+
+  if (binaries.shadowed) {
+    const [first, ...rest] = binaries.onPath
+    deps.log(
+      `\nMore than one cccollab is on PATH. Claude Code runs the first, so that is the\n` +
+        `one serving your sessions:\n` +
+        `  ${describeBinary(first!)}  <- wins\n` +
+        rest.map((b) => `  ${describeBinary(b)}`).join('\n') +
+        `\nRemove the ones you do not want, or reorder PATH. Installing with a Node\n` +
+        `version manager and with Homebrew is the usual way to end up with both.`,
+    )
+  }
+
+  if (binaries.vanished.length > 0) {
+    deps.log(
+      `\n${binaries.vanished.length} ${plural(binaries.vanished.length, 'binary', 'binaries')} still serving live sessions no longer ${plural(binaries.vanished.length, 'exists', 'exist')} on\n` +
+        `disk — uninstalled or replaced while the processes kept running, so the version\n` +
+        `answering their tool calls is whatever it was at launch and cannot be checked:\n` +
+        binaries.vanished.map((path) => `  ${path}`).join('\n') +
+        `\nRestart those sessions to pick up the installed version.`,
+    )
+  }
 
   const stale = prunable(entries)
   const held = entries.filter((e) => e.inUse && !e.referenced)
@@ -157,7 +257,7 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
     )
   }
 
-  let problems = warning ? 1 : 0
+  let problems = warning || binaries.shadowed || binaries.vanished.length > 0 ? 1 : 0
 
   if (stale.length === 0) {
     if (entries.length > 0 && held.length === 0) deps.log('\nNo stale copies. Nothing to clean up.')
@@ -200,7 +300,10 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
   return problems > 0 ? 1 : 0
 }
 
-function report(state: VersionState, entries: CacheEntry[], deps: DoctorDeps): string {
+const describeBinary = (install: BinaryInstall) =>
+  `${install.path}${install.version ? `  (${install.version})` : '  (version unknown)'}`
+
+function report(state: VersionState, binaries: BinaryFindings, entries: CacheEntry[], deps: DoctorDeps): string {
   const lines = [
     'cccollab doctor',
     '',
@@ -209,8 +312,12 @@ function report(state: VersionState, entries: CacheEntry[], deps: DoctorDeps): s
       ? '  skill    not spawned by a plugin (no CLAUDE_PLUGIN_ROOT)'
       : `  skill    ${state.pluginVersion ?? 'unreadable'}  (${state.pluginRoot})`,
     '',
-    entries.length === 0 ? '  no cached plugin copies found' : '  cached plugin copies:',
+    binaries.onPath.length === 0 ? '  no cccollab found on PATH' : '  on PATH:',
   ]
+  for (const [index, install] of binaries.onPath.entries()) {
+    lines.push(`    ${describeBinary(install)}${index === 0 && binaries.onPath.length > 1 ? '  [wins]' : ''}`)
+  }
+  lines.push('', entries.length === 0 ? '  no cached plugin copies found' : '  cached plugin copies:')
   for (const entry of entries) {
     const tags = [entry.referenced ? 'installed' : undefined, entry.inUse ? 'in use' : undefined].filter(Boolean)
     lines.push(`    ${entry.marketplace}/${entry.version}${tags.length ? `  [${tags.join(', ')}]` : ''}`)
