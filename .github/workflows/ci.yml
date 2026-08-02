@@ -157,11 +157,39 @@ jobs:
         with:
           filters: |
             mcp_server:
-              - 'mcp_server/**'
+              - 'mcp_server/src/**'
+              - 'mcp_server/bin/**'
+              - 'mcp_server/scripts/**'
+              - 'mcp_server/package.json'
+              - 'mcp_server/tsconfig*.json'
               - 'plugin/**'
               - 'yarn.lock'
             website:
               - 'website/**'
+
+  # The `mcp_server` filter is an allowlist of the paths that can change the
+  # published tarball, not `mcp_server/**`. It was the broad glob, which also
+  # matched `mcp_server/tests/**`: a test-only change fired the release job and
+  # published a version byte-identical to the one before it. v3.6.4 shipped that
+  # way off KAI-561, whose only `mcp_server/` edits were two test files.
+  #
+  # Excluding with `!mcp_server/tests/**` does not work, and is worse than
+  # leaving it alone. dorny/paths-filter ORs a filter's patterns under the
+  # default `predicate-quantifier: some`, so a negative pattern cannot subtract
+  # from a positive one - the test file still matches `mcp_server/**` and still
+  # fires, while `website/index.html` now matches the negation, so website-only
+  # changes would start cutting npm releases. `predicate-quantifier: every`
+  # would give negation real force but is unusable here: no single path can
+  # match `mcp_server/**` and `plugin/**` at once, so the filter would never
+  # fire at all. An allowlist is the only shape that behaves under `some`.
+  #
+  # The tradeoff is that this fails closed. A new directory under `mcp_server/`
+  # that ends up in the tarball will NOT trigger a release until it is added
+  # here. `files` in mcp_server/package.json is the list to check against —
+  # today `bin` and `dist` (built from `src`), plus the repo-root README,
+  # LICENSE and NOTICE that `scripts/stage-docs.mjs` copies in at prepack.
+  # Deliberately absent, because none of them reach the package: `tests/`,
+  # `vitest.config.ts`, `eslint.config.js`.
 
   # DO NOT add `yarn.lock` (or any root-level dependency file) to the `website`
   # filter, and do not give `website/` a package.json that feeds the root
