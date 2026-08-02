@@ -28,7 +28,9 @@ import {
   type VersionState,
 } from './plugin-version.js'
 
-const PLUGIN = 'cccollab'
+const PLUGIN_NAME = 'cccollab'
+const MARKETPLACE = 'kollaborativeai'
+const PLUGIN = `${PLUGIN_NAME}@${MARKETPLACE}`
 
 export interface BinaryInstall {
   path: string
@@ -189,7 +191,7 @@ export function scanCaches(deps: DoctorDeps): CacheEntry[] {
 
   const entries: CacheEntry[] = []
   for (const marketplace of deps.listDir(root)) {
-    const pluginDir = `${root}/${marketplace}/${PLUGIN}`
+    const pluginDir = `${root}/${marketplace}/${PLUGIN_NAME}`
     if (!deps.isDirectory(pluginDir)) continue
     for (const version of deps.listDir(pluginDir)) {
       const path = `${pluginDir}/${version}`
@@ -206,6 +208,36 @@ export function scanCaches(deps: DoctorDeps): CacheEntry[] {
   return entries
 }
 
+export interface InstalledPluginState {
+  /** Version Claude Code records as installed, if any. */
+  version?: string
+  path?: string
+  status: 'aligned' | 'drifted' | 'missing'
+}
+
+/**
+ * The installed plugin versus this binary — the drift a user can actually see.
+ *
+ * The CLAUDE_PLUGIN_ROOT handshake only works inside a server Claude Code
+ * spawned, so it is blind in a terminal, which is exactly where `cccollab
+ * doctor` is run and exactly what the drift warning tells people to run. On a
+ * machine with a 3.6.1 binary and a 3.5.0 plugin, this command printed both
+ * numbers two lines apart and reported no problem.
+ *
+ * Compared by string equality on purpose: release CI writes one version into
+ * both manifests in a single commit, so "different" is the whole signal and
+ * ordering does not matter.
+ */
+export function inspectInstalledPlugin(entries: CacheEntry[], serverVersion: string): InstalledPluginState {
+  const installed = entries.find((entry) => entry.referenced)
+  if (!installed) return { status: 'missing' }
+  return {
+    version: installed.version,
+    path: installed.path,
+    status: installed.version === serverVersion ? 'aligned' : 'drifted',
+  }
+}
+
 /** Copies safe to delete: neither installed nor loaded by a live session. */
 export function prunable(entries: CacheEntry[]): CacheEntry[] {
   return entries.filter((e) => !e.referenced && !e.inUse)
@@ -220,7 +252,7 @@ export function prunable(entries: CacheEntry[]): CacheEntry[] {
 function isSafeCachePath(path: string, root: string): boolean {
   if (path.includes('..')) return false
   if (!path.startsWith(`${root}/`)) return false
-  return new RegExp(`^${escapeForRegExp(root)}/[^/]+/${PLUGIN}/[^/]+$`).test(path)
+  return new RegExp(`^${escapeForRegExp(root)}/[^/]+/${PLUGIN_NAME}/[^/]+$`).test(path)
 }
 
 const escapeForRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -229,11 +261,31 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
   const state = inspectVersions({ serverVersion: deps.serverVersion, env: deps.env, readFile: deps.readFile })
   const binaries = inspectBinaries(deps)
   const entries = scanCaches(deps)
+  const installed = inspectInstalledPlugin(entries, deps.serverVersion)
 
-  deps.log(report(state, binaries, entries, deps))
+  deps.log(report(state, binaries, entries, installed, deps))
 
   const warning = driftWarning(state)
   if (warning) deps.log(`\n${warning}`)
+
+  if (installed.status === 'drifted') {
+    deps.log(
+      `\nThe installed cccollab plugin is ${installed.version}, but this binary is ${deps.serverVersion}.\n` +
+        `Every session started from now on loads a skill that does not describe this\n` +
+        `server. Fix it with:\n` +
+        `\n    claude plugin marketplace update ${MARKETPLACE}` +
+        `\n    claude plugin update ${PLUGIN}\n` +
+        `\nThen restart Claude Code — a running session keeps the skill it loaded.`,
+    )
+  }
+
+  if (installed.status === 'missing') {
+    deps.log(
+      `\nNo cccollab plugin is installed, so Claude Code has none of these tools —\n` +
+        `the binary alone does nothing. Run:\n` +
+        `\n    cccollab init\n`,
+    )
+  }
 
   if (binaries.shadowed) {
     const [first, ...rest] = binaries.onPath
@@ -267,7 +319,7 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
     )
   }
 
-  let problems = warning || binaries.shadowed || binaries.vanished.length > 0 ? 1 : 0
+  let problems = warning || binaries.shadowed || binaries.vanished.length > 0 || installed.status !== 'aligned' ? 1 : 0
 
   if (stale.length === 0) {
     if (entries.length > 0 && held.length === 0) deps.log('\nNo stale copies. Nothing to clean up.')
@@ -313,13 +365,22 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
 const describeBinary = (install: BinaryInstall) =>
   `${install.path}${install.version ? `  (${install.version})` : '  (version unknown)'}`
 
-function report(state: VersionState, binaries: BinaryFindings, entries: CacheEntry[], deps: DoctorDeps): string {
+function report(
+  state: VersionState,
+  binaries: BinaryFindings,
+  entries: CacheEntry[],
+  installed: InstalledPluginState,
+  deps: DoctorDeps,
+): string {
   const lines = [
     'cccollab doctor',
     '',
     `  binary   ${deps.serverVersion}  (${deps.binaryPath})`,
+    installed.status === 'missing'
+      ? '  plugin   not installed — run `cccollab init`'
+      : `  plugin   ${installed.version}  (installed)`,
     state.status === 'standalone'
-      ? '  skill    not spawned by a plugin (no CLAUDE_PLUGIN_ROOT)'
+      ? '  skill    not loaded here (no CLAUDE_PLUGIN_ROOT — this is a terminal, not a session)'
       : `  skill    ${state.pluginVersion ?? 'unreadable'}  (${state.pluginRoot})`,
     '',
     binaries.onPath.length === 0 ? '  no cccollab found on PATH' : '  on PATH:',

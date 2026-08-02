@@ -272,3 +272,24 @@ describe('launcher dispatch', () => {
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
   })
 })
+
+describe('installed-plugin drift from a plain terminal', () => {
+  it('flags a plugin older than the binary, with no CLAUDE_PLUGIN_ROOT set', () => {
+    // The regression this exists for: run as a user runs it, from a shell.
+    // Before the fix `doctor` printed the binary version and the installed
+    // plugin version two lines apart and reported no problem.
+    fakeBinary('cccollab', '9.9.9')
+    markInstalled(cachedPlugin('kollaborativeai', '0.0.1-old'))
+    const { code, out } = runDoctor()
+    expect(out).toContain('0.0.1-old')
+    expect(out).toContain('claude plugin update cccollab@kollaborativeai')
+    expect(code).toBe(1)
+  })
+
+  it('tells a machine with the binary but no plugin to run init', () => {
+    fakeBinary('cccollab', '9.9.9')
+    const { code, out } = runDoctor()
+    expect(out).toContain('cccollab init')
+    expect(code).toBe(1)
+  })
+})
