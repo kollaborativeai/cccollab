@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   inspectBinaries,
+  inspectInstalledPlugin,
   parseDoctorArgs,
   referencedInstallPaths,
   resolveOnPath,
@@ -391,5 +392,104 @@ describe('resolveOnPath across platforms', () => {
 
   it('finds nothing when no extension matches, rather than throwing', () => {
     expect(resolveOnPath('cccollab', '/tools', fs(['/tools/cccollab']), { extensions: ['.EXE'] })).toEqual([])
+  })
+})
+
+describe('inspectInstalledPlugin', () => {
+  const entry = (version: string, referenced: boolean) => ({
+    path: `${CACHE}/kollaborativeai/cccollab/${version}`,
+    marketplace: 'kollaborativeai',
+    version,
+    referenced,
+    inUse: false,
+  })
+
+  it('reports aligned when the installed plugin matches the binary', () => {
+    expect(inspectInstalledPlugin([entry('3.6.1', true)], '3.6.1').status).toBe('aligned')
+  })
+
+  it('reports drift between the binary and the INSTALLED plugin', () => {
+    // The case `doctor` could not see: run from a terminal there is no
+    // CLAUDE_PLUGIN_ROOT, so the loaded-skill check reports "standalone" and
+    // says nothing — while every session started from now on loads 3.5.0
+    // against a 3.6.1 server.
+    const state = inspectInstalledPlugin([entry('3.5.0', true)], '3.6.1')
+    expect(state.status).toBe('drifted')
+    expect(state.version).toBe('3.5.0')
+  })
+
+  it('ignores cached copies that are not the installed one', () => {
+    const state = inspectInstalledPlugin([entry('3.4.0', false), entry('3.6.1', true)], '3.6.1')
+    expect(state.status).toBe('aligned')
+  })
+
+  it('reports missing when the binary is installed but no plugin is', () => {
+    // A real state, not a hypothetical: Homebrew installs the binary and
+    // nothing else, so a machine that never ran `cccollab init` looks healthy
+    // while Claude Code has no cccollab tools at all.
+    expect(inspectInstalledPlugin([entry('3.4.0', false)], '3.6.1').status).toBe('missing')
+    expect(inspectInstalledPlugin([], '3.6.1').status).toBe('missing')
+  })
+})
+
+describe('runDoctor installed-plugin drift', () => {
+  it('names the drift and the command that fixes it, from a plain terminal', async () => {
+    const { deps, logs } = harness({
+      layout: { kollaborativeai: ['3.5.0'] },
+      referenced: [`${CACHE}/kollaborativeai/cccollab/3.5.0`],
+      serverVersion: '3.6.1',
+      env: {}, // no CLAUDE_PLUGIN_ROOT — exactly how a user runs it
+    })
+    expect(await runDoctor({ prune: false, yes: false }, deps)).toBe(1)
+    const out = logs.join('\n')
+    expect(out).toContain('3.5.0')
+    expect(out).toContain('3.6.1')
+    expect(out).toContain('claude plugin update')
+  })
+
+  it('stays quiet when the installed plugin matches', async () => {
+    const { deps, logs } = harness({ env: {} })
+    expect(await runDoctor({ prune: false, yes: false }, deps)).toBe(0)
+    expect(logs.join('\n')).not.toContain('claude plugin update')
+  })
+
+  it('tells a binary-only machine to run init', async () => {
+    const { deps, logs } = harness({ layout: {}, referenced: [], env: {} })
+    expect(await runDoctor({ prune: false, yes: false }, deps)).toBe(1)
+    expect(logs.join('\n')).toContain('cccollab init')
+  })
+})
+
+describe('inspectInstalledPlugin with two marketplaces installed', () => {
+  // The rebrand leaves cccollab@flatoutsolutions recorded as installed on any
+  // machine where `init` never ran, so both can be referenced at once. Picking
+  // whichever the filesystem listed first would report the wrong version — and
+  // could call a drifted machine aligned.
+  const retired = {
+    path: `${CACHE}/retired/cccollab/3.1.0`,
+    marketplace: 'retired',
+    version: '3.1.0',
+    referenced: true,
+    inUse: false,
+  }
+  const current = {
+    path: `${CACHE}/kollaborativeai/cccollab/3.6.1`,
+    marketplace: 'kollaborativeai',
+    version: '3.6.1',
+    referenced: true,
+    inUse: false,
+  }
+
+  it('prefers the current marketplace regardless of scan order', () => {
+    expect(inspectInstalledPlugin([retired, current], '3.6.1').version).toBe('3.6.1')
+    expect(inspectInstalledPlugin([current, retired], '3.6.1').version).toBe('3.6.1')
+  })
+
+  it('does not call a drifted machine aligned because of ordering', () => {
+    expect(inspectInstalledPlugin([retired, current], '3.1.0').status).toBe('drifted')
+  })
+
+  it('falls back to the only entry when the current marketplace is absent', () => {
+    expect(inspectInstalledPlugin([retired], '3.6.1').version).toBe('3.1.0')
   })
 })

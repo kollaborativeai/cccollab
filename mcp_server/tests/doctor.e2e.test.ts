@@ -215,20 +215,60 @@ describe('the stdio server on startup', () => {
       })
     } finally {
       child.kill('SIGTERM')
-      reapBroker(sandboxHome, profile)
-      rmSync(sandboxHome, { recursive: true, force: true })
+      await reapBroker(sandboxHome, profile)
+      await removeWhenSettled(sandboxHome)
     }
     return stderr
   }
 
-  /** Kill the broker the booted server left behind, by the pid it published. */
-  function reapBroker(sandboxHome: string, profile: string): void {
+  /**
+   * Kill the broker the booted server left behind, by the pid it published,
+   * and wait for it to actually exit.
+   *
+   * Signalling is not the same as reaping. The broker keeps writing its log
+   * inside the sandbox for a moment after SIGTERM, so deleting the directory
+   * straight away races it: rm empties a directory, the broker recreates a file
+   * in it, rm fails with ENOTEMPTY. That passed locally and failed on CI.
+   */
+  async function reapBroker(sandboxHome: string, profile: string): Promise<void> {
     const rendezvous = join(sandboxHome, '.cccollab', 'run', `${profile}.json`)
+    let pid: number | undefined
     try {
-      const { pid } = JSON.parse(readFileSync(rendezvous, 'utf8')) as { pid?: number }
-      if (typeof pid === 'number') process.kill(pid, 'SIGTERM')
+      pid = (JSON.parse(readFileSync(rendezvous, 'utf8')) as { pid?: number }).pid
     } catch {
-      // No rendezvous, unparseable, or already gone. Nothing to reap.
+      return // No rendezvous, unparseable, or already gone. Nothing to reap.
+    }
+    if (typeof pid !== 'number') return
+
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      return // Already dead.
+    }
+
+    for (let i = 0; i < 60; i++) {
+      try {
+        process.kill(pid, 0) // Signal 0 only probes; it does not kill.
+      } catch {
+        return // Throws once the pid is gone, which is what we are waiting for.
+      }
+      await new Promise<void>((r) => setTimeout(r, 50))
+    }
+  }
+
+  /**
+   * Delete a sandbox, retrying briefly. Never throws: this is cleanup of a
+   * directory under the OS temp dir, and a leftover there must not be able to
+   * fail a test that has already made its assertions.
+   */
+  async function removeWhenSettled(dir: string): Promise<void> {
+    for (let i = 0; i < 10; i++) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+        return
+      } catch {
+        await new Promise<void>((r) => setTimeout(r, 100))
+      }
     }
   }
 
@@ -270,5 +310,26 @@ describe('launcher dispatch', () => {
     const result = spawnSync(process.execPath, [LAUNCHER, '--version'], { encoding: 'utf8', timeout: 30_000 })
     expect(result.status).toBe(0)
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+  })
+})
+
+describe('installed-plugin drift from a plain terminal', () => {
+  it('flags a plugin older than the binary, with no CLAUDE_PLUGIN_ROOT set', () => {
+    // The regression this exists for: run as a user runs it, from a shell.
+    // Before the fix `doctor` printed the binary version and the installed
+    // plugin version two lines apart and reported no problem.
+    fakeBinary('cccollab', '9.9.9')
+    markInstalled(cachedPlugin('kollaborativeai', '0.0.1-old'))
+    const { code, out } = runDoctor()
+    expect(out).toContain('0.0.1-old')
+    expect(out).toContain('claude plugin update cccollab@kollaborativeai')
+    expect(code).toBe(1)
+  })
+
+  it('tells a machine with the binary but no plugin to run init', () => {
+    fakeBinary('cccollab', '9.9.9')
+    const { code, out } = runDoctor()
+    expect(out).toContain('cccollab init')
+    expect(code).toBe(1)
   })
 })
