@@ -229,12 +229,18 @@ export interface InstalledPluginState {
  * ordering does not matter.
  */
 export function inspectInstalledPlugin(entries: CacheEntry[], serverVersion: string): InstalledPluginState {
-  const installed = entries.find((entry) => entry.referenced)
-  if (!installed) return { status: 'missing' }
+  const installed = entries.filter((entry) => entry.referenced)
+  if (installed.length === 0) return { status: 'missing' }
+
+  // Two marketplaces can each have a cccollab recorded as installed — the
+  // rebrand leaves cccollab@flatoutsolutions behind on any machine where `init`
+  // never ran. Prefer the current marketplace so the answer cannot depend on
+  // the order the filesystem happened to list directories in.
+  const chosen = installed.find((entry) => entry.marketplace === MARKETPLACE) ?? installed[0]!
   return {
-    version: installed.version,
-    path: installed.path,
-    status: installed.version === serverVersion ? 'aligned' : 'drifted',
+    version: chosen.version,
+    path: chosen.path,
+    status: chosen.version === serverVersion ? 'aligned' : 'drifted',
   }
 }
 

@@ -459,3 +459,37 @@ describe('runDoctor installed-plugin drift', () => {
     expect(logs.join('\n')).toContain('cccollab init')
   })
 })
+
+describe('inspectInstalledPlugin with two marketplaces installed', () => {
+  // The rebrand leaves cccollab@flatoutsolutions recorded as installed on any
+  // machine where `init` never ran, so both can be referenced at once. Picking
+  // whichever the filesystem listed first would report the wrong version — and
+  // could call a drifted machine aligned.
+  const retired = {
+    path: `${CACHE}/retired/cccollab/3.1.0`,
+    marketplace: 'retired',
+    version: '3.1.0',
+    referenced: true,
+    inUse: false,
+  }
+  const current = {
+    path: `${CACHE}/kollaborativeai/cccollab/3.6.1`,
+    marketplace: 'kollaborativeai',
+    version: '3.6.1',
+    referenced: true,
+    inUse: false,
+  }
+
+  it('prefers the current marketplace regardless of scan order', () => {
+    expect(inspectInstalledPlugin([retired, current], '3.6.1').version).toBe('3.6.1')
+    expect(inspectInstalledPlugin([current, retired], '3.6.1').version).toBe('3.6.1')
+  })
+
+  it('does not call a drifted machine aligned because of ordering', () => {
+    expect(inspectInstalledPlugin([retired, current], '3.1.0').status).toBe('drifted')
+  })
+
+  it('falls back to the only entry when the current marketplace is absent', () => {
+    expect(inspectInstalledPlugin([retired], '3.6.1').version).toBe('3.1.0')
+  })
+})
