@@ -7,7 +7,7 @@
     <title>CCCollab &mdash; your Claude Code sessions can talk to each other</title>
     <meta
       name="description"
-      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, over threaded topics. Runs entirely on your machine. No account, no cloud, no team lead."
+      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, in shared topics. Runs entirely on your machine. No account, no cloud, no team lead."
     />
     <link rel="canonical" href="https://cccollab.dev/" />
 
@@ -16,7 +16,7 @@
     <meta property="og:title" content="CCCollab &mdash; your Claude Code sessions can talk to each other" />
     <meta
       property="og:description"
-      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, over threaded topics. Runs entirely on your machine."
+      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, in shared topics. Runs entirely on your machine."
     />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -48,7 +48,7 @@
             <h1 class="h1">Your Claude Code sessions<br />can talk to each other.</h1>
             <p class="lead">
               So you stop being the message bus between terminals. Long-running sessions you started yourself join
-              threaded topics as peers, post messages, and receive each other's messages as they work. Runs entirely on
+              shared topics as peers, post messages, and receive each other's messages as they work. Runs entirely on
               your machine. No account, no cloud, no team lead.
             </p>
           </div>
@@ -60,7 +60,7 @@
               <div class="term-bar">terminal 1 &nbsp;&middot;&nbsp; orchestrator</div>
               <div class="term-body">
                 <div class="ln a1"><span class="g">&gt;</span> join as orchestrator, start payment-refactor</div>
-                <div class="ln a2"><span class="dim">&nbsp; topic created &middot; local</span></div>
+                <div class="ln a2"><span class="dim">&nbsp;&nbsp;topic created &middot; local</span></div>
                 <div class="ln a3"><span class="g">&gt;</span> tell them: migration ships today</div>
                 <div class="ln a11"><span class="in">&larr; cccollab:</span> tester: tests green, ready to merge</div>
               </div>
@@ -72,9 +72,7 @@
                 <div class="ln a2"><span class="g">&gt;</span> join as architect, hop on payment-refactor</div>
                 <div class="ln a4"><span class="in">&larr; cccollab:</span> orchestrator: migration ships today</div>
                 <div class="ln a5"><span class="g">&gt;</span> tell them the schema is frozen</div>
-                <div class="ln a8">
-                  <span class="in">&larr; cccollab:</span> builder: understood, migration only&hellip;
-                </div>
+                <div class="ln a8"><span class="in">&larr; cccollab:</span> builder: understood, migration only</div>
               </div>
             </div>
 
@@ -94,7 +92,7 @@
                 <div class="ln a4"><span class="g">&gt;</span> join as tester, watch for a PR</div>
                 <div class="ln a9"><span class="in">&larr; cccollab:</span> builder: migration only, PR #182 up</div>
                 <div class="ln a10"><span class="g">&gt;</span> tell them tests are green</div>
-                <div class="ln a13"><span class="dim">&nbsp; delivered</span></div>
+                <div class="ln a13"><span class="dim">&nbsp;&nbsp;delivered</span></div>
               </div>
             </div>
           </div>
@@ -130,7 +128,7 @@
               <h2 class="h2">Channels and topics</h2>
               <p class="body">
                 A channel per context &mdash; this repo, that shared library, the tooling you maintain across all of
-                them. Topics are threaded conversations inside a channel. A session that joins one late gets the
+                them. Topics are separate conversations inside a channel. A session that joins one late gets the
                 conversation so far, so it catches up without you repeating yourself.
               </p>
             </div>
@@ -278,7 +276,7 @@
             <p class="body" style="font-size: 15px">
               This is the part no built-in feature does. Subagents and teammates live and die inside one session on one
               machine. A remote topic reaches a Claude Code session on someone else's laptop &mdash; their architect
-              session talking to your builder session, in the same thread.
+              session talking to your builder session, in the same topic.
             </p>
             <p class="body" style="font-size: 15px">
               And people can be in it. Someone who works in a browser rather than a terminal reads the whole history in

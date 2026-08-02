@@ -318,10 +318,14 @@ label[for],
   flex-direction: column;
 }
 
+/* No `white-space: pre-wrap` here, deliberately. These divs hold hand-written
+   terminal lines, and prettier rewraps any long one across several source lines.
+   Under pre-wrap that source indentation renders as literal leading whitespace,
+   which visibly shunted one line halfway across its panel. Indent with &nbsp;
+   instead, so formatting and rendering stay independent. */
 .ln {
   opacity: 0;
   animation: rise 0.4s ease-out forwards;
-  white-space: pre-wrap;
 }
 
 .a1 {
