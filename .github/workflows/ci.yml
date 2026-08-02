@@ -24,11 +24,14 @@
 #     GITHUB_TOKEN - auto-provided by Actions; used for the version-bump
 #                    commit/tag/push and the GitHub Release. No longer used
 #                    for publishing.
-#     TAP_GITHUB_TOKEN - OPTIONAL. A token with contents:write on
-#                    kollaborativeai/homebrew-tap, used to bump the Homebrew
-#                    formula after each publish. GITHUB_TOKEN cannot do this:
-#                    it is scoped to this repository. When absent the tap
-#                    step is skipped and the formula must be bumped by hand.
+#     TAP_GITHUB_TOKEN - REQUIRED for releases. A fine-grained token whose only
+#                    permission is contents:write on
+#                    kollaborativeai/homebrew-cccollab, used to bump the
+#                    Homebrew formula after each publish. GITHUB_TOKEN cannot
+#                    do this: it is scoped to this repository. When absent the
+#                    release FAILS rather than skipping — a silent skip left
+#                    Homebrew on 3.5.0 for a whole 3.6.0 release with a green
+#                    tick on the run.
 #     CLOUDFLARE_API_TOKEN - required by Phase IV. Cloudflare has no OIDC path
 #                    for Pages, so unlike npm above this must be a long-lived
 #                    token. Its permission (Account -> Cloudflare Pages -> Edit)
@@ -325,23 +328,39 @@ jobs:
       # ------------------------------------------------------------------
       # Keep the Homebrew formula in step with the published package.
       #
-      # Skipped when TAP_GITHUB_TOKEN is absent, so the release itself never
-      # fails over tap automation. Without the secret the formula simply has
-      # to be bumped by hand, which is a stale formula rather than a broken
-      # release. GITHUB_TOKEN cannot be used here: it is scoped to this
-      # repository and the tap is a different one.
+      # A missing TAP_GITHUB_TOKEN fails the release rather than skipping it.
+      # The skip seemed safer — a stale formula beats a broken release — but it
+      # produced the worse outcome: 3.6.0 published to npm, the tap step
+      # silently did not run, and the release went green while Homebrew users
+      # stayed on 3.5.0. Nobody looks at a passing run. A skew between npm and
+      # Homebrew is precisely the drift KAI-571 exists to surface, so this must
+      # be loud.
+      #
+      # GITHUB_TOKEN cannot be used here: it is scoped to this repository and
+      # the tap is a different one.
       #
       # The sha256 is computed from the tarball npm actually served, not from
       # a local build, so the formula can only ever point at bytes that exist
       # on the registry.
       # ------------------------------------------------------------------
       - name: Update the Homebrew tap
-        if: steps.semver.outputs.nextStrict != '' && env.TAP_TOKEN != ''
+        if: steps.semver.outputs.nextStrict != ''
         env:
           TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           VERSION: ${{ steps.semver.outputs.nextStrict }}
         run: |
           set -euo pipefail
+
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::error::Repository secret TAP_GITHUB_TOKEN is not set, so the"
+            echo "::error::Homebrew formula cannot be bumped to ${VERSION}."
+            echo "::error::Create a fine-grained token with contents:write on"
+            echo "::error::kollaborativeai/homebrew-cccollab and add it as TAP_GITHUB_TOKEN."
+            echo "::error::npm has already published ${VERSION}; bump the formula by hand"
+            echo "::error::or re-run this job once the secret exists."
+            exit 1
+          fi
+
           TARBALL="https://registry.npmjs.org/@kollaborativeai/cccollab/-/cccollab-${VERSION}.tgz"
 
           # npm's registry can lag a few minutes on a fresh publish. Fail the
@@ -354,7 +373,7 @@ jobs:
           test -s /tmp/pkg.tgz || { echo "::error::${TARBALL} never became available"; exit 1; }
 
           SHA=$(sha256sum /tmp/pkg.tgz | cut -d' ' -f1)
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/kollaborativeai/homebrew-tap.git" /tmp/tap
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/kollaborativeai/homebrew-cccollab.git" /tmp/tap
           cd /tmp/tap
 
           python3 - "$VERSION" "$SHA" <<'PY'

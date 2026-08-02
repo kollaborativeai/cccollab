@@ -33,7 +33,16 @@ reachable on `PATH`. It also removes the retired `cccollab@flatoutsolutions`
 plugin if you have it — see the migration notes below for the parts it can't
 do for you.
 
-Or do it yourself:
+Or do it yourself. With Homebrew:
+
+```bash
+brew install kollaborativeai/cccollab/cccollab
+cccollab init
+```
+
+`brew install` taps automatically, so there is no separate `brew tap` step.
+
+Or from npm:
 
 ```bash
 npm i -g @kollaborativeai/cccollab
