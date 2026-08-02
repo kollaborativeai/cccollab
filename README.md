@@ -40,11 +40,41 @@ npm i -g @kollaborativeai/cccollab
 cccollab init
 ```
 
-`cccollab init` registers the marketplace, installs the plugin, retires an old
-`cccollab@flatoutsolutions` install if it finds one, and offers to add a `ccc`
-shell alias for the launch flag. It is idempotent — re-run it any time. Pass
-`--yes` to skip the prompt (for scripts and CI) or `--no-alias` to leave your
-shell config alone.
+`cccollab init` registers the marketplace, installs the plugin (updating it if
+it is already there), retires an old `cccollab@flatoutsolutions` install if it
+finds one, and offers to add a `ccc` shell alias for the launch flag. It is
+idempotent — re-run it any time. Pass `--yes` to skip the prompt (for scripts
+and CI) or `--no-alias` to leave your shell config alone.
+
+### Checking your install: `cccollab doctor`
+
+cccollab is two artefacts that upgrade independently — this binary, and the
+Claude Code plugin whose skill tells the model how to call its tools. They are
+released together and should always match. When they don't, nothing says so:
+there is no version exchange in the MCP handshake, and a stale skill fails by
+describing tools whose shape has changed rather than by erroring.
+
+The server compares the two at startup, warns on stderr, and repeats the
+warning on `introduce` so the model sees it too. To inspect it yourself:
+
+```bash
+cccollab doctor
+```
+
+It reports the binary version, the skill version the current session loaded,
+and every cached plugin copy on the machine — Claude Code keeps one directory
+per version it has ever installed and removes none of them, so these
+accumulate, and each carries its own `SKILL.md`. Copies that nothing is using
+can be removed:
+
+```bash
+cccollab doctor --prune
+```
+
+`--prune` never touches the installed version, and never touches a version a
+running session is loaded from — those clear themselves when the session
+restarts. It lists what it will delete and asks first; `--yes` skips the
+prompt.
 
 > **Node version managers.** Claude Code launches the MCP server as the bare
 > command `cccollab`. `npm i -g` installs into the _active_ Node version's

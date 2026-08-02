@@ -510,3 +510,55 @@ describe('Identity Tools', () => {
     })
   })
 })
+
+describe('version handshake surfacing', () => {
+  const aligned = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.5.0',
+    pluginRoot: '/cache/3.5.0',
+    status: 'aligned' as const,
+  }
+  const drifted = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.4.0',
+    pluginRoot: '/cache/3.4.0',
+    status: 'drifted' as const,
+  }
+
+  describe('introduce', () => {
+    it('warns about drift on the one tool every session must call first', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toContain('3.4.0')
+      expect(result.warning).toContain('3.5.0')
+    })
+
+    it('stays silent when the skill matches the server', async () => {
+      const deps = { ...createMockDeps(), versionState: aligned }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toBeUndefined()
+      expect(result.name).toBe('architect')
+    })
+
+    it('stays silent when no handshake was performed', async () => {
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, createMockDeps()))
+      expect(result.warning).toBeUndefined()
+    })
+  })
+
+  describe('whoami', () => {
+    it('reports both versions so drift is visible on demand, not only at startup', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toEqual({ server: '3.5.0', skill: '3.4.0', status: 'drifted' })
+    })
+
+    it('omits the versions block when no handshake was performed', async () => {
+      const deps = createMockDeps()
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toBeUndefined()
+    })
+  })
+})
