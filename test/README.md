@@ -2,8 +2,8 @@
 
 Manual end-to-end walkthrough for the local-only MVP. Two Claude Code sessions
 auto-join a shared local channel, discover each other, broadcast on the channel,
-and converse inside a shared topic - entirely on the local broker, with no
-network transport configured.
+and converse inside a shared topic - entirely through the local broker on
+`127.0.0.1`, with no remote transport configured.
 
 ## Prereqs
 
