@@ -72,7 +72,14 @@ afterEach(() => {
   rmSync(binDir, { recursive: true, force: true })
 })
 
-describe('cccollab doctor end to end', () => {
+// Every describe below drives a real spawned CLI, and `runDoctor` already gives
+// the child 60s. Vitest's default test timeout is 5s, so the two disagreed: the
+// runner killed the test at 5s and reported "Test timed out in 5000ms" — a
+// message about vitest, not about doctor — long before the child's own timeout
+// could produce something diagnosable. Observed as a 1-in-3 flake locally, at
+// 6099ms on a loaded machine. 90s keeps vitest the outer bound, so a genuinely
+// stuck child still fails on the subprocess timeout with its output attached.
+describe('cccollab doctor end to end', { timeout: 90_000 }, () => {
   it('finds a cccollab that is genuinely on PATH and reports its version', () => {
     // The regression test for the shell-based probe: this asserts against a real
     // PATH lookup, so a probe that silently returns nothing fails here.
@@ -175,7 +182,7 @@ describe('cccollab doctor end to end', () => {
 
 let bootCounter = 0
 
-describe('the stdio server on startup', () => {
+describe('the stdio server on startup', { timeout: 90_000 }, () => {
   /**
    * Boots the real MCP server the way Claude Code does — bare `cccollab` over
    * stdio — and returns whatever it wrote to stderr before shutting down.
@@ -304,7 +311,7 @@ describe('the stdio server on startup', () => {
   }, 20_000)
 })
 
-describe('launcher dispatch', () => {
+describe('launcher dispatch', { timeout: 90_000 }, () => {
   it('keeps printing a version for the launcher itself', () => {
     // `brew test` runs this on every install; it must stay offline and cheap.
     const result = spawnSync(process.execPath, [LAUNCHER, '--version'], { encoding: 'utf8', timeout: 30_000 })
@@ -313,7 +320,7 @@ describe('launcher dispatch', () => {
   })
 })
 
-describe('installed-plugin drift from a plain terminal', () => {
+describe('installed-plugin drift from a plain terminal', { timeout: 90_000 }, () => {
   it('flags a plugin older than the binary, with no CLAUDE_PLUGIN_ROOT set', () => {
     // The regression this exists for: run as a user runs it, from a shell.
     // Before the fix `doctor` printed the binary version and the installed
