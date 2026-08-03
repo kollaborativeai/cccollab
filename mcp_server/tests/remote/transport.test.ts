@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
 
-import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
+import { RemoteTransport, HEARTBEAT_INTERVAL_MS, RESUBSCRIBE_DELAYS_MS } from '../../src/transport/remote.js'
 
 /**
  * Self-disable transition test.
@@ -674,6 +674,294 @@ describe('RemoteTransport session-scoped query arguments', () => {
 
     expect(queryMock).toHaveBeenCalledTimes(1)
     expect(queryMock.mock.calls[0]![1]).toEqual({})
+  })
+})
+
+/**
+ * KAI-438: a dead remote subscription must not leave the transport
+ * reporting healthy while the session silently receives nothing.
+ *
+ * Two facts, both verified live against production on 2026-07-15:
+ *
+ *  1. A subscription bound to a missing/renamed function surfaces a plain
+ *     `Error` whose message the deployment masks to `[CONVEX Q(...)] Server
+ *     Error`. It is NOT named `FunctionNotFoundError`, so the old strict
+ *     branch in `registerSubscriptionFailure` never fired in production.
+ *  2. A dead subscription's `onError` fires exactly ONCE and the
+ *     subscription never recovers, so the 3-in-60s rolling window never
+ *     tripped either. `enabled` stayed `true` forever, silently blind.
+ *
+ * The fix is matcher-free by design. Production masks the message, so any
+ * string matcher is a guess calibrated against a shape production never
+ * emits (the KAI-434 family — the reason the old tests passed while the
+ * code was broken). Since `onError` is terminal for that subscription
+ * whatever the cause, we do not classify it: we replace the subscription
+ * and discriminate BY EXPERIMENT. A transient fault lets the replacement
+ * stream fine; structural drift makes every replacement fail too, and the
+ * exhausted retries surface loudly.
+ */
+
+/** The real production error shape, captured live 2026-07-15: a plain
+ *  `Error`, message masked by the deployment. Deliberately NOT named
+ *  `FunctionNotFoundError` — that shape exists only in test files. */
+const maskedProductionError = (): Error => new Error('[CONVEX Q(cccollab/messages:listByTopic)] Server Error')
+
+interface SubStub {
+  stub: Record<string, unknown>
+  errCbs: Array<(err: unknown) => void>
+  dataCbs: Array<(rows: unknown) => void>
+  argsSeen: Array<Record<string, unknown>>
+  unsubs: Array<ReturnType<typeof vi.fn>>
+}
+
+function makeSubStub(): SubStub {
+  const errCbs: Array<(err: unknown) => void> = []
+  const dataCbs: Array<(rows: unknown) => void> = []
+  const argsSeen: Array<Record<string, unknown>> = []
+  const unsubs: Array<ReturnType<typeof vi.fn>> = []
+  const stub = {
+    query: vi.fn(async () => undefined),
+    mutation: vi.fn(async () => undefined),
+    onUpdate: vi.fn(
+      (_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void, errCb: (err: unknown) => void) => {
+        argsSeen.push(args)
+        dataCbs.push(cb)
+        errCbs.push(errCb)
+        const u = vi.fn()
+        unsubs.push(u)
+        return u
+      },
+    ),
+    setAuth: vi.fn(),
+  }
+  return { stub, errCbs, dataCbs, argsSeen, unsubs }
+}
+
+describe('RemoteTransport subscription resilience (KAI-438)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('re-subscribes after a masked production error instead of going silently dead', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(stub.onUpdate as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1)
+
+    // The exact production shape that `isFunctionNotFoundError` misses.
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // Before the fix this stayed at 1 call forever: enabled, and deaf.
+    expect((stub.onUpdate as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('a transient fault recovers: the replacement subscription delivers and the transport stays enabled', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (m) => delivered.push(m.text))
+
+    errCbs[0]!(new Error('[CONVEX Q(cccollab/messages:listByTopic)] Server Error'))
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // The replacement streams fine -> the fault was transient.
+    dataCbs[1]!([{ _id: 'm1', fromSessionId: 'alice', text: 'after recovery', ts: 1_700_000_100_000 }])
+
+    expect(delivered).toEqual(['after recovery'])
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  it('one blip more than the retry schedule allows, each followed by a healthy delivery, never disables the transport', async () => {
+    // AC2's actual mechanism: `onHealthy` resetting `failures` to 0.
+    // `failures` is a LIFETIME counter with no time window (unlike
+    // `recentFailures`/DEGRADATION_WINDOW_MS), so without the reset the
+    // blips need not be close together — four separate days accumulate
+    // just the same and permanently disable the transport with no
+    // auto-recovery. The neighbouring "a transient fault recovers" test
+    // cannot catch that: it fires exactly one error, and one error never
+    // disables anything whether the reset exists or not.
+    //
+    // The invariant is "ANY number of recover-cycles is safe", so the
+    // cycle count is derived from RESUBSCRIBE_DELAYS_MS rather than
+    // hardcoded: without the reset, exactly `length + 1` blips exhaust
+    // the schedule. A literal 4 would stop guarding anything the moment
+    // someone adds a fourth delay — measured: deleting the reset AND
+    // extending the schedule left the whole suite green.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (m) => delivered.push(m.text))
+
+    // One full error → recover cycle per entry in the schedule. Each
+    // recovery must clear the debt left by the error before it. Draining
+    // past the longest backoff opens the replacement either way.
+    const drain = Math.max(...RESUBSCRIBE_DELAYS_MS) + 1_000
+    const cycles = RESUBSCRIBE_DELAYS_MS.length
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      errCbs[cycle]!(maskedProductionError())
+      await vi.advanceTimersByTimeAsync(drain)
+      dataCbs[cycle + 1]!([
+        { _id: `m${cycle}`, fromSessionId: 'alice', text: `recovered ${cycle}`, ts: 1_700_000_100_000 + cycle },
+      ])
+    }
+    expect(delivered).toEqual(Array.from({ length: cycles }, (_, i) => `recovered ${i}`))
+
+    // The blip that tips it over. With the reset it is the counter's
+    // *first* failure; without it, it is the one the schedule cannot pay for.
+    errCbs[cycles]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(drain)
+
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  it('tears down the dead subscription handle before replacing it (no duplicate streams)', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs, unsubs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(unsubs[0]!).toHaveBeenCalled()
+  })
+
+  it('resumes from the watermark on an automatic re-subscribe (no history replay)', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs, argsSeen } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    dataCbs[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'seen', ts: 1_700_000_200_000 }])
+    expect(argsSeen[0]).toEqual({ topicId: 't1' })
+
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(argsSeen[1]).toEqual({ topicId: 't1', sinceTs: 1_700_000_200_000 })
+  })
+
+  it('makes structural drift visible: exhausted re-subscribes disable the transport with a reason naming schema drift', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+
+    // Every replacement errors too — that is what structural drift looks
+    // like from the client, without ever parsing the message.
+    for (let i = 0; i < 8; i++) {
+      const cb = errCbs[errCbs.length - 1]
+      if (cb === undefined) break
+      cb(maskedProductionError())
+      await vi.advanceTimersByTimeAsync(30_000)
+    }
+
+    // The acceptance criterion: NOT enabled-and-silently-dead.
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/schema drift/i)
+  })
+
+  /** Resolve 'dev' through the async `channels.queries.listAll` lookup —
+   *  the path that re-enters `register` from a promise, which the topic
+   *  path has no equivalent of. */
+  function makeChannelSubStub(): SubStub {
+    const sub = makeSubStub()
+    sub.stub.query = vi.fn(async () => [
+      { channelId: 'chan_dev', name: 'dev' },
+      { channelId: 'chan_ops', name: 'ops' },
+    ])
+    return sub
+  }
+
+  it('re-subscribes a dead CHANNEL subscription instead of silently losing every later broadcast', async () => {
+    // The channel path is the higher-traffic one and carries machinery the
+    // topic path does not: `register` re-entered after the async listAll,
+    // the `innerUnsubscribe` reassignment, a cursor keyed by channelId and
+    // the fire-and-forget ackChannel. Reverting it to pre-PR silent death
+    // loses 'after recovery' with the whole suite still green.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs, unsubs } = makeChannelSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (m) => delivered.push(m.text))
+    // Let the async channel-id lookup land and `register` run.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stub.onUpdate as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1)
+
+    dataCbs[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'before', ts: 1_700_000_500_000 }])
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // A dead Convex subscription never fires again, so this can only land
+    // on a REPLACEMENT. Optional call on purpose: when the replacement is
+    // missing the assertion below reports the lost message rather than
+    // crashing on an absent callback.
+    dataCbs[1]?.([{ _id: 'm2', fromSessionId: 'alice', text: 'after recovery', ts: 1_700_000_600_000 }])
+
+    expect(delivered).toEqual(['before', 'after recovery'])
+    // The dead handle must also have been torn down before the replacement.
+    expect(unsubs[0]!).toHaveBeenCalled()
+    expect(transport.enabled).toBe(true)
+  })
+
+  it("resumes a CHANNEL re-subscribe from that channel's own watermark, not another channel's", async () => {
+    // The channel cursor lives in `channelMaxTs`, keyed per channel rather
+    // than globally, and is read inside the attempt so a replacement
+    // resumes where its predecessor stopped instead of replaying the
+    // channel's broadcast history. Two channels with different watermarks
+    // are subscribed so the assertion pins the per-channel key, not just
+    // "some sinceTs appeared" — one busier channel must not drag another
+    // channel's cursor forward and skip its backlog.
+    //
+    // What this does NOT prove: id-keyed vs name-keyed. Two distinct
+    // channels have distinct names too, so only a name/id collision would
+    // separate them; the pre-existing "seeds the channel cursor from
+    // joinChannel latestTs" test covers that, since primeChannelCursor
+    // resolves the name to an id first.
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs, argsSeen } = makeChannelSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    transport.subscribeChannelMessages({ channelName: 'ops' }, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(argsSeen[0]).toEqual({ channelId: 'chan_dev' })
+    expect(argsSeen[1]).toEqual({ channelId: 'chan_ops' })
+
+    dataCbs[0]!([{ _id: 'd1', fromSessionId: 'alice', text: 'dev msg', ts: 1_700_000_500_000 }])
+    // 'ops' runs far ahead of 'dev'.
+    dataCbs[1]!([{ _id: 'o1', fromSessionId: 'alice', text: 'ops msg', ts: 1_700_000_900_000 }])
+
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(argsSeen[2]).toEqual({ channelId: 'chan_dev', sinceTs: 1_700_000_500_000 })
+  })
+
+  it('does not describe a dead subscription as "(transient)"', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const log: string[] = []
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // The subscription is dead, not transient — the old wording is a
+    // large part of why this read as harmless.
+    expect(log.join('\n')).not.toMatch(/\(transient\)/)
   })
 })
 
