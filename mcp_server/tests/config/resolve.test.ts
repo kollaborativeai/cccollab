@@ -59,7 +59,7 @@ describe('resolveConfig', () => {
   it('reads a non-local location from the user-level file', () => {
     writeUserConfig({
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           accessToken: 'jwt',
           refreshToken: 'ref',
@@ -69,18 +69,18 @@ describe('resolveConfig', () => {
       },
     })
     const resolved = resolveConfig(projectRoot, {})
-    const flatout = resolved.locations.find((l) => l.name === 'flatout')
-    expect(flatout?.url).toBe('https://a.convex.cloud')
-    expect(flatout?.accessToken).toBe('jwt')
-    expect(flatout?.channels.map((c) => c.name)).toEqual(['dev'])
-    expect(resolved.active.activeLocation).toBe('flatout')
-    expect(resolved.active.activeChannel).toEqual({ location: 'flatout', name: 'dev' })
+    const acme = resolved.locations.find((l) => l.name === 'acme')
+    expect(acme?.url).toBe('https://a.convex.cloud')
+    expect(acme?.accessToken).toBe('jwt')
+    expect(acme?.channels.map((c) => c.name)).toEqual(['dev'])
+    expect(resolved.active.activeLocation).toBe('acme')
+    expect(resolved.active.activeChannel).toEqual({ location: 'acme', name: 'dev' })
   })
 
   it('merges project config with user config - project wins on scalars, maps union', () => {
     writeUserConfig({
       locations: {
-        flatout: {
+        acme: {
           url: 'https://user.convex.cloud',
           accessToken: 'user-jwt',
           refreshToken: 'user-ref',
@@ -92,16 +92,16 @@ describe('resolveConfig', () => {
       JSON.stringify({
         locations: {
           local: { active: true, channels: { project: {} } },
-          flatout: { channels: { 'from-project': {} } },
+          acme: { channels: { 'from-project': {} } },
         },
       }),
     )
     const resolved = resolveConfig(projectRoot, {})
     expect(resolved.projectFilePath).toMatch(/\.cccollab\.json$/)
-    const flatout = resolved.locations.find((l) => l.name === 'flatout')
-    expect(flatout?.url).toBe('https://user.convex.cloud')
-    expect(flatout?.accessToken).toBe('user-jwt')
-    expect(flatout?.channels.map((c) => c.name)).toContain('from-project')
+    const acme = resolved.locations.find((l) => l.name === 'acme')
+    expect(acme?.url).toBe('https://user.convex.cloud')
+    expect(acme?.accessToken).toBe('user-jwt')
+    expect(acme?.channels.map((c) => c.name)).toContain('from-project')
     const local = resolved.locations.find((l) => l.name === 'local')
     expect(local?.channels.map((c) => c.name)).toContain('project')
   })
@@ -118,7 +118,7 @@ describe('resolveConfig', () => {
         join(projectRoot, '.cccollab.json'),
         JSON.stringify({
           locations: {
-            flatout: {
+            acme: {
               url: 'https://a.convex.cloud',
               accessToken: 'SECRET',
               refreshToken: 'REFRESH',
@@ -128,10 +128,10 @@ describe('resolveConfig', () => {
         }),
       )
       const resolved = resolveConfig(projectRoot, {})
-      const flatout = resolved.locations.find((l) => l.name === 'flatout')
-      expect(flatout?.accessToken).toBeUndefined()
-      expect(flatout?.refreshToken).toBeUndefined()
-      expect(flatout?.channels.map((c) => c.name)).toEqual(['dev'])
+      const acme = resolved.locations.find((l) => l.name === 'acme')
+      expect(acme?.accessToken).toBeUndefined()
+      expect(acme?.refreshToken).toBeUndefined()
+      expect(acme?.channels.map((c) => c.name)).toEqual(['dev'])
       expect(warns.join('\n')).toContain('Credentials in project-level config are ignored')
     } finally {
       console.error = originalError
@@ -187,7 +187,7 @@ describe('resolveConfig', () => {
   it('cascades: topic active flag makes its channel and location active', () => {
     writeUserConfig({
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: {
             dev: { topics: { planning: { active: true } } },
@@ -196,23 +196,23 @@ describe('resolveConfig', () => {
       },
     })
     const resolved = resolveConfig(projectRoot, {})
-    expect(resolved.active.activeLocation).toBe('flatout')
-    expect(resolved.active.activeChannel).toEqual({ location: 'flatout', name: 'dev' })
-    expect(resolved.active.activeTopic).toEqual({ location: 'flatout', channel: 'dev', name: 'planning' })
+    expect(resolved.active.activeLocation).toBe('acme')
+    expect(resolved.active.activeChannel).toEqual({ location: 'acme', name: 'dev' })
+    expect(resolved.active.activeTopic).toEqual({ location: 'acme', channel: 'dev', name: 'planning' })
   })
 
   it('exposes topics per channel on resolved locations', () => {
     writeUserConfig({
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: { dev: { topics: { a: {}, b: {} } } },
         },
       },
     })
     const resolved = resolveConfig(projectRoot, {})
-    const flatout = resolved.locations.find((l) => l.name === 'flatout')
-    const dev = flatout?.channels.find((c) => c.name === 'dev')
+    const acme = resolved.locations.find((l) => l.name === 'acme')
+    const dev = acme?.channels.find((c) => c.name === 'dev')
     expect(dev?.topics.map((t) => t.name).sort()).toEqual(['a', 'b'])
   })
 
