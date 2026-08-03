@@ -605,15 +605,34 @@ export function hasChannelSubscription(transport: Transport): transport is Trans
   return typeof (transport as { subscribeChannelMessages?: unknown }).subscribeChannelMessages === 'function'
 }
 
+/** Type guard: does this transport expose a per-channel topic-CREATION feed?
+ *  Only remote transports do — local delivers `topic_created` via the shared
+ *  broker SSE stream. This is the remote half of KAI-413. */
+export function hasTopicCreatedSubscription(transport: Transport): transport is Transport & {
+  subscribeTopicsCreated: RemoteTransport['subscribeTopicsCreated']
+} {
+  return typeof (transport as { subscribeTopicsCreated?: unknown }).subscribeTopicsCreated === 'function'
+}
+
 /**
  * Establish a channel-broadcast subscription on a remote transport if one
  * isn't already in place. Idempotent; keyed by
  * `${locationName}::${channelName}`.
  *
- * Channel broadcasts are the fanout path for `send_message_to_channel` at
- * the broker level on local and at the Convex level on remote. Without
- * this wiring a remote broadcast lands in the backend table but never
- * reaches other subscribers - see the original bug report for symptoms.
+ * Wires BOTH channel-level inbound feeds a remote channel has, under one
+ * map entry (they share an identical lifecycle — established on join, torn
+ * down on leave/shutdown):
+ *
+ *   1. Channel broadcasts — the fanout path for `send_message_to_channel`
+ *      at the broker level on local and at the Convex level on remote.
+ *      Without it a remote broadcast lands in the backend table but never
+ *      reaches other subscribers.
+ *   2. Topic-created notifications — the remote counterpart to the local
+ *      broker's `topic_created` event (KAI-413). Without it a session in a
+ *      remote channel is silently blind to new topics.
+ *
+ * The single unsubscribe stored in `map` tears down whichever of the two
+ * were established. A transport that supports neither adds no entry.
  */
 export function ensureChannelSubscription(args: {
   transport: Transport
@@ -624,11 +643,20 @@ export function ensureChannelSubscription(args: {
 }): void {
   const key = `${args.locationName}::${args.channelName}`
   if (args.map.has(key)) return
-  if (!hasChannelSubscription(args.transport)) return
-  const unsub = args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) => {
+  const push = (msg: ParsedMessage): void => {
     void args.messageBus.push(msg, args.transport.source)
+  }
+  const unsubs: Array<() => void> = []
+  if (hasChannelSubscription(args.transport)) {
+    unsubs.push(args.transport.subscribeChannelMessages({ channelName: args.channelName }, push))
+  }
+  if (hasTopicCreatedSubscription(args.transport)) {
+    unsubs.push(args.transport.subscribeTopicsCreated({ channelName: args.channelName }, push))
+  }
+  if (unsubs.length === 0) return
+  args.map.set(key, () => {
+    for (const unsub of unsubs) unsub()
   })
-  args.map.set(key, unsub)
 }
 
 /**

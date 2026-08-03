@@ -136,23 +136,16 @@ export class ActiveContext {
     return false
   }
 
-  /** Is this session in channel-wide watch mode for the channel? Mirrors
-   *  `isChannelSubscribed`: with no `location`, true if ANY subscription with
-   *  this name is watched. An unsubscribed channel is never watched.
+  /** Is this session in channel-wide watch mode for the channel at this
+   *  location? An unsubscribed channel is never watched.
    *
-   *  KAI-413 followup: `location` MUST become REQUIRED when remote watch
-   *  lands. The unqualified branch is a cross-org leak dressed up as a
-   *  convenience — today it is dead code (the sole caller passes
-   *  LOCAL_LOCATION and is pinned by a test), but the day a remote transport
-   *  can be watched it fires on the first same-named channel in a different
-   *  org. Drop the `?` and delete the fallback loop as part of that ticket. */
-  isChannelWatched(name: string, location?: ChannelLocation): boolean {
+   *  `location` is REQUIRED (KAI-413): a name-only, location-blind lookup is a
+   *  cross-org leak — a watched local "default" would answer true for a remote
+   *  "default" in a different org. With remote channels now reachable, the
+   *  location must always be named. */
+  isChannelWatched(name: string, location: ChannelLocation): boolean {
     const channel = normalizeChannelName(name)
-    if (location) return this.subscribed.get(channelKey(channel, location))?.watching === true
-    for (const entry of this.subscribed.values()) {
-      if (entry.name === channel && entry.watching) return true
-    }
-    return false
+    return this.subscribed.get(channelKey(channel, location))?.watching === true
   }
 
   getChannelSource(name: string, location?: ChannelLocation): ChannelSource | undefined {

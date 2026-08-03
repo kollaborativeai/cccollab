@@ -966,6 +966,79 @@ export class RemoteTransport implements Transport {
   }
 
   /**
+   * Subscribe to a channel's topic-CREATION feed and push a notification for
+   * each topic created after the subscription is established. This is the
+   * remote-transport counterpart to the local broker's `topic_created` event
+   * (KAI-413): without it, a session subscribed to a remote channel with no
+   * active topic is silently blind to new topics — it can only find them by
+   * polling `list_topics`.
+   *
+   * There is no bespoke server-side emitter: `topics.listByChannel` is a
+   * reactive Convex query, so `onUpdate` re-fires when a topic is inserted.
+   * The reactive query IS the feed.
+   *
+   * Parity with local: the notification goes to EVERY channel subscriber
+   * (it is NOT gated on watch mode — see broker-event-listener's
+   * `topic_created` case, which skips `isChannelWatched`), and a session's
+   * own topic creations are dropped, mirroring the local `isExactSelf` drop.
+   *
+   * Baseline priming: the first reactive batch carries the channel's whole
+   * existing topic list. Emitting those would be a notification storm of old
+   * topics on every join. The first batch seeds the baseline silently; only
+   * later insertions notify. This is true parity — local's SSE likewise only
+   * reports topics created while the session is listening.
+   */
+  subscribeTopicsCreated(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+    if (!this.enabled || this.shutdownStarted) return () => {}
+    // A DEDICATED dedup set — deliberately NOT `knownTopicIds`. That set is an
+    // ownership cache populated by list_topics / get_topic_by_id / join etc.;
+    // reusing it would let a `list_topics` call silently mark a not-yet-created
+    // topic as "seen" and suppress its real notification, reintroducing this
+    // exact bug through the back door (KAI-413).
+    const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    let primed = false
+    const ownSessionId = this.sessionId
+    // includeArchived:false — the active-topics set is exactly what "a new
+    // topic exists" means. ponytail: an archive-then-unarchive of a topic that
+    // predates this subscription could re-appear as "new"; local carries a
+    // separate topic_unarchived event for that and it is a marginal case, so
+    // it is intentionally not special-cased here.
+    const queryArgs = this.orgScopedArgs({ channel: args.channelName, includeArchived: false })
+    const rawUnsubscribe = this.client.onUpdate(
+      fn<'query'>(this.refs.topics.queries.listByChannel),
+      queryArgs,
+      (rows) => {
+        const arr = rows as Array<{ topicId: string; name: string; creatorSessionId: string; createdAt: number }>
+        // First batch: seed the baseline, emit nothing.
+        if (!primed) {
+          primed = true
+          for (const row of arr) seen.add(row.topicId)
+          return
+        }
+        for (const row of arr) {
+          if (seen.has(row.topicId)) continue
+          seen.add(row.topicId)
+          // Drop our own creations — the creator already knows. Still marked
+          // seen above so a later batch never re-considers it.
+          if (row.creatorSessionId === ownSessionId) continue
+          onEvent({
+            sender: row.creatorSessionId,
+            text: `New topic in "${args.channelName}": "${row.name}"`,
+            ts: new Date(row.createdAt).toISOString(),
+            channel: args.channelName,
+            channelName: args.channelName,
+            threadTs: undefined,
+          })
+        }
+      },
+      (err) => {
+        this.registerSubscriptionFailure('subscribeTopicsCreated', err)
+      },
+    )
+    return this.trackUnsubscribe(() => rawUnsubscribe())
+  }
+
+  /**
    * Subscribe to a channel's reactive broadcast feed. Each new message is
    * passed to `onEvent` as a `ParsedMessage` that MessageBus tags for the
    * remote source when it pushes. Symmetric to `subscribeTopicMessages`
