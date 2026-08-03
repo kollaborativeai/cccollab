@@ -1,4 +1,11 @@
-# cccollab
+# CCCollab
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/%40kollaborativeai%2Fcccollab.svg)](https://www.npmjs.com/package/@kollaborativeai/cccollab)
+[![CI](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml/badge.svg)](https://github.com/kollaborativeai/cccollab/actions/workflows/ci.yml)
+
+**CCCollab — open source, by the team behind
+[Kollaborative AI](https://kollaborativeai.com).**
 
 MCP server that lets Claude Code sessions collaborate in real time. Sessions
 communicate through threaded topics inside channels. Messages arrive as push
@@ -13,24 +20,86 @@ events via the Claude Code Channel protocol; no polling. Two modes:
 
 ## Install
 
-Prerequisites: [GitHub CLI](https://cli.github.com/) authenticated
-(`gh auth login`), [Node.js](https://nodejs.org/) 20+, and
+Prerequisites: [Node.js](https://nodejs.org/) 20+ and
 [Claude Code](https://claude.com/claude-code).
 
 ```bash
-bash <(gh api /repos/kollaborativeai/cccollab/contents/install.sh -H "Accept: application/vnd.github.raw")
+bash <(curl -fsSL https://raw.githubusercontent.com/kollaborativeai/cccollab/main/install.sh)
 ```
 
-That command:
+That script installs `cccollab` from npm, registers the `kollaborativeai`
+Claude Code marketplace, installs the plugin, and verifies the binary is
+reachable on `PATH`. It also removes the retired `cccollab@flatoutsolutions`
+plugin if you have it — see the migration notes below for the parts it can't
+do for you.
 
-- Adds the `read:packages` scope to your gh CLI token if missing (browser
-  consent, one-time).
-- Configures the `@kollaborativeai` npm registry + auth in `~/.npmrc`
-  (idempotent).
-- Installs `@kollaborativeai/cccollab` globally.
-- Registers the `flatoutsolutions` Claude Code marketplace and installs the
-  `cccollab` plugin (which auto-registers the MCP server and bundles the
-  usage skill).
+Or do it yourself. With Homebrew:
+
+```bash
+brew install kollaborativeai/cccollab/cccollab
+cccollab init
+```
+
+`brew install` taps automatically, so there is no separate `brew tap` step.
+
+Or from npm:
+
+```bash
+npm i -g @kollaborativeai/cccollab
+cccollab init
+```
+
+`cccollab init` registers the marketplace, installs the plugin (updating it if
+it is already there), retires an old `cccollab@flatoutsolutions` install if it
+finds one, and offers to add a `ccc` shell alias for the launch flag. It is
+idempotent — re-run it any time. Pass `--yes` to skip the prompt (for scripts
+and CI) or `--no-alias` to leave your shell config alone.
+
+### Checking your install: `cccollab doctor`
+
+cccollab is two artefacts that upgrade independently — this binary, and the
+Claude Code plugin whose skill tells the model how to call its tools. They are
+released together and should always match. When they don't, nothing says so:
+there is no version exchange in the MCP handshake, and a stale skill fails by
+describing tools whose shape has changed rather than by erroring.
+
+The server compares the two at startup, warns on stderr, and repeats the
+warning on `introduce` so the model sees it too. To inspect it yourself:
+
+```bash
+cccollab doctor
+```
+
+It reports the binary version, the skill version the current session loaded,
+every `cccollab` on your `PATH`, and every cached plugin copy on the machine —
+Claude Code keeps one directory per version it has ever installed and removes
+none of them, so these accumulate, and each carries its own `SKILL.md`.
+
+It also names two things that are otherwise invisible. **A second `cccollab`
+earlier on `PATH`** silently wins for every session Claude Code starts —
+installing with both Homebrew and a Node version manager is the ordinary way to
+end up with two. And **a running server whose binary has since been
+uninstalled**, which keeps serving from the deleted file because the process
+holds it open; the version answering those sessions' tool calls is whatever it
+was at launch, and restarting them is the only fix.
+
+Copies that nothing is using can be removed:
+
+```bash
+cccollab doctor --prune
+```
+
+`--prune` never touches the installed version, and never touches a version a
+running session is loaded from — those clear themselves when the session
+restarts. It lists what it will delete and asks first; `--yes` skips the
+prompt.
+
+> **Node version managers.** Claude Code launches the MCP server as the bare
+> command `cccollab`. `npm i -g` installs into the _active_ Node version's
+> prefix, so under volta, nvm, fnm or asdf a later version switch leaves the
+> binary installed but off `PATH` — and Claude Code reports a dead MCP server
+> rather than anything diagnosable. Install from the Node version you launch
+> Claude Code with. The installer checks this for you and fails loudly.
 
 After install, Claude Code has cccollab available immediately in local mode.
 No authentication is required for local mode. The hosted backend at
@@ -46,15 +115,39 @@ The MCP server pushes messages from other sessions to Claude via the Claude
 Code Channel protocol. That protocol is opt-in, so launch Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions
+claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai
 ```
 
-Without this flag the tools still work, but inbound messages won't appear as
-`<channel>` tags in your session. Consider aliasing:
+Without this flag the tools still work, but no messages ever arrive — they
+won't appear as `<channel>` tags in your session. This is not a temporary
+preview gate: Claude Code only pushes to plugins on Anthropic's channel
+allowlist, and cccollab ships from its own marketplace. Alias it once:
 
 ```bash
-alias ccc='claude --dangerously-load-development-channels plugin:cccollab@flatoutsolutions'
+alias ccc='claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai'
 ```
+
+### Migrating from `cccollab@flatoutsolutions`
+
+cccollab used to ship as `cccollab@flatoutsolutions`. It now ships as
+`cccollab@kollaborativeai`. Re-running the install command above uninstalls
+the old plugin and installs the new one, but four things point at the
+retired setup and have to be updated by hand:
+
+1. **`~/.npmrc`.** Delete any
+   `@kollaborativeai:registry=https://npm.pkg.github.com` line. Older
+   installers wrote it when the package lived on GitHub Packages, and it
+   silently overrides the public registry — so `npm i -g` would reinstall the
+   old private build instead of the published one. The installer removes it
+   for you.
+2. **Shell aliases.** Swap `plugin:cccollab@flatoutsolutions` for
+   `plugin:cccollab@kollaborativeai` wherever you aliased it.
+3. **`~/.claude/settings.json`.** Rename the `enabledPlugins` key
+   `"cccollab@flatoutsolutions"` to `"cccollab@kollaborativeai"`.
+4. **Per-project `.claude/settings.json`.** Same key, same rename.
+
+The old marketplace itself stays registered - it serves other plugins. Only
+the `cccollab` plugin moves.
 
 ## Repo layout
 
@@ -134,7 +227,7 @@ Add a location to `~/.cccollab/config.json`:
 ```json
 {
   "locations": {
-    "flatout": {
+    "acme": {
       "url": "https://<your-deployment>.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli"
@@ -143,9 +236,9 @@ Add a location to `~/.cccollab/config.json`:
 }
 ```
 
-Then call `authenticate({ location: "flatout" })` in Claude Code. A browser
+Then call `authenticate({ location: "acme" })` in Claude Code. A browser
 opens for Clerk sign-in (PKCE). After sign-in the tokens are persisted
-back to the same file under `locations.flatout` and the remote transport
+back to the same file under `locations.acme` and the remote transport
 hot-attaches to the running session - no restart needed.
 
 `authType: "clerk"` is also accepted (and is what `authenticate` writes
@@ -158,7 +251,7 @@ Channels configured under a remote location auto-subscribe on startup:
 ```json
 {
   "locations": {
-    "flatout": {
+    "acme": {
       "url": "https://<your-deployment>.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
@@ -287,7 +380,7 @@ claude plugin install cccollab@cccollab-test
 
 The repo ships a `test-marketplace/` that references `plugin/` via symlink,
 plus a `test/` project with `.claude/settings.json` that disables
-`@flatoutsolutions` and enables the local build. Run `cd test` and launch
+`cccollab@kollaborativeai` and enables the local build. Run `cd test` and launch
 with the local channel target:
 
 ```bash

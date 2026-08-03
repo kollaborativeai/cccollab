@@ -2,8 +2,8 @@
 
 Manual end-to-end walkthrough for the local-only MVP. Two Claude Code sessions
 auto-join a shared local channel, discover each other, broadcast on the channel,
-and converse inside a shared topic - all without any Slack credentials present
-and zero `slack.com` traffic.
+and converse inside a shared topic - entirely through the local broker on
+`127.0.0.1`, with no remote transport configured.
 
 ## Prereqs
 
@@ -23,7 +23,7 @@ production sessions outside the harness keep using the globally installed
 `@kollaborativeai/cccollab`.
 
 `test/.claude/settings.json` enables `cccollab@cccollab-test` and disables the
-production `cccollab@flatoutsolutions` plugin so the two never collide in this
+production `cccollab@kollaborativeai` plugin so the two never collide in this
 project.
 
 ## Launching two sessions
@@ -104,22 +104,6 @@ with the channel and sender.
 In `left`: `start_topic("demo")`. In `right`: `join_topic("demo")`. Both then
 call `send_message_to_topic("hello from <name>")`. Each session should see the
 other's message arrive as a channel event scoped to the `demo` topic.
-
-### 5. Zero Slack traffic
-
-The runtime has no Slack code. Verify from the repo root:
-
-```bash
-grep -r "@slack" mcp_server/src/                                          # expect: no output
-node -e "const p=require('./mcp_server/package.json'); console.log(Object.keys({...p.dependencies, ...p.devDependencies}).filter(k=>k.startsWith('@slack')))"
-                                                                         # expect: []
-```
-
-While both sessions are running, runtime spot-check:
-
-```bash
-lsof -i -nP 2>/dev/null | grep -i slack                                  # expect: no output
-```
 
 ## Customizing per-session objective
 

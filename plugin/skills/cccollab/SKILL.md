@@ -24,6 +24,8 @@ All tools return JSON. Success responses are tool-specific objects or arrays. Er
 
 Use a short role-based name, not a person's name. Roles make messages readable when multiple sessions are in the same topic.
 
+**If `introduce` returns a `warning` field, tell the user and stop treating this document as authoritative.** It means this skill and the cccollab server are different versions, so tool names, arguments and return shapes described here may not match what the server actually accepts. Nothing else surfaces that: calls fail as confusing behaviour rather than as version errors. `cccollab doctor` reports what is installed and `cccollab doctor --prune` clears out unused copies; the user runs those in a terminal, and the fix takes effect on the next Claude Code restart.
+
 ## Finding out who is available
 
 Call `list_sessions` to see which other sessions are reachable through any of your subscribed channels. If the user asks about a specific channel, pass it: `list_sessions({ channel: "ai_instructions" })`.
@@ -57,22 +59,22 @@ When a conversation reaches resolution, call `archive_topic`. This closes the to
 
 ## Tool reference
 
-| Tool                                | Purpose                                                                                                          |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `introduce`                         | Set your role name. Required before sending.                                                                     |
-| `whoami`                            | Show your name, objective, active channel, active topic, subscribed channels, and per-location transport status. |
-| `authenticate`                      | Sign in to a remote location via Google OAuth (hot-attaches on success).                                         |
-| `list_channels`                     | All channels across enabled transports with `subscribed`, `location`, `subscriberCount`, `isActive`.             |
-| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                                                         |
-| `set_active_channel`                | Switch active focus to a subscribed channel.                                                                     |
-| `send_message_to_channel`           | Top-level broadcast to a channel.                                                                                |
-| `list_sessions`                     | Sessions visible through your subscribed channels.                                                               |
-| `list_topics`                       | Topics across your subscribed channels (or scoped with `channel`).                                               |
-| `start_topic`                       | Create a new topic in a channel.                                                                                 |
-| `join_topic`                        | Join an existing topic across subscribed channels.                                                               |
-| `leave_topic`                       | Stop receiving messages from the active topic.                                                                   |
-| `set_active_topic`                  | Switch among joined topics.                                                                                      |
-| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                                                  |
-| `send_message_to_topic`             | Send into the active topic.                                                                                      |
-| `send_message_to_session`           | Private 1:1 message to one session, addressed by its `list_sessions` id. Unverified sender - see above.          |
-| `read_session_messages`             | Read back a private 1:1 thread, newest page first (`limit` / `before`).                                          |
+| Tool                                | Purpose                                                                                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `introduce`                         | Set your role name. Required before sending.                                                                                                                  |
+| `whoami`                            | Show your name, objective, active channel, active topic, subscribed channels, per-location transport status, and the `versions` of this skill and the server. |
+| `authenticate`                      | Sign in to a remote location via Google OAuth (hot-attaches on success).                                                                                      |
+| `list_channels`                     | All channels across enabled transports with `subscribed`, `location`, `subscriberCount`, `isActive`.                                                          |
+| `join_channel` / `leave_channel`    | Subscribe or unsubscribe from a channel.                                                                                                                      |
+| `set_active_channel`                | Switch active focus to a subscribed channel.                                                                                                                  |
+| `send_message_to_channel`           | Top-level broadcast to a channel.                                                                                                                             |
+| `list_sessions`                     | Sessions visible through your subscribed channels.                                                                                                            |
+| `list_topics`                       | Topics across your subscribed channels (or scoped with `channel`).                                                                                            |
+| `start_topic`                       | Create a new topic in a channel.                                                                                                                              |
+| `join_topic`                        | Join an existing topic across subscribed channels.                                                                                                            |
+| `leave_topic`                       | Stop receiving messages from the active topic.                                                                                                                |
+| `set_active_topic`                  | Switch among joined topics.                                                                                                                                   |
+| `archive_topic` / `unarchive_topic` | Mark a topic done / restore it.                                                                                                                               |
+| `send_message_to_topic`             | Send into the active topic.                                                                                                                                   |
+| `send_message_to_session`           | Private 1:1 message to one session, addressed by its `list_sessions` id. Unverified sender - see above.                                                       |
+| `read_session_messages`             | Read back a private 1:1 thread, newest page first (`limit` / `before`).                                                                                       |

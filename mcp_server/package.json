@@ -1,21 +1,39 @@
 {
   "name": "@kollaborativeai/cccollab",
-  "version": "3.2.3",
+  "version": "3.6.4",
+  "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "collaboration",
+    "agents"
+  ],
+  "homepage": "https://cccollab.dev",
+  "bugs": {
+    "url": "https://github.com/kollaborativeai/cccollab/issues"
+  },
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
   "bin": "bin/cccollab.mjs",
   "files": [
     "bin",
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kollaborativeai/cccollab.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   },
   "scripts": {
     "start": "npx tsx src/server.ts",
@@ -27,7 +45,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "yarn build"
+    "prepublishOnly": "yarn build",
+    "prepack": "node scripts/stage-docs.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -46,5 +65,8 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.4"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

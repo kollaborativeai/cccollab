@@ -23,12 +23,12 @@ describe('CccollabConfigSchema', () => {
   it('accepts a non-local location with url + auth fields', () => {
     const parsed = CccollabConfigSchema.parse({
       locations: {
-        flatout: {
-          url: 'https://wonderful-narwhal-409.convex.cloud',
+        acme: {
+          url: 'https://example-deployment-123.convex.cloud',
           active: true,
           accessToken: 'jwt-abc',
           refreshToken: 'refresh-xyz',
-          userEmail: 'stefan@flatout.solutions',
+          userEmail: 'stefan@cccollab.dev',
           userId: 'abc123',
           updatedAt: 1_700_000_000_000,
           channels: {
@@ -40,8 +40,8 @@ describe('CccollabConfigSchema', () => {
         },
       },
     })
-    expect(parsed.locations?.flatout?.url).toBe('https://wonderful-narwhal-409.convex.cloud')
-    expect(parsed.locations?.flatout?.channels?.['cccollab-dev']?.topics?.['ccc-3-testing']?.active).toBe(true)
+    expect(parsed.locations?.acme?.url).toBe('https://example-deployment-123.convex.cloud')
+    expect(parsed.locations?.acme?.channels?.['cccollab-dev']?.topics?.['ccc-3-testing']?.active).toBe(true)
   })
 
   it('accepts top-level name and objective', () => {
@@ -69,7 +69,7 @@ describe('CccollabConfigSchema', () => {
   it('rejects location.url that is not a string', () => {
     expect(() =>
       CccollabConfigSchema.parse({
-        locations: { flatout: { url: 123 } },
+        locations: { acme: { url: 123 } },
       }),
     ).toThrow()
   })
