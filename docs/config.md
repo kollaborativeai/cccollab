@@ -143,8 +143,8 @@ and cascades upward:
 - Having two or more actives at the same level is an error; cccollab
   names the offenders at resolve time.
 
-Example: a config that sets only `locations.flatout.channels.dev.topics.planning.active = true`
-resolves to an active location of `flatout`, an active channel of `dev`,
+Example: a config that sets only `locations.acme.channels.dev.topics.planning.active = true`
+resolves to an active location of `acme`, an active channel of `dev`,
 and an active topic of `planning`.
 
 ## Example: FS-internal user with one local + one remote
@@ -163,8 +163,8 @@ and an active topic of `planning`.
         }
       }
     },
-    "flatout": {
-      "url": "https://wonderful-narwhal-409.convex.cloud",
+    "acme": {
+      "url": "https://example-deployment-123.convex.cloud",
       "clerkIssuer": "https://<your-instance>.clerk.accounts.dev",
       "clerkClientId": "cccollab-cli",
       "channels": {
@@ -179,9 +179,9 @@ and an active topic of `planning`.
 }
 ```
 
-After `authenticate({ location: "flatout" })`, the same file will also
+After `authenticate({ location: "acme" })`, the same file will also
 hold `accessToken`, `refreshToken`, `accessTokenExpiresAt`, `userEmail`,
-`userId`, and `updatedAt` under `locations.flatout`. These fields are
+`userId`, and `updatedAt` under `locations.acme`. These fields are
 written by the tool; don't edit them by hand.
 
 ## Example: project-level `.cccollab.json`

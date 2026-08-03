@@ -16,8 +16,12 @@ import {
 } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
+import { driftWarning, type VersionState } from '../plugin-version.js'
 
 export interface IdentityToolDeps {
+  /** Result of the plugin/binary version handshake, computed once at startup.
+   *  Optional so unit tests that do not exercise it can omit it. */
+  versionState?: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -301,11 +305,19 @@ export async function handleIdentityTool(
         if (!failed.includes(location)) failed.push(location)
       }
 
+      // Drift is reported on `introduce` because it is the one tool every
+      // session must call before any other, which makes it the only reliable
+      // place to tell the model that the instructions it is following may not
+      // describe this server. Attached to the result rather than logged: the
+      // model reads results, and stderr goes to a file nobody opens mid-session.
+      const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+
       return JSON.stringify({
         name: displayName,
         ...(objective ? { objective } : {}),
         ...(failed.length > 0 ? { degraded: failed } : {}),
         ...(droppedTopics.length > 0 ? { droppedTopics } : {}),
+        ...(versionWarning ? { warning: versionWarning } : {}),
       })
     }
     case 'whoami': {
@@ -346,6 +358,15 @@ export async function handleIdentityTool(
           : {}),
         subscribedChannels,
         locations: locationStates,
+        ...(deps.versionState
+          ? {
+              versions: {
+                server: deps.versionState.serverVersion,
+                ...(deps.versionState.pluginVersion ? { skill: deps.versionState.pluginVersion } : {}),
+                status: deps.versionState.status,
+              },
+            }
+          : {}),
       })
     }
     case 'authenticate': {
