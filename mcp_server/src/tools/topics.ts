@@ -69,6 +69,10 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
+  // KAI-446: read-history is subscription-gated on the reading session, so it
+  // needs a name like every other topic tool. Without one the tool used to
+  // reach the broker's ungated read route anonymously.
+  'read_topic_messages',
 ])
 
 export async function handleTopicTool(
@@ -195,13 +199,31 @@ export async function handleTopicTool(
       // online before asking which transport owns it — the user is
       // explicitly reading a (possibly remote) topic.
       await deps.ensureAttached?.()
+      // Joined topics are already subscription-checked (`joinTopic` refuses an
+      // unsubscribed channel, `leaveChannel` drops that channel's topics).
+      // Anything else resolves through the subscription check that
+      // `send_message_to_topic` and archive-by-name use, so the read is refused
+      // HERE rather than forwarded for the broker to 403 (KAI-446) — and on the
+      // remote path, where the tool used to forward unconditionally, this is the
+      // only gate this process applies.
+      let location = deps.context.getJoinedTopicLocation(topicId)
+      if (location === undefined) {
+        const resolved = await resolveTopicIdInSubscribedChannels(deps, topicId)
+        if ('error' in resolved) return JSON.stringify(resolved)
+        location = resolved.location
+      }
       let transport: Transport
       try {
-        transport = resolveTopicTransport(deps, topicId)
+        transport = deps.router.get(location)
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
-      const page = await transport.readTopicMessages({ topicId, limit, before })
+      const page = await transport.readTopicMessages({
+        sessionName: deps.session.displayName,
+        topicId,
+        limit,
+        before,
+      })
       return JSON.stringify(page)
     }
 
@@ -231,7 +253,7 @@ async function handleListTopics(
     }
     for (const transport of eligible) {
       try {
-        const rows = await transport.listTopics({ channel, includeArchived })
+        const rows = await transport.listTopics({ sessionName: deps.session.displayName, channel, includeArchived })
         for (const r of rows) located.push({ ...r, location: transport.source })
       } catch {
         // Transport unreachable: skip.

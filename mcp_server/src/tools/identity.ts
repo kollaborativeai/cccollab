@@ -66,6 +66,13 @@ export interface IdentityToolDeps {
    *  reads this separate registry to still surface the location as
    *  disabled + degraded. Optional so legacy unit tests keep compiling. */
   diagnostics?: AttachDiagnostics
+  /** Called after `introduce` has registered a name, so the broker's SSE
+   *  stream can be re-opened under it. The broker scopes that stream to the
+   *  connecting session's subscriptions (KAI-446) and the listener connects
+   *  before `introduce` may have run, so without this a session that names
+   *  itself at runtime stays anonymous on the broker and receives nothing.
+   *  Optional so legacy unit tests keep compiling. */
+  onIdentityChanged?: () => void
 }
 
 export async function handleIdentityTool(
@@ -94,6 +101,12 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
+
+      // Re-open the broker's event stream under the new name before the
+      // transports register it. The stream is subscription-scoped (KAI-446),
+      // so a session that was anonymous when the listener connected would
+      // otherwise never receive another channel-tagged event.
+      deps.onIdentityChanged?.()
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Each

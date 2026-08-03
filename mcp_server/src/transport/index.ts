@@ -133,7 +133,9 @@ export interface Transport {
 
   // ─── Topics ───────────────────────────────────────────────────────────
   createTopic(args: { sessionName: string; channel: string; topic: string }): Promise<TransportTopic>
-  listTopics(args: { sessionName?: string; channel?: string; includeArchived?: boolean }): Promise<TransportTopic[]>
+  /** `sessionName` identifies the listing session; the local broker scopes the
+   *  listing to that session's subscribed channels (KAI-446). */
+  listTopics(args: { sessionName: string; channel?: string; includeArchived?: boolean }): Promise<TransportTopic[]>
   getTopicById(args: { sessionName: string; topicId: string }): Promise<TransportTopic | null>
   joinTopic(args: {
     sessionName: string
@@ -149,7 +151,21 @@ export interface Transport {
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
-  readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage>
+  /**
+   * `sessionName` identifies the reading session, as every topic method that
+   * touches a specific topic does (KAI-446). The local broker gates
+   * read-history on the session's channel subscription; the remote backend
+   * gates on its own `sessionId` and ignores this. Without it, read-history was
+   * the one topic route with no caller identity — and so the one that could not
+   * be gated. (`readChannelMessages` below takes none: it is channel-scoped and
+   * unimplemented on the local transport.)
+   */
+  readTopicMessages(args: {
+    sessionName: string
+    topicId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage>
 
   // ─── Lifecycle ────────────────────────────────────────────────────────
   /** Best-effort teardown on shutdown. Must not throw. */

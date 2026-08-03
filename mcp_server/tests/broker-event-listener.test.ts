@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import http from 'node:http'
 import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
@@ -245,5 +246,158 @@ describe('BrokerEventListener (channel-aware)', () => {
     listener.processLocalEvent(event)
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * KAI-446: the broker now only streams a channel-tagged event to a connection
+ * whose session is subscribed to that channel, so the listener has to say who
+ * it is. It connects before `introduce` has run, so it must also re-open once
+ * the session acquires a name — otherwise a session that introduces itself
+ * after startup stays anonymous on the broker and silently receives nothing.
+ */
+describe('BrokerEventListener: identifying the stream (KAI-446)', () => {
+  /** Records the paths the listener requests, and holds every connection open
+   *  so a reconnect is observable as a second request rather than a retry. */
+  async function stubBroker(): Promise<{
+    url: string
+    paths: string[]
+    liveConnections: () => number
+    close: () => Promise<void>
+  }> {
+    const paths: string[] = []
+    const open = new Set<import('node:http').ServerResponse>()
+    const server = http.createServer((req, res) => {
+      paths.push(req.url ?? '')
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.flushHeaders()
+      open.add(res)
+      req.on('close', () => open.delete(res))
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const { port } = server.address() as import('node:net').AddressInfo
+    return {
+      url: `http://127.0.0.1:${port}`,
+      paths,
+      liveConnections: () => open.size,
+      close: () =>
+        new Promise<void>((r) => {
+          for (const res of open) res.end()
+          server.close(() => r())
+        }),
+    }
+  }
+
+  function build(broker: { url: string }, name?: string) {
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    if (name) session.setName(name)
+    const context = new ActiveContext()
+    const listener = new BrokerEventListener({
+      brokerUrl: broker.url,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context,
+    })
+    return { listener, session }
+  }
+
+  it('names the session in the connect URL so the broker can scope the stream', async () => {
+    const broker = await stubBroker()
+    const { listener } = build(broker, 'architect')
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      expect(broker.paths[0]).toBe('/events?sessionId=architect')
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  })
+
+  it('percent-encodes a session name that is not URL-safe', async () => {
+    const broker = await stubBroker()
+    const { listener } = build(broker, 'front end & api')
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      expect(broker.paths[0]).toBe('/events?sessionId=front%20end%20%26%20api')
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  })
+
+  it('connects anonymously while the session has no name', async () => {
+    const broker = await stubBroker()
+    const { listener } = build(broker)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      expect(broker.paths[0]).toBe('/events')
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  })
+
+  it('re-opens the stream under the new name once the session introduces itself', async () => {
+    const broker = await stubBroker()
+    const { listener, session } = build(broker)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      expect(broker.paths[0]).toBe('/events')
+
+      session.setName('architect')
+      listener.reconnectForIdentity()
+
+      await vi.waitFor(() => expect(broker.paths.length).toBe(2))
+      expect(broker.paths[1]).toBe('/events?sessionId=architect')
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  })
+
+  /**
+   * Tearing down the old request fires the same 'end'/'error' path a dropped
+   * broker connection does, which schedules a retry. Without a guard that retry
+   * lands ~2s later on top of the identified stream and the session ends up
+   * with two live connections, double-delivering every event.
+   */
+  it('does not leave the superseded connection reconnecting in parallel', async () => {
+    const broker = await stubBroker()
+    const { listener, session } = build(broker)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+
+      session.setName('architect')
+      listener.reconnectForIdentity()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(2))
+
+      // Past the reconnect delay: the orphaned request must not have retried.
+      await new Promise<void>((r) => setTimeout(r, 2600))
+      expect(broker.paths).toEqual(['/events', '/events?sessionId=architect'])
+      expect(broker.liveConnections()).toBe(1)
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  }, 10_000)
+
+  it('stays put when reconnectForIdentity is called with no name yet', async () => {
+    const broker = await stubBroker()
+    const { listener } = build(broker)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      listener.reconnectForIdentity()
+      await new Promise<void>((r) => setTimeout(r, 150))
+      expect(broker.paths).toEqual(['/events'])
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
   })
 })

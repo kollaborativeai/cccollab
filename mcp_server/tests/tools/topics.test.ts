@@ -33,6 +33,16 @@ describe('Topic Tools', () => {
       expect(result.error).toContain('No name set')
     })
 
+    // KAI-446: read-history is subscription-gated on the reading session, so
+    // the tool must carry a name rather than reaching the broker anonymously.
+    it('returns error when session has no name and tries to read_topic_messages', async () => {
+      const deps = createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, depsNoName))
+      expect(result.error).toContain('No name set')
+    })
+
     it('allows list_topics without name', async () => {
       const deps = createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
@@ -744,6 +754,105 @@ describe('Topic Tools', () => {
       const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: 'uuid-hist' }, stubDeps))
       expect(result.messages[0].text).toBe('topic msg')
       expect(result.hasMore).toBe(false)
+      // KAI-446: the reading session's name must reach the transport — it is
+      // what the local broker gates read-history on. Without it the call is
+      // anonymous and the broker rejects it (400).
+      expect(stubTransport.readTopicMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionName: 'architect', topicId: 'uuid-hist' }),
+      )
+    })
+
+    /**
+     * KAI-446's Expected Result asks for `read_topic_messages` to gate "at the
+     * tool layer before it reaches the broker". Carrying a name is not that: a
+     * named session with no subscriptions passes a name check and the call
+     * still goes out. These pin the subscription decision in the tool, which is
+     * what the REMOTE path depends on — there the tool used to forward
+     * unconditionally and the backend's own check was the only barrier.
+     */
+    describe('read_topic_messages gates at the tool layer (KAI-446)', () => {
+      const FOREIGN_TOPIC = '11111111-1111-4111-8111-111111111111'
+
+      /** A transport that owns `FOREIGN_TOPIC` and reports it in `channel`. */
+      function stubTransportIn(channel: string): {
+        transport: Record<string, unknown>
+        readTopicMessages: ReturnType<typeof vi.fn>
+      } {
+        const readTopicMessages = vi.fn().mockResolvedValue({ messages: [], hasMore: false })
+        return {
+          readTopicMessages,
+          transport: {
+            source: 'local',
+            enabled: true,
+            hasTopic: (id: string) => id === FOREIGN_TOPIC,
+            introduce: async () => {},
+            joinChannel: async () => ({ subscriberCount: 1 }),
+            leaveChannel: async () => {},
+            listChannels: async () => [],
+            broadcast: async () => {},
+            createTopic: async () => {
+              throw new Error('not implemented')
+            },
+            listTopics: async () => [],
+            getTopicById: async () => ({
+              id: FOREIGN_TOPIC,
+              topic: 'Their topic',
+              channel,
+              creator: 'them',
+              state: 'active',
+              createdAt: new Date(0).toISOString(),
+            }),
+            joinTopic: async () => ({ history: [] }),
+            leaveTopic: async () => {},
+            archiveTopic: async () => {},
+            unarchiveTopic: async () => {},
+            sendTopicMessage: async () => {},
+            listSessions: async () => [],
+            deregisterSession: async () => {},
+            readChannelMessages: async () => ({ messages: [], hasMore: false }),
+            readTopicMessages,
+          },
+        }
+      }
+
+      function depsSubscribedTo(channel: string, transport: Record<string, unknown>): TopicToolDeps {
+        const context = new ActiveContext()
+        context.joinChannel(channel, 'fallback', 'local')
+        const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+        session.setName('architect')
+        return {
+          session,
+          context,
+          router: new TransportRouter([transport as unknown as import('../../src/transport/index.js').Transport]),
+        }
+      }
+
+      it('refuses a topic in a channel the session has not joined, without calling the transport', async () => {
+        const { transport, readTopicMessages } = stubTransportIn('theirs')
+        const deps = depsSubscribedTo('mine', transport)
+
+        const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: FOREIGN_TOPIC }, deps))
+
+        expect(result.error).toBeDefined()
+        expect(result.messages).toBeUndefined()
+        // The point of "at the tool layer": the HISTORY read never leaves the
+        // process. Resolving the topic still may — `getTopicById` is a backend
+        // query on the remote transport — so the claim is about the message
+        // text, not about zero outbound calls.
+        expect(readTopicMessages).not.toHaveBeenCalled()
+      })
+
+      it('still reads a subscribed channel topic the session has not joined (guard does not over-block)', async () => {
+        const { transport, readTopicMessages } = stubTransportIn('mine')
+        const deps = depsSubscribedTo('mine', transport)
+
+        const result = JSON.parse(await handleTopicTool('read_topic_messages', { topic: FOREIGN_TOPIC }, deps))
+
+        expect(result.error).toBeUndefined()
+        expect(readTopicMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionName: 'architect', topicId: FOREIGN_TOPIC }),
+        )
+      })
     })
   })
 })

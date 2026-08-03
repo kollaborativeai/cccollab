@@ -82,14 +82,16 @@ export class LocalTransport implements Transport {
   }
 
   async listTopics(args: {
-    sessionName?: string
+    sessionName: string
     channel?: string
     includeArchived?: boolean
   }): Promise<TransportTopic[]> {
     const params = new URLSearchParams()
     if (args.includeArchived) params.set('include_archived', 'true')
+    // Both, always. Sending `channel` INSTEAD of `sessionId` is what left the
+    // broker's listing route with nothing to gate on (KAI-446).
     if (args.channel) params.set('channel', args.channel)
-    else if (args.sessionName) params.set('sessionId', args.sessionName)
+    params.set('sessionId', args.sessionName)
     const qs = params.toString() ? `?${params.toString()}` : ''
     const data = await this.brokerGet<{ topics: TransportTopic[] }>(`/topics${qs}`)
     return data.topics
@@ -164,8 +166,14 @@ export class LocalTransport implements Transport {
 
   // Topic history lives in the broker's memory; page it through the broker's
   // read-history endpoint and map it onto the shared history-page contract.
-  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+  async readTopicMessages(args: {
+    sessionName: string
+    topicId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
     const params = new URLSearchParams()
+    params.set('sessionId', args.sessionName)
     if (args.limit !== undefined) params.set('limit', String(args.limit))
     if (args.before !== undefined) params.set('before', String(args.before))
     const qs = params.toString() ? `?${params.toString()}` : ''

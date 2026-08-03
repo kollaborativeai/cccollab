@@ -65,10 +65,31 @@ export class BrokerEventListener {
     }
   }
 
+  /**
+   * Re-open the stream so it carries the session's name.
+   *
+   * The listener starts before `introduce` may have run, and the broker only
+   * streams a channel-tagged event to a connection whose session is subscribed
+   * to that channel (KAI-446). An anonymous connection therefore receives
+   * nothing channel-tagged, so a session that names itself later has to
+   * re-identify or it goes quiet for the rest of its life. No-op until there
+   * is a name to offer.
+   */
+  reconnectForIdentity(): void {
+    if (this.stopped || !this.session.hasName()) return
+    const superseded = this.currentRequest
+    this.currentRequest = null
+    if (superseded) superseded.destroy()
+    this.connect()
+  }
+
   private connect(): void {
     if (this.stopped) return
 
-    const url = `${this.brokerUrl}/events`
+    // Identify the stream: without a name the broker treats this connection as
+    // anonymous and withholds every channel-tagged event (KAI-446).
+    const qs = this.session.hasName() ? `?sessionId=${encodeURIComponent(this.session.displayName)}` : ''
+    const url = `${this.brokerUrl}/events${qs}`
     this.log(`Connecting to broker at ${url}`)
 
     const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
@@ -97,27 +118,42 @@ export class BrokerEventListener {
 
       res.on('end', () => {
         this.log('SSE connection ended')
-        this.scheduleReconnect()
+        this.scheduleReconnect(req)
       })
 
       res.on('error', (err) => {
         this.log(`SSE response error: ${err.message}`)
-        this.scheduleReconnect()
+        this.scheduleReconnect(req)
       })
     })
 
     req.on('error', (err) => {
       this.log(`SSE request error: ${err.message}`)
-      this.scheduleReconnect()
+      this.scheduleReconnect(req)
     })
 
     this.currentRequest = req
   }
 
-  private scheduleReconnect(): void {
+  /**
+   * Retry, but only on behalf of the connection that is still the live one.
+   *
+   * `reconnectForIdentity` tears its predecessor down deliberately, and that
+   * teardown fires the same end/error handlers a dropped broker fires. Without
+   * this check the orphan would come back ~2s later alongside the identified
+   * stream and every event would arrive twice.
+   */
+  private scheduleReconnect(from: http.ClientRequest): void {
     if (this.stopped) return
+    if (this.currentRequest !== from) {
+      this.log('Ignoring reconnect for a superseded connection')
+      return
+    }
     this.log(`Reconnecting in ${RECONNECT_DELAY_MS}ms...`)
-    setTimeout(() => this.connect(), RECONNECT_DELAY_MS)
+    setTimeout(() => {
+      if (this.currentRequest !== from) return
+      this.connect()
+    }, RECONNECT_DELAY_MS)
   }
 
   processLocalEvent(event: BrokerLocalEvent): void {

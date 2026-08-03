@@ -84,6 +84,36 @@ describe('LocalTransport: message history reads', () => {
     }
   })
 
+  /**
+   * KAI-446: the broker scopes `GET /topics` to the caller's subscribed
+   * channels, which only works if the transport actually sends who is asking.
+   * It used to send `channel` INSTEAD of `sessionId` — never both — so the
+   * channel-filtered listing arrived with no identity to scope by. These pin
+   * the wire format, not just the tool's intent.
+   */
+  describe('listTopics', () => {
+    it('lists only topics in the channels the calling session subscribed to', async () => {
+      await seedTopic(port, 'lt-list-owner', 'lt-list-mine', 'lt-list-visible', ['x'])
+      await seedTopic(port, 'lt-list-other', 'lt-list-theirs', 'lt-list-hidden', ['y'])
+      const transport = new LocalTransport(port)
+
+      const rows = await transport.listTopics({ sessionName: 'lt-list-owner' })
+
+      expect(rows.map((t) => t.topic)).toEqual(['lt-list-visible'])
+    })
+
+    it('refuses a channel-filtered listing for a channel the session never joined', async () => {
+      await seedTopic(port, 'lt-list-victim', 'lt-list-secret', 'lt-list-classified', ['z'])
+      await post(port, '/sessions', { name: 'lt-list-outsider' })
+      await post(port, '/channels/join', { sessionId: 'lt-list-outsider', channel: 'lt-list-decoy' })
+      const transport = new LocalTransport(port)
+
+      await expect(
+        transport.listTopics({ sessionName: 'lt-list-outsider', channel: 'lt-list-secret' }),
+      ).rejects.toThrow(/403/)
+    })
+  })
+
   describe('readChannelMessages', () => {
     it('throws "not supported" instead of returning a silent empty page', async () => {
       const transport = new LocalTransport(port)
@@ -97,7 +127,7 @@ describe('LocalTransport: message history reads', () => {
     it('returns the broker topic history mapped onto the history-page contract', async () => {
       const id = await seedTopic(port, 'lt-topic-a', 'lt-ch-a', 'lt-topic-read', ['first', 'second'])
       const transport = new LocalTransport(port)
-      const page = await transport.readTopicMessages({ topicId: id })
+      const page = await transport.readTopicMessages({ sessionName: 'lt-topic-a', topicId: id })
 
       expect(page.messages.map((m) => m.text)).toEqual(['first', 'second'])
       // Local broker is single-tenant: sender name doubles as the session name.
@@ -111,12 +141,17 @@ describe('LocalTransport: message history reads', () => {
       const id = await seedTopic(port, 'lt-topic-b', 'lt-ch-b', 'lt-topic-page', ['p1', 'p2', 'p3'], 2)
       const transport = new LocalTransport(port)
 
-      const first = await transport.readTopicMessages({ topicId: id, limit: 2 })
+      const first = await transport.readTopicMessages({ sessionName: 'lt-topic-b', topicId: id, limit: 2 })
       expect(first.messages.map((m) => m.text)).toEqual(['p2', 'p3'])
       expect(first.hasMore).toBe(true)
       expect(first.oldestTs).toBe(first.messages[0]!.ts)
 
-      const second = await transport.readTopicMessages({ topicId: id, limit: 2, before: first.oldestTs })
+      const second = await transport.readTopicMessages({
+        sessionName: 'lt-topic-b',
+        topicId: id,
+        limit: 2,
+        before: first.oldestTs,
+      })
       expect(second.messages.map((m) => m.text)).toEqual(['p1'])
       expect(second.hasMore).toBe(false)
     })
