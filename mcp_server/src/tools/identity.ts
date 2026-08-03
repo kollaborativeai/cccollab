@@ -96,15 +96,22 @@ export async function handleIdentityTool(
       deps.session.setObjective(objective)
 
       // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
+      // it can attribute messages and list us in `list_sessions`. A
+      // failure on one transport must not prevent the others from
+      // registering, so we keep fanning out — but the failure is NOT
+      // swallowed: it is collected and reported back to the caller in
+      // the tool response (KAI-417). Otherwise e.g. an invalid
+      // organization id looks like a success while the org bind never
+      // happened.
+      const errors: Array<{ location: string; message: string }> = []
       for (const transport of deps.router.enabled()) {
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+        } catch (err) {
+          errors.push({
+            location: transport.source,
+            message: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
@@ -129,6 +136,7 @@ export async function handleIdentityTool(
       return JSON.stringify({
         name: displayName,
         ...(objective ? { objective } : {}),
+        ...(errors.length > 0 ? { errors } : {}),
         ...(versionWarning ? { warning: versionWarning } : {}),
       })
     }
@@ -319,7 +327,7 @@ async function handleAuthenticate(
       clientId: locationInfo.clerkClientId,
       redirectPort: locationInfo.clerkRedirectPort,
     })
-    saveLocationAuth(targetName, {
+    await saveLocationAuth(targetName, {
       authType: 'clerk',
       url,
       accessToken: tokens.accessToken,

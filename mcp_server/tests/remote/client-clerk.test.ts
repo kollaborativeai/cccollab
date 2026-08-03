@@ -164,7 +164,7 @@ describe('makeClerkAuthFetcher', () => {
 
   it('adopts a peer-process refresh from disk instead of calling refreshAccessToken', async () => {
     const peerExpiresAt = freshExpiresAt(120_000)
-    saveLocationAuth(TEST_LOCATION, {
+    await saveLocationAuth(TEST_LOCATION, {
       authType: 'clerk',
       url: TEST_URL,
       accessToken: 'peer-at',
@@ -184,7 +184,7 @@ describe('makeClerkAuthFetcher', () => {
   })
 
   it('does not adopt the disk token when its expiry is stale', async () => {
-    saveLocationAuth(TEST_LOCATION, {
+    await saveLocationAuth(TEST_LOCATION, {
       authType: 'clerk',
       url: TEST_URL,
       accessToken: 'disk-stale-at',
