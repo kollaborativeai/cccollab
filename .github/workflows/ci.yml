@@ -164,6 +164,9 @@ jobs:
               - 'mcp_server/tsconfig*.json'
               - 'plugin/**'
               - 'yarn.lock'
+              - 'README.md'
+              - 'LICENSE'
+              - 'NOTICE'
             website:
               - 'website/**'
 
@@ -183,13 +186,20 @@ jobs:
   # match `mcp_server/**` and `plugin/**` at once, so the filter would never
   # fire at all. An allowlist is the only shape that behaves under `some`.
   #
-  # The tradeoff is that this fails closed. A new directory under `mcp_server/`
-  # that ends up in the tarball will NOT trigger a release until it is added
-  # here. `files` in mcp_server/package.json is the list to check against —
-  # today `bin` and `dist` (built from `src`), plus the repo-root README,
-  # LICENSE and NOTICE that `scripts/stage-docs.mjs` copies in at prepack.
-  # Deliberately absent, because none of them reach the package: `tests/`,
-  # `vitest.config.ts`, `eslint.config.js`.
+  # The repo-root `README.md`, `LICENSE` and `NOTICE` are in the list because
+  # `scripts/stage-docs.mjs` copies them into the package at prepack, so editing
+  # one genuinely changes the tarball. Leaving them out meant the README npm
+  # serves drifted from the repo's until some unrelated change happened to cut a
+  # release — the same stale-registry-page defect KAI-561 existed to fix. The
+  # price is that a typo fix in README ships a version, which is the intended
+  # trade: a wrong published README is worse than a spare version number.
+  #
+  # The tradeoff overall is that this fails closed. A new directory under
+  # `mcp_server/` that ends up in the tarball will NOT trigger a release until it
+  # is added here. `files` in mcp_server/package.json is the list to check
+  # against - today `bin` and `dist` (built from `src`), plus those three staged
+  # documents. Deliberately absent, because none of them reach the package:
+  # `tests/`, `vitest.config.ts`, `eslint.config.js`.
 
   # DO NOT add `yarn.lock` (or any root-level dependency file) to the `website`
   # filter, and do not give `website/` a package.json that feeds the root

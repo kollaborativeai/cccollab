@@ -97,6 +97,12 @@ describe('CI mcp_server release filter', () => {
     'mcp_server/tsconfig.build.json',
     'plugin/.claude-plugin/plugin.json',
     'yarn.lock',
+    // Staged into the package by scripts/stage-docs.mjs at prepack, so editing
+    // one changes the tarball. Omitting them left npm serving a README that
+    // drifted from the repo's - the defect KAI-561 was opened to fix.
+    'README.md',
+    'LICENSE',
+    'NOTICE',
   ])('releases on %s, which can change the published tarball', (path) => {
     expect(matchesFilter(patterns, path)).toBe(true)
   })
@@ -107,6 +113,12 @@ describe('CI mcp_server release filter', () => {
     'mcp_server/vitest.config.ts',
     'mcp_server/eslint.config.js',
     'website/index.html',
+    // Only README, LICENSE and NOTICE are staged into the package. These guard
+    // against the allowlist being loosened to something like '*.md', which would
+    // put every doc and the code of conduct back on the release path.
+    'docs/config.md',
+    'CONTRIBUTING.md',
+    'CODE_OF_CONDUCT.md',
   ])('does not release on %s, which never reaches the package', (path) => {
     expect(matchesFilter(patterns, path)).toBe(false)
   })
