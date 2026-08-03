@@ -884,7 +884,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_sessions',
     {
       description:
-        'Return visible sessions as JSON array: [{id?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide). Registrations with a known-stale `lastSeen` are dropped.',
+        "Return visible sessions as JSON array: [{id?, location?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide); ids are issued per location, so an `id` is only meaningful at its sibling `location` — even when the entry's channels span several. Registrations with a known-stale `lastSeen` are dropped.",
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
         location: z

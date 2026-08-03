@@ -315,8 +315,12 @@ export class RemoteTransport implements Transport {
 
   /**
    * Merges this session's `sessionId` into a read query's argument object.
-   * KAI's queries require the sessionId to resolve the caller's
-   * organization. A no-op when no session has been introduced yet.
+   * KAI's queries require it, and what it scopes depends on the query: for
+   * most it resolves the caller's organization, but for some — notably
+   * `channels.listForUser` — the session id *is* the scope, and the query
+   * returns nothing meaningful without it. Never drop it on the assumption
+   * that the caller's identity alone is enough. A no-op when no session has
+   * been introduced yet.
    */
   private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
     if (this.sessionId !== null) {
@@ -806,19 +810,79 @@ export class RemoteTransport implements Transport {
          *  pre-dating the field would have it null. */
         lastSeenAt?: number
       }>
+      // `listByChannel` doesn't denormalize channel memberships per session,
+      // so no row arrives carrying any. Two independent facts fill that in.
+      //
+      // The first is the scope of the call itself. Asked for a channel,
+      // `listByChannel` resolves it and returns only sessions holding a
+      // presence row in it, so every row it reports is a member of
+      // `args.channel` by construction — peers included. Reporting `[]`
+      // there is not "unknown", it is a claim the query result disproves.
+      // `TransportSession.channels` has no way to say "unknown", so `[]`
+      // reads as "in no channel" one layer up. Unscoped, no such fact
+      // exists: the rows are simply everyone we can see, so peers stay
+      // empty rather than guessing.
+      //
+      // The channel name needs no normalisation here — `handleListSessions`
+      // runs `normalizeChannelName` before it reaches any transport.
+      const scopedChannel = args.channel
+      // The second is our own membership list: `channels.listForUser` is
+      // declared `args: { sessionId: v.id('cccollabSessions') }` and reads
+      // `cccollabSessionChannels` by that exact id — it is session-scoped,
+      // not merely scoped to the authenticated user, so the id we pass is
+      // the scope and not incidental. It is the only source for channels
+      // outside the one this call was scoped to, and only for us.
+      //
+      // Our own row is the one whose Convex `_id` equals the id our own
+      // `introduce` returned — never the one whose name matches ours.
+      // Session names are unique per (user, organization), so a peer of
+      // another user in this org can carry the same display name; matching
+      // on it would both leak our memberships onto their row and, one layer
+      // up, fold them into our entry in `list_sessions`.
+      const isOwnRow = (r: { _id: string }): boolean => this.sessionId !== null && r._id === this.sessionId
+      const ownChannels = rows.some(isOwnRow) ? await this.listOwnChannelNames() : []
+      // Union, not replace. `listOwnChannelNames` degrades to `[]` on
+      // failure, and taking it as the whole truth would leave our own row
+      // claiming fewer channels than the peers listed beside it — inside
+      // the very channel the call was scoped to.
+      const ownRowChannels = scopedChannel === undefined ? ownChannels : [...new Set([...ownChannels, scopedChannel])]
       return rows.map((r) => ({
         id: r._id,
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
-        // listByChannel doesn't denormalize channel memberships per
-        // session today; leave empty so the shape stays stable.
-        channels: [],
+        channels: isOwnRow(r) ? ownRowChannels : scopedChannel === undefined ? [] : [scopedChannel],
         registeredAt: new Date(r.createdAt).toISOString(),
         lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
+        // Omitted rather than `false` on peers: the tool layer treats the
+        // flag's presence as "this transport vouches that this row is us".
+        ...(isOwnRow(r) ? { self: true } : {}),
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
+      return []
+    }
+  }
+
+  /**
+   * Channel names the authenticated caller (this session) is subscribed
+   * to, per `channels.listForUser`. Used to fill in the caller's own row
+   * in `listSessions`.
+   *
+   * Best-effort and isolated from the degradation circuit breaker: this is
+   * an enrichment on top of `listByChannel`'s data, not the data itself, so
+   * a failure here (including a missing function on an older backend)
+   * must not trip `registerFailure` and disable the entire transport over
+   * a nice-to-have.
+   */
+  private async listOwnChannelNames(): Promise<string[]> {
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listForUser),
+        this.orgScopedArgs({}),
+      )) as Array<{ name: string }>
+      return rows.map((r) => r.name)
+    } catch {
       return []
     }
   }

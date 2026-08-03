@@ -604,33 +604,17 @@ async function handleListSessions(
   await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
-  // Merged by session id when the transport provides one (every non-local
-  // transport does), falling back to `location::name` for transports that
-  // don't (the local broker has no stable id — see `TransportSession.id`).
-  // Keying by id (KAI-515) keeps a dead and a live registration that
-  // happen to share a display name as distinct entries instead of
-  // silently collapsing them into one.
-  //
-  // Channels union across transports, each tagged by the location it
-  // came from.
+  // Merged by session identity, which `mergeSessions` derives per row —
+  // our own registrations collapse into one entry across locations, peers
+  // are kept apart per (location, id). Channels union across transports,
+  // each tagged by the location it came from.
   //
   // `scopedLocations` records locations whose transport already scopes
   // `listSessions` server-side to peers sharing a channel with this
   // session (every non-local transport does). Such a session is a
   // confirmed peer even when the transport can't denormalize *which*
   // channels — see the `visible` filter below.
-  const merged = new Map<
-    string,
-    {
-      id?: string
-      name: string
-      objective?: string
-      channels: Array<{ name: string; location: ChannelLocation }>
-      registeredAt?: string
-      lastSeen?: string
-      scopedLocations: Set<ChannelLocation>
-    }
-  >()
+  const merged = new Map<string | symbol, MergedSession>()
 
   if (channelArg) {
     const channel = normalizeChannelName(channelArg)
@@ -689,8 +673,13 @@ async function handleListSessions(
     return Date.now() - seenAt <= SESSION_STALE_MS
   })
 
+  // `id` never travels without `location`. An entry can span two
+  // locations (ours does, and only ours can) while carrying a single id,
+  // so an untagged id leaves the caller unable to tell which transport
+  // can resolve it — and ids from different locations are never
+  // comparable to each other.
   const result = alive.map((s) => ({
-    ...(s.id ? { id: s.id } : {}),
+    ...(s.registration ? { id: s.registration.id, location: s.registration.location } : {}),
     name: s.name,
     ...(s.objective ? { objective: s.objective } : {}),
     channels: s.channels,
@@ -700,19 +689,30 @@ async function handleListSessions(
   return JSON.stringify(result)
 }
 
+/** Merge key for our own registrations. A symbol, not a reserved string,
+ *  so no display name can collide with it. */
+const OWN_SESSION_KEY = Symbol('own session')
+
+/** One session as `list_sessions` accumulates it, across every transport
+ *  that reported it. */
+type MergedSession = {
+  /** The id this entry is reported under, paired with the location that
+   *  issued it. One field rather than two so the pair cannot drift: ids
+   *  are minted per location (Convex `_id`s per deployment, broker uuids
+   *  per broker) and are not comparable across them, so an id without its
+   *  location is an address with no address space. An entry can span
+   *  several locations — our own does — while carrying exactly one id. */
+  registration?: { id: string; location: ChannelLocation }
+  name: string
+  objective?: string
+  channels: Array<{ name: string; location: ChannelLocation }>
+  registeredAt?: string
+  lastSeen?: string
+  scopedLocations: Set<ChannelLocation>
+}
+
 function mergeSessions(
-  merged: Map<
-    string,
-    {
-      id?: string
-      name: string
-      objective?: string
-      channels: Array<{ name: string; location: ChannelLocation }>
-      registeredAt?: string
-      lastSeen?: string
-      scopedLocations: Set<ChannelLocation>
-    }
-  >,
+  merged: Map<string | symbol, MergedSession>,
   rows: Array<{
     id?: string
     name: string
@@ -720,6 +720,7 @@ function mergeSessions(
     channels?: string[]
     registeredAt?: string
     lastSeen?: string
+    self?: boolean
   }>,
   location: ChannelLocation,
   /** True when this transport's `listSessions` is already scoped
@@ -727,20 +728,43 @@ function mergeSessions(
   serverScoped: boolean,
 ): void {
   for (const r of rows) {
-    // Keying by id (scoped by location — Convex ids are only unique
-    // per-deployment, so two different remote locations could otherwise
-    // collide on the same id string) keeps distinct registrations from
-    // the SAME transport (e.g. a dead one and a live one under the same
-    // display name) from being collapsed into a single merged entry.
-    // Transports with no stable id (local) fall back to a plain name key,
-    // same as before KAI-515 — that's what lets one session attached via
-    // both the local broker and a remote transport still merge into a
-    // single row.
-    const key = r.id !== undefined ? `${location}::${r.id}` : r.name
+    // What identifies a session here, in the order the key is derived:
+    //
+    // 1. Our own rows merge on the transport's `self` flag. This process
+    //    called `introduce` on every transport, so each transport can
+    //    point at its own registration authoritatively. That is the only
+    //    cross-location identity that exists, and it is what makes one
+    //    process attached to two locations one entry (KAI-516) rather
+    //    than a phantom second peer somewhere the user is not.
+    //
+    // 2. Peers key by (location, id). Ids are per-deployment, so they are
+    //    scoped by location to stop two remote locations colliding on the
+    //    same id string. This is KAI-515: a dead and a live registration
+    //    sharing a display name at the same transport stay distinct.
+    //
+    // 3. Peers from a transport that issues no id (the local broker) key
+    //    by display name. This is a weak key, not an identity — names are
+    //    unique per (user, organization) only — but it is the only one
+    //    such a transport offers.
+    //
+    // Note what (3) is NOT: it is not a cross-transport merge. `name`
+    // never equals `location::id`, so a peer's local row and remote row
+    // are always two entries. Only `self` unifies across locations, and
+    // only for us. That distinction matters since KAI-516, because our
+    // own row now carries real memberships — key it by name and a
+    // same-named stranger in the org would absorb them.
+    const key = r.self ? OWN_SESSION_KEY : r.id !== undefined ? `${location}::${r.id}` : r.name
     const existing = merged.get(key)
     const tagged = (r.channels ?? []).map((c) => ({ name: c, location }))
     if (existing) {
-      existing.id = existing.id ?? r.id
+      // First id wins, and its location travels with it. Assigning the
+      // location separately (or on every merge) would tag the winning id
+      // with whichever transport was merged last — a wrong address space
+      // reads worse than none, since it names a transport that will
+      // answer "no such session" for an id it never issued.
+      if (existing.registration === undefined && r.id !== undefined) {
+        existing.registration = { id: r.id, location }
+      }
       existing.objective = existing.objective ?? r.objective
       // Union channels; same (name, location) tuples dedupe themselves
       // because this stage runs per-location.
@@ -760,7 +784,7 @@ function mergeSessions(
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(key, {
-        id: r.id,
+        registration: r.id === undefined ? undefined : { id: r.id, location },
         name: r.name,
         objective: r.objective,
         channels: tagged,
