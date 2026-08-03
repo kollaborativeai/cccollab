@@ -462,13 +462,16 @@ export class RemoteTransport implements Transport {
       })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
-        // Seed the per-channel cursor with the channel's ts at join time so
-        // `subscribeChannelMessages` starts the reactive feed past existing
-        // history instead of replaying it as fresh inbound notifications.
-        // Monotonic non-decreasing: a later rejoin can't regress it.
-        if (typeof res.latestTs === 'number') {
-          const prior = this.channelMaxTs.get(res.channelId) ?? 0
-          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
+        // Seed the per-channel cursor ONLY on the first-ever join, to skip
+        // pre-join history. A re-join (the identity migration re-joins the
+        // channel mid-rename) must NOT touch an existing cursor: the value
+        // there is the delivered high-water mark, and advancing it to the
+        // channel's current `latestTs` would skip every broadcast that
+        // arrived in (delivered, latestTs] because `subscribeChannelMessages`
+        // resumes at `sinceTs = channelMaxTs` EXCLUSIVE. Mirrors `joinTopic`,
+        // which never clobbers `topicMaxTs`.
+        if (typeof res.latestTs === 'number' && !this.channelMaxTs.has(res.channelId)) {
+          this.channelMaxTs.set(res.channelId, res.latestTs)
         }
       }
       return { subscriberCount: 0 }
@@ -932,7 +935,6 @@ export class RemoteTransport implements Transport {
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
     const queryArgs = this.orgScopedArgs(baseArgs)
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
-    const ownSessionId = this.sessionId
     const rawUnsubscribe = this.client.onUpdate(
       fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
@@ -947,7 +949,13 @@ export class RemoteTransport implements Transport {
           // back into our own Claude. The cursor advance above still
           // happens so the next reconnect doesn't re-deliver our own row.
           // Mirrors the local broker's `isExactSelf` drop.
-          if (row.fromSessionId === ownSessionId) continue
+          //
+          // Read `this.sessionId` LIVE, never a copy captured at subscribe
+          // time: auto-subscribed topics are subscribed before the agent
+          // introduces itself, and `introduce` rebinds the session row. A
+          // captured id would go stale on that rename and we'd start
+          // pushing our own messages back at ourselves.
+          if (row.fromSessionId === this.sessionId) continue
           onEvent({
             sender: row.fromSessionId,
             text: row.text,
@@ -1011,6 +1019,14 @@ export class RemoteTransport implements Transport {
         (rows) => {
           const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
           let highestTsInBatch = 0
+          // Read the session id LIVE per batch rather than reusing the
+          // subscribe-time `sessionId` above: `introduce` rebinds the
+          // session row, and channels are auto-subscribed before the agent
+          // introduces itself, so the captured id goes stale on that rename
+          // and we'd echo our own broadcasts back at ourselves. (The read
+          // cursor / ack keep using the subscribe-time id - they belong to
+          // the row the query was registered against.)
+          const ownSessionId = this.sessionId
           for (const row of arr) {
             if (seen.has(row._id)) continue
             seen.add(row._id)
@@ -1021,7 +1037,7 @@ export class RemoteTransport implements Transport {
             // own Claude. Cursor + ack advance above still happens so
             // we don't re-deliver our own row on reconnect. Mirrors the
             // local broker's self-broadcast drop.
-            if (sessionId !== null && row.fromSessionId === sessionId) continue
+            if (ownSessionId !== null && row.fromSessionId === ownSessionId) continue
             onEvent({
               sender: row.fromSessionId,
               text: row.text,
@@ -1109,6 +1125,26 @@ export class RemoteTransport implements Transport {
     if (channelId === undefined) return
     const prior = this.channelMaxTs.get(channelId) ?? 0
     if (ts > prior) this.channelMaxTs.set(channelId, ts)
+  }
+
+  /**
+   * Forget a channel's delivery cursor, so the NEXT `joinChannel` re-seeds it
+   * from the channel's `latestTs` and the feed skips everything that accrued
+   * while the session was away.
+   *
+   * Called only when the session DELIBERATELY leaves a channel (`leave_channel`).
+   * `joinChannel` seeds the cursor only when absent — that is what stops the
+   * identity migration's transient leave/re-join from skipping broadcasts that
+   * land mid-rename — but it also means a cursor left behind by an intentional
+   * leave would survive, and a later re-join would replay the entire backlog
+   * since the last delivered message as fresh inbound notifications. Dropping
+   * the cursor here keeps the two leaves distinct: transient (migration) keeps
+   * its place in the stream, deliberate (tool) starts fresh on re-join.
+   */
+  forgetChannelCursor(channelName: string): void {
+    const channelId = this.channelIdsByName.get(channelName)
+    if (channelId === undefined) return
+    this.channelMaxTs.delete(channelId)
   }
 
   /**

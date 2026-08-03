@@ -109,4 +109,32 @@ describe('SessionManager', () => {
       expect(sm.isSelf('carlos | api | backend')).toBe(false)
     })
   })
+
+  describe('organization', () => {
+    it('is undefined for a location until one is recorded', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      expect(sm.getOrganizationFor('remote')).toBeUndefined()
+    })
+
+    it('records the organization per location', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setOrganizationFor('remote', 'org_1')
+      expect(sm.getOrganizationFor('remote')).toBe('org_1')
+    })
+
+    it('tracks each location independently, so one location moving does not move another', () => {
+      // A location's row only rebinds when ITS OWN introduce succeeds. If
+      // introduce succeeds at one location and fails at another, the failed
+      // one must keep its previous binding — otherwise the next re-introduce
+      // sees "no change" there, skips the migration, and strands a ghost.
+      const sm = new SessionManager({ username: 'stefan', cwd: '/Users/stefan/projects/dispatcher' })
+      sm.setOrganizationFor('remoteA', 'org_1')
+      sm.setOrganizationFor('remoteB', 'org_1')
+
+      sm.setOrganizationFor('remoteA', 'org_2')
+
+      expect(sm.getOrganizationFor('remoteA')).toBe('org_2')
+      expect(sm.getOrganizationFor('remoteB')).toBe('org_1')
+    })
+  })
 })

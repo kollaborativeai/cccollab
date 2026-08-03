@@ -13,6 +13,7 @@ export class SessionManager {
   private projectName: string
   private name: string | undefined
   private objective: string | undefined
+  private readonly organizations = new Map<string, string>()
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -41,6 +42,27 @@ export class SessionManager {
 
   getObjective(): string | undefined {
     return this.objective
+  }
+
+  /** The organization each LOCATION is currently bound to.
+   *
+   *  Per-location, not per-session: the backend keys CLI sessions by
+   *  (user, org, sessionName), and a location's row only actually rebinds to a
+   *  new org once ITS introduce succeeds. If introduce succeeds at one location
+   *  and fails at another, recording the org globally would leave the failed
+   *  one still on the OLD org on its backend while we believe it moved — so the
+   *  next re-introduce would see "no change" there, skip its migration, and
+   *  strand a ghost.
+   *
+   *  The setter takes a DEFINED string, so an org-less introduce structurally
+   *  cannot clobber a tracked binding (callers only record on success, with a
+   *  defined org). Nothing ever clears a binding. */
+  setOrganizationFor(location: string, organization: string): void {
+    this.organizations.set(location, organization)
+  }
+
+  getOrganizationFor(location: string): string | undefined {
+    return this.organizations.get(location)
   }
 
   /** Format a thread message with short display name */
