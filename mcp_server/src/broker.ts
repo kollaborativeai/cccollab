@@ -18,13 +18,36 @@ type SSEResponse = ServerResponse & { req: IncomingMessage }
 
 const clients = new Set<SSEResponse>()
 
+/** Identifies THIS broker process. A restarted broker starts its sequence over,
+ *  so a cursor carrying a different id cannot be honoured — and the client must
+ *  be told that, not silently resumed from nothing. */
+const BROKER_ID = crypto.randomUUID()
+/** Events retained for replay to a reconnecting client. Bounded: a client that
+ *  falls further behind than this gets an explicit `stream_gap`, never a
+ *  quietly-incomplete replay. Rejects garbage/<1 rather than silently coercing
+ *  to NaN (which would defeat eviction: `length > NaN` is false forever). */
+const REPLAY_CAPACITY = ((): number => {
+  const raw = process.env.CCCOLLAB_REPLAY_CAPACITY
+  if (raw === undefined) return 1000
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error(`CCCOLLAB_REPLAY_CAPACITY must be an integer >= 1, got ${JSON.stringify(raw)}`)
+  }
+  return Math.floor(n)
+})()
+const replayBuffer: Array<{ seq: number; data: string }> = []
+let lastSeq = 0
+
 function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`
   appendFileSync(LOG_FILE, line)
 }
 
 function broadcast(data: string): void {
-  const payload = `data: ${data}\n\n`
+  lastSeq += 1
+  replayBuffer.push({ seq: lastSeq, data })
+  if (replayBuffer.length > REPLAY_CAPACITY) replayBuffer.shift()
+  const payload = sseFrame(`${BROKER_ID}:${lastSeq}`, data)
   for (const client of clients) {
     try {
       client.write(payload)
@@ -32,6 +55,38 @@ function broadcast(data: string): void {
       clients.delete(client)
     }
   }
+}
+
+function sseFrame(id: string | undefined, data: string): string {
+  return `${id ? `id: ${id}\n` : ''}data: ${data}\n\n`
+}
+
+/** What can we still deliver to a client resuming from `lastEventId`?
+ *  `replay` is what it missed; `gap` is set when the cursor cannot be honoured
+ *  at all, which the client must hear about rather than infer from silence. */
+function resumeFrom(lastEventId: string | undefined): { replay: typeof replayBuffer; gap?: string } {
+  if (!lastEventId) return { replay: [] } // fresh client: forward-only by design
+  const [brokerId, rawSeq] = lastEventId.split(':')
+  const since = Number(rawSeq)
+  if (brokerId !== BROKER_ID) {
+    return { replay: [], gap: 'cursor is from a previous broker instance; its events are gone' }
+  }
+  if (!Number.isFinite(since) || since < 0 || since > lastSeq) {
+    return { replay: [], gap: `cursor "${lastEventId}" is not a position this broker ever issued` }
+  }
+  // A client behind lastSeq needs proof we still hold its next event. An empty
+  // buffer holds nothing, so the ONLY safe answer is "gap" — the `oldest &&`
+  // short-circuit that used to sit here fell through to a silent zero-length
+  // replay whenever REPLAY_CAPACITY was 0, i.e. the confidently-blind failure
+  // this ticket exists to kill, one env-var away.
+  const oldest = replayBuffer[0]
+  if (since < lastSeq && (!oldest || since < oldest.seq - 1)) {
+    return {
+      replay: [],
+      gap: `client fell more than ${REPLAY_CAPACITY} events behind; the missed events have been evicted`,
+    }
+  }
+  return { replay: replayBuffer.filter((e) => e.seq > since) }
 }
 
 interface LocalTopicMessage {
@@ -166,11 +221,32 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     })
 
     const sseRes = res as SSEResponse
-    clients.add(sseRes)
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
     // broadcast, so they don't miss events that fire right after connecting.
     res.flushHeaders()
+
+    // Resume BEFORE registering as a live client: this handler is synchronous,
+    // so no broadcast can interleave, and the client sees the replay and the
+    // live stream in one unbroken order.
+    const { replay, gap } = resumeFrom(req.headers['last-event-id'] as string | undefined)
+    if (gap) {
+      res.write(sseFrame(undefined, JSON.stringify({ source: 'local', type: 'stream_gap', reason: gap })))
+      log(`SSE client resumed with an UNFILLABLE cursor: ${gap}`)
+    }
+    for (const event of replay) {
+      res.write(sseFrame(`${BROKER_ID}:${event.seq}`, event.data))
+    }
+    if (replay.length > 0) log(`SSE client resumed: replayed ${replay.length} missed event(s)`)
+
+    // Hand the client a cursor IMMEDIATELY, before it has heard any traffic. A
+    // listener whose cursor only exists after its first event has none at all
+    // during the quiet window — and a drop there would silently swallow
+    // everything published in the gap. The quiet watcher is precisely the one
+    // this feature exists to protect.
+    res.write(sseFrame(`${BROKER_ID}:${lastSeq}`, JSON.stringify({ source: 'local', type: 'stream_hello' })))
+
+    clients.add(sseRes)
     log(`SSE client connected (total: ${clients.size})`)
 
     req.on('close', () => {
@@ -493,6 +569,9 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'message' as const,
               channel: t.channel,
               topicId: id,
+              // Carried so a channel watcher, which never joined this topic and
+              // so has no local name for its id, can name what it is reading.
+              topicName: t.topic,
               sender,
               text,
               ts,
@@ -533,6 +612,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'topic_archived' as const,
               channel: t.channel,
               topicId: id,
+              topicName: t.topic,
               archivedBy: archivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))
@@ -548,6 +628,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               type: 'topic_unarchived' as const,
               channel: t.channel,
               topicId: id,
+              topicName: t.topic,
               unarchivedBy: unarchivedBy ?? 'unknown',
             }
             broadcast(JSON.stringify(event))

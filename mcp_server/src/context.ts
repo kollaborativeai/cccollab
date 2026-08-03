@@ -14,6 +14,18 @@ interface SubscribedChannel {
   name: string
   location: ChannelLocation
   source: ChannelSource
+  /** Channel-wide topic visibility. When true, topic traffic in this channel
+   *  is delivered even for topics the session never joined — including topics
+   *  created after it subscribed. Opt-in; false for ordinary sessions.
+   *
+   *  INVARIANT, enforced only in `tools/channels.ts`: nothing flips a NON-LOCAL
+   *  subscription to watched. Remote delivers topic messages per-topic, so a
+   *  "watched" remote channel would report watching while receiving nothing
+   *  from topics created after the join. This layer does not re-check it (the
+   *  tool is the sole caller that passes `watch`), so whoever lands remote watch
+   *  (KAI-413) must re-establish the invariant at whatever new caller they add.
+   *  `whoami`'s `watchingActive` refuses to call a non-local watch active. */
+  watching: boolean
 }
 
 interface JoinedTopic {
@@ -40,23 +52,28 @@ export class ActiveContext {
   private readonly subscribed = new Map<string, SubscribedChannel>()
   private readonly joinedTopics = new Map<string, JoinedTopic>()
 
+  /** `watch` is tri-state on purpose: `undefined` leaves an existing
+   *  subscription's flag alone, so a plain re-join (startup, re-attach) never
+   *  silently drops a watcher back into the blind spot it opted out of. */
   joinChannel(
     name: string,
     source: ChannelSource,
     location: ChannelLocation = 'local',
-  ): { channel: string; location: ChannelLocation; becameActive: boolean } {
+    watch?: boolean,
+  ): { channel: string; location: ChannelLocation; becameActive: boolean; watching: boolean } {
     const channel = normalizeChannelName(name)
     if (!channel) throw new Error('Channel name must be non-empty')
     const key = channelKey(channel, location)
-    if (!this.subscribed.has(key)) {
-      this.subscribed.set(key, { name: channel, location, source })
-    }
+    const existing = this.subscribed.get(key)
+    const entry: SubscribedChannel = existing ?? { name: channel, location, source, watching: watch ?? false }
+    if (!existing) this.subscribed.set(key, entry)
+    else if (watch !== undefined) entry.watching = watch
     let becameActive = false
     if (this.activeChannel === undefined) {
       this.activeChannel = { name: channel, location }
       becameActive = true
     }
-    return { channel, location, becameActive }
+    return { channel, location, becameActive, watching: entry.watching }
   }
 
   leaveChannel(
@@ -119,6 +136,25 @@ export class ActiveContext {
     return false
   }
 
+  /** Is this session in channel-wide watch mode for the channel? Mirrors
+   *  `isChannelSubscribed`: with no `location`, true if ANY subscription with
+   *  this name is watched. An unsubscribed channel is never watched.
+   *
+   *  KAI-413 followup: `location` MUST become REQUIRED when remote watch
+   *  lands. The unqualified branch is a cross-org leak dressed up as a
+   *  convenience — today it is dead code (the sole caller passes
+   *  LOCAL_LOCATION and is pinned by a test), but the day a remote transport
+   *  can be watched it fires on the first same-named channel in a different
+   *  org. Drop the `?` and delete the fallback loop as part of that ticket. */
+  isChannelWatched(name: string, location?: ChannelLocation): boolean {
+    const channel = normalizeChannelName(name)
+    if (location) return this.subscribed.get(channelKey(channel, location))?.watching === true
+    for (const entry of this.subscribed.values()) {
+      if (entry.name === channel && entry.watching) return true
+    }
+    return false
+  }
+
   getChannelSource(name: string, location?: ChannelLocation): ChannelSource | undefined {
     const channel = normalizeChannelName(name)
     if (location) return this.subscribed.get(channelKey(channel, location))?.source
@@ -143,8 +179,18 @@ export class ActiveContext {
     return undefined
   }
 
-  getSubscribedChannels(): Array<{ name: string; location: ChannelLocation; source: ChannelSource }> {
-    return [...this.subscribed.values()].map((c) => ({ name: c.name, location: c.location, source: c.source }))
+  getSubscribedChannels(): Array<{
+    name: string
+    location: ChannelLocation
+    source: ChannelSource
+    watching: boolean
+  }> {
+    return [...this.subscribed.values()].map((c) => ({
+      name: c.name,
+      location: c.location,
+      source: c.source,
+      watching: c.watching,
+    }))
   }
 
   joinTopic(threadTs: string, topicName: string, channel: string, location: ChannelLocation = 'local'): void {

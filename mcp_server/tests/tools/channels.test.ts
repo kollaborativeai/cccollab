@@ -17,7 +17,47 @@ function createDeps(): ChannelToolDeps {
   // mock `global.fetch` and assert URLs / bodies. Remote-transport
   // cases are covered in the dual-transport integration tests.
   const transport = new LocalTransport(7850)
-  return { session, context, router: new TransportRouter([transport]) }
+  return { session, context, router: new TransportRouter([transport]), locations: [LOCAL] }
+}
+
+const LOCAL = { name: 'local', isLocal: true }
+
+/** Deps whose config knows a non-local location. `attached` controls whether it
+ *  also made it into the router: a dormant remote (the state a fresh
+ *  orchestrator is in) is configured but absent from `router.enabled()`. */
+function createRemoteDeps(opts: { attached?: boolean; subscriberCount?: number } = {}): ChannelToolDeps {
+  const { attached = true, subscriberCount = 1 } = opts
+  const remote = {
+    source: 'flatout',
+    enabled: true,
+    hasTopic: () => false,
+    introduce: async () => {},
+    joinChannel: async () => ({ subscriberCount }),
+    leaveChannel: async () => {},
+    listChannels: async () => [],
+    broadcast: async () => {},
+    createTopic: async () => {
+      throw new Error('not implemented')
+    },
+    listTopics: async () => [],
+    getTopicById: async () => null,
+    joinTopic: async () => ({ history: [] }),
+    leaveTopic: async () => {},
+    archiveTopic: async () => {},
+    unarchiveTopic: async () => {},
+    sendTopicMessage: async () => {},
+    listSessions: async () => [],
+    deregisterSession: async () => {},
+  } as unknown as Transport
+  const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+  session.setName('orchestrator')
+  const transports = attached ? [new LocalTransport(7850), remote] : [new LocalTransport(7850)]
+  return {
+    session,
+    context: new ActiveContext(),
+    router: new TransportRouter(transports),
+    locations: [LOCAL, { name: 'flatout', isLocal: false }],
+  }
 }
 
 describe('Channel Tools', () => {
@@ -51,6 +91,7 @@ describe('Channel Tools', () => {
             subscriberCount: 1,
             subscribed: true,
             isActive: true,
+            watching: false,
           },
         ],
       })
@@ -71,7 +112,13 @@ describe('Channel Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ subscriberCount: 1 }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleChannelTool('join_channel', { name: 'Project_X' }, deps))
-      expect(result).toEqual({ channel: 'project_x', location: 'local', becameActive: true, subscriberCount: 1 })
+      expect(result).toEqual({
+        channel: 'project_x',
+        location: 'local',
+        becameActive: true,
+        subscriberCount: 1,
+        watching: false,
+      })
       expect(deps.context.isChannelSubscribed('project_x', 'local')).toBe(true)
       expect(deps.context.getActiveChannel()).toBe('project_x')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
@@ -91,6 +138,140 @@ describe('Channel Tools', () => {
     it('rejects empty name', async () => {
       const result = JSON.parse(await handleChannelTool('join_channel', { name: '   ' }, deps))
       expect(result.error).toContain('non-empty')
+    })
+  })
+
+  describe('list_channels reports watch mode (KAI-414)', () => {
+    it('marks which subscribed channels are watched', async () => {
+      const deps = createDeps()
+      deps.context.joinChannel('kai', 'manual', 'local', true)
+      deps.context.joinChannel('quiet', 'manual', 'local')
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              channels: [
+                { name: 'kai', subscriberCount: 2 },
+                { name: 'quiet', subscriberCount: 1 },
+              ],
+            }),
+        }),
+      )
+      const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      const byName = Object.fromEntries(
+        (result.channels as Array<{ name: string; watching: boolean }>).map((c) => [c.name, c.watching]),
+      )
+      expect(byName).toEqual({ kai: true, quiet: false })
+      vi.unstubAllGlobals()
+    })
+  })
+
+  describe('join_channel watch mode (KAI-414)', () => {
+    let deps: ChannelToolDeps
+    beforeEach(() => {
+      deps = createDeps()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ subscriberCount: 1 }) }),
+      )
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('defaults to not watching, and says so', async () => {
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai' }, deps))
+      expect(result.watching).toBe(false)
+      expect(deps.context.isChannelWatched('kai', 'local')).toBe(false)
+    })
+
+    it('watch: true subscribes the session to channel-wide topic traffic', async () => {
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, deps))
+      expect(result.watching).toBe(true)
+      expect(deps.context.isChannelWatched('kai', 'local')).toBe(true)
+    })
+
+    it('a plain re-join does not silently un-watch the channel', async () => {
+      await handleChannelTool('join_channel', { name: 'kai', watch: true }, deps)
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai' }, deps))
+      expect(result.watching).toBe(true)
+      expect(deps.context.isChannelWatched('kai', 'local')).toBe(true)
+    })
+
+    it('watch: false turns watching back off', async () => {
+      await handleChannelTool('join_channel', { name: 'kai', watch: true }, deps)
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: false }, deps))
+      expect(result.watching).toBe(false)
+      expect(deps.context.isChannelWatched('kai', 'local')).toBe(false)
+    })
+
+    it('fails loudly on a non-local location instead of half-working', async () => {
+      const remoteDeps = createRemoteDeps()
+
+      const result = JSON.parse(
+        await handleChannelTool('join_channel', { name: 'kai', location: 'flatout', watch: true }, remoteDeps),
+      )
+      expect(result.error).toMatch(/local/i)
+      expect(result.error).toContain('KAI-413')
+      // The failed watch must not leave a half-subscribed channel behind.
+      expect(remoteDeps.context.isChannelWatched('kai', 'flatout')).toBe(false)
+    })
+
+    // `location` defaults to 'local' and join_channel implicitly CREATES
+    // channels. So an orchestrator whose fleet lives on a remote location that
+    // calls join_channel({name, watch: true}) without a location would get a
+    // brand-new, empty LOCAL channel, a success response, and watching: true —
+    // then sit in an empty room receiving nothing while whoami cheerfully
+    // reports it is watching. That is the exact "confidently blind" failure
+    // this ticket exists to eliminate, so it must be refused, not defaulted.
+    it('refuses a defaulted-location watch when remote locations exist, instead of watching an empty local channel', async () => {
+      const ambiguous = createRemoteDeps()
+
+      // No `location` passed — the dangerous case.
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, ambiguous))
+      expect(result.error).toMatch(/location/i)
+      expect(ambiguous.context.isChannelSubscribed('kai', 'local')).toBe(false)
+      expect(ambiguous.context.isChannelWatched('kai', 'local')).toBe(false)
+    })
+
+    // A fresh orchestrator's remotes have not attached yet, so the router does
+    // not know them. The guard must read the CONFIGURED locations, or the exact
+    // session this feature is for is the one that slips through it.
+    it('refuses a defaulted-location watch when the only remote is configured but dormant', async () => {
+      const dormant = createRemoteDeps({ attached: false })
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, dormant))
+      expect(result.error).toMatch(/location/i)
+      expect(result.error).toContain('flatout')
+      expect(dormant.context.isChannelSubscribed('kai', 'local')).toBe(false)
+    })
+
+    it('allows a defaulted-location watch when only the local transport exists', async () => {
+      const result = JSON.parse(await handleChannelTool('join_channel', { name: 'kai', watch: true }, deps))
+      expect(result.error).toBeUndefined()
+      expect(result.watching).toBe(true)
+    })
+
+    it('allows an explicit local watch even when remote locations exist', async () => {
+      const explicit = createRemoteDeps()
+
+      const result = JSON.parse(
+        await handleChannelTool('join_channel', { name: 'kai', location: 'local', watch: true }, explicit),
+      )
+      expect(result.error).toBeUndefined()
+      expect(result.watching).toBe(true)
+    })
+
+    it('still allows a plain (unwatched) join on a non-local location', async () => {
+      const remoteDeps = createRemoteDeps({ subscriberCount: 3 })
+
+      const result = JSON.parse(
+        await handleChannelTool('join_channel', { name: 'kai', location: 'flatout' }, remoteDeps),
+      )
+      expect(result.error).toBeUndefined()
+      expect(result.watching).toBe(false)
+      expect(remoteDeps.context.isChannelSubscribed('kai', 'flatout')).toBe(true)
     })
   })
 
@@ -196,6 +377,7 @@ describe('Channel Tools', () => {
             subscriberCount: 3,
             subscribed: true,
             isActive: true,
+            watching: false,
           },
           {
             name: 'project_x',
@@ -204,6 +386,7 @@ describe('Channel Tools', () => {
             subscriberCount: 2,
             subscribed: true,
             isActive: false,
+            watching: false,
           },
         ],
       })
@@ -242,6 +425,7 @@ describe('Channel Tools', () => {
             subscriberCount: 1,
             subscribed: true,
             isActive: true,
+            watching: false,
           },
           {
             name: 'acme-ai',
@@ -250,6 +434,7 @@ describe('Channel Tools', () => {
             subscriberCount: 3,
             subscribed: false,
             isActive: false,
+            watching: false,
           },
         ],
       })
@@ -267,7 +452,15 @@ describe('Channel Tools', () => {
       const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
       expect(result.activeChannel).toBeNull()
       expect(result.channels).toEqual([
-        { name: 'broadcast', location: 'local', source: null, subscriberCount: 5, subscribed: false, isActive: false },
+        {
+          name: 'broadcast',
+          location: 'local',
+          source: null,
+          subscriberCount: 5,
+          subscribed: false,
+          isActive: false,
+          watching: false,
+        },
       ])
     })
 
@@ -291,6 +484,7 @@ describe('Channel Tools', () => {
         sessionCount: 1,
         subscribed: true,
         isActive: true,
+        watching: false,
       })
       expect(result.channels).toContainEqual({
         name: 'other',
@@ -299,6 +493,7 @@ describe('Channel Tools', () => {
         subscriberCount: 4,
         subscribed: false,
         isActive: false,
+        watching: false,
       })
     })
 
@@ -332,6 +527,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+        locations: [LOCAL],
       }
       const result = JSON.parse(await handleChannelTool('list_channels', {}, stubDeps))
       expect(result.channels[0].messageCount).toBe(7)
@@ -369,6 +565,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router,
+        locations: [LOCAL, dormant],
         ensureAttached: (target?: string) =>
           ensureLazyAttach(target, {
             session,
@@ -413,6 +610,7 @@ describe('Channel Tools', () => {
             sessionCount: 1,
             subscribed: true,
             isActive: true,
+            watching: false,
           },
           {
             name: 'project_x',
@@ -422,6 +620,7 @@ describe('Channel Tools', () => {
             sessionCount: 1,
             subscribed: true,
             isActive: false,
+            watching: false,
           },
         ],
       })
@@ -471,6 +670,7 @@ describe('Channel Tools', () => {
         session,
         context,
         router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+        locations: [LOCAL],
       }
       const result = JSON.parse(await handleChannelTool('read_channel_messages', { channel: 'dev' }, stubDeps))
       expect(result.messages[0].text).toBe('hi')

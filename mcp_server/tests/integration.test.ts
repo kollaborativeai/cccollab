@@ -14,6 +14,7 @@ import { TransportRouter } from '../src/transport/router.js'
 import { handleIdentityTool } from '../src/tools/identity.js'
 import { handleChannelTool } from '../src/tools/channels.js'
 import { handleTopicTool } from '../src/tools/topics.js'
+import type { ResolvedLocation } from '../src/config/resolve.js'
 import type { ParsedMessage } from '../src/types.js'
 
 const PROFILE = `itest-${process.pid}`
@@ -33,6 +34,8 @@ interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  locations: ResolvedLocation[]
+  localEventStream: () => { connected: boolean; mayHaveMissedMessages: boolean }
 }
 
 interface SessionHarness {
@@ -68,7 +71,16 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router }
+  const deps: HarnessDeps = {
+    session,
+    context,
+    router,
+    locations: [{ name: 'local', isLocal: true, channels: [] }],
+    localEventStream: () => ({
+      connected: listener.isConnected(),
+      mayHaveMissedMessages: listener.mayHaveMissedEvents(),
+    }),
+  }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {
@@ -335,6 +347,123 @@ describe('Integration: multi-channel subscriptions (CCC-26)', () => {
     } finally {
       LEFT.listener.stop()
       RIGHT.listener.stop()
+    }
+  }, 15_000)
+
+  /**
+   * The KAI-414 story end-to-end, through a real broker and real SSE: an
+   * orchestrator watching a channel sees a worker's topic traffic WITHOUT ever
+   * joining the topic — including a topic created after it started watching —
+   * while an ordinary worker on the same channel stays blind to it. The unit
+   * tests gate on a synthetic event; this proves the whole chain
+   * (broker fan-out -> SSE -> listener -> MessageBus) actually delivers.
+   */
+  /**
+   * The reconnect hole, end to end, against a REAL broker and a REAL SSE stream.
+   * This is the test that the previous suite could not fail: it published inside
+   * one unbroken stream, so the gap never existed. Here the stream is dropped
+   * mid-flight, a worker publishes into the hole, and the watcher must STILL
+   * receive it once the stream comes back — from its cursor, not from luck.
+   */
+  it('a watching orchestrator misses NOTHING published while its event stream was down', async () => {
+    const ORCH = await makeSession('gap-orchestrator', brokerPort)
+    const WORKER = await makeSession('gap-worker', brokerPort)
+    try {
+      await handleChannelTool('join_channel', { name: 'gap-ch', watch: true }, ORCH.channelDeps)
+      await handleChannelTool('join_channel', { name: 'gap-ch' }, WORKER.channelDeps)
+      await handleTopicTool('start_topic', { topic: 'KAI-GAP', channel: 'gap-ch' }, WORKER.topicDeps)
+      ORCH.received.length = 0
+
+      // The stream goes down. In production this is a broker restart, a laptop
+      // sleeping, a transient socket error — and it used to swallow everything
+      // published until the listener came back, silently.
+      ORCH.listener.dropStream()
+      await waitUntil(() => (ORCH.listener.isConnected() ? null : true), 3000)
+      expect(ORCH.listener.isConnected()).toBe(false)
+
+      await handleTopicTool('send_message_to_topic', { text: 'published INTO the gap' }, WORKER.topicDeps)
+
+      // The listener reconnects on its own and resumes from its cursor.
+      await waitUntil(() => (ORCH.listener.isConnected() ? true : null), 10_000)
+      await waitUntil(() => (ORCH.received.some((m) => m.text === 'published INTO the gap') ? true : null), 10_000)
+
+      const recovered = ORCH.received.filter((m) => m.text === 'published INTO the gap')
+      // Exactly-once, not at-least-once: dropStream() used to open a SECOND
+      // socket (destroy + explicit scheduleReconnect), which delivered every
+      // subsequent event twice. MessageBus dedup absorbed it in production but
+      // this integration test would have proved success through a doubled
+      // stream. The count assertion is the guard rail.
+      expect(recovered).toHaveLength(1)
+      expect(recovered[0]?.topicName).toBe('KAI-GAP')
+      // And the broker sees ONE connection per session, not two — the socket
+      // leak the reviewer proved shows up here as connections:3 for 2 sessions.
+      const health = (await (await fetch(`http://127.0.0.1:${brokerPort}/health`)).json()) as { connections: number }
+      expect(health.connections).toBe(2)
+      // Nothing was lost, so the session must NOT claim it may have missed anything.
+      expect(ORCH.listener.mayHaveMissedEvents()).toBe(false)
+      const who = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(who.eventStream).toEqual({ connected: true, mayHaveMissedMessages: false })
+    } finally {
+      ORCH.listener.stop()
+      WORKER.listener.stop()
+    }
+  }, 30_000)
+
+  it('a watching orchestrator sees a topic it never joined; an ordinary session does not', async () => {
+    const ORCH = await makeSession('watch-orchestrator', brokerPort)
+    const WORKER = await makeSession('watch-worker', brokerPort)
+    const BYSTANDER = await makeSession('watch-bystander', brokerPort)
+    try {
+      // The orchestrator opts in to channel-wide visibility. The bystander is
+      // an ordinary session on the SAME channel: it must stay unaffected.
+      await handleChannelTool('join_channel', { name: 'watch-ch', watch: true }, ORCH.channelDeps)
+      await handleChannelTool('join_channel', { name: 'watch-ch' }, WORKER.channelDeps)
+      await handleChannelTool('join_channel', { name: 'watch-ch' }, BYSTANDER.channelDeps)
+
+      // Topic is created AFTER the orchestrator started watching, and neither
+      // the orchestrator nor the bystander ever joins it.
+      const started = JSON.parse(
+        await handleTopicTool('start_topic', { topic: 'KAI-999', channel: 'watch-ch' }, WORKER.topicDeps),
+      )
+      const topicId = started.id as string
+
+      ORCH.received.length = 0
+      BYSTANDER.received.length = 0
+
+      await handleTopicTool('send_message_to_topic', { text: 'PR merged', topic: 'KAI-999' }, WORKER.topicDeps)
+
+      await waitUntil(() => (ORCH.received.some((m) => m.text === 'PR merged') ? true : null), 3000)
+
+      const seen = ORCH.received.find((m) => m.text === 'PR merged')
+      expect(seen).toBeDefined()
+      expect(seen?.threadTs).toBe(topicId)
+      expect(seen?.channel).toBe('watch-ch')
+      // Tagged with the topic, so the watcher can tell which room it's reading.
+      expect(seen?.topicName).toBe('KAI-999')
+
+      // Opt-in guarantee: the ordinary session on the same channel, which also
+      // never joined the topic, must NOT be exposed to this traffic.
+      expect(BYSTANDER.received.some((m) => m.text === 'PR merged')).toBe(false)
+
+      // The watch is live and whoami says so — against a real broker and a real
+      // SSE stream, not a stubbed liveness flag.
+      const live = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(live.subscribedChannels).toContainEqual(
+        expect.objectContaining({ name: 'watch-ch', watching: true, watchingActive: true }),
+      )
+
+      // Kill the stream: the subscription survives (watching stays true) but the
+      // orchestrator is now deaf, and whoami must admit it instead of reporting
+      // a watch that no longer delivers anything.
+      ORCH.listener.stop()
+      const deaf = JSON.parse(await handleIdentityTool('whoami', {}, ORCH.identityDeps))
+      expect(deaf.subscribedChannels).toContainEqual(
+        expect.objectContaining({ name: 'watch-ch', watching: true, watchingActive: false }),
+      )
+    } finally {
+      ORCH.listener.stop()
+      WORKER.listener.stop()
+      BYSTANDER.listener.stop()
     }
   }, 15_000)
 })

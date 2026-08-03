@@ -89,6 +89,9 @@ export class MessageBus extends EventEmitter {
     if (msg.threadTs) {
       meta.thread_ts = msg.threadTs
     }
+    if (msg.topicName) {
+      meta.topic = msg.topicName
+    }
 
     try {
       await this.mcp.notification({

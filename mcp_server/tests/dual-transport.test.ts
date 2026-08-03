@@ -153,7 +153,12 @@ function makeDeps(transports: Transport[], sessionName = 'architect') {
   session.setName(sessionName)
   const context = new ActiveContext()
   const router = new TransportRouter(transports)
-  return { session, context, router }
+  const locations: ResolvedLocation[] = transports.map((t) => ({
+    name: t.source,
+    isLocal: t.source === 'local',
+    channels: [],
+  }))
+  return { session, context, router, locations }
 }
 
 describe('Dual transport: channel routing', () => {

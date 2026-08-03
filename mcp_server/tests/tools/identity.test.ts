@@ -165,9 +165,116 @@ describe('Identity Tools', () => {
         expect(result.objective).toBe('design the API')
         expect(result.activeChannel).toEqual({ name: 'default', location: 'local' })
         expect(result.subscribedChannels).toEqual([
-          { name: 'default', location: 'local', source: 'fallback' },
-          { name: 'project_x', location: 'local', source: 'manual' },
+          { name: 'default', location: 'local', source: 'fallback', watching: false, watchingActive: false },
+          { name: 'project_x', location: 'local', source: 'manual', watching: false, watchingActive: false },
         ])
+      })
+
+      it('reports which channels are in channel-wide watch mode (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        deps.context.joinChannel('quiet', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: true },
+          { name: 'quiet', location: 'local', source: 'manual', watching: false, watchingActive: false },
+        ])
+      })
+
+      // `watching` is what the session ASKED for; it stays true across a broker
+      // outage, because the subscription is still there. What must not stay
+      // true is the claim that the watch is in effect: local topic traffic only
+      // reaches this session over the SSE stream, so a disconnected listener
+      // means a deaf watcher. Telling it otherwise is the confidently-blind
+      // failure this whole ticket exists to kill.
+      it('does not claim a watch is in effect while the local event listener is disconnected (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }) },
+          ),
+        )
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: false },
+        ])
+      })
+
+      // watchingActive is a claim about LOCAL delivery: the SSE stream carries
+      // local topic traffic only. A remote subscription flagged `watching` (only
+      // reachable by bypassing the tool, today — see KAI-413) must never inherit
+      // a live local stream as evidence that it is being watched.
+      it('never reports a REMOTE watch as active, even with a live local event stream (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'flatout', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'flatout', source: 'manual', watching: true, watchingActive: false },
+        ])
+      })
+
+      // The lesson of KAI-408/KAI-418, applied here: `watching` reports the
+      // REQUEST, `watchingActive` reports "a socket is open NOW". Neither can
+      // say "I MAY HAVE MISSED MESSAGES" — and a health signal that cannot say
+      // that is an unsound oracle. whoami must be able to say it.
+      it('admits it may have missed messages when the event stream reported an unfillable gap (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: true }) },
+          ),
+        )
+        // The socket is open, so the watch IS live — but the session has a hole
+        // in its history and must not pretend otherwise.
+        expect(result.subscribedChannels).toEqual([
+          { name: 'kai', location: 'local', source: 'manual', watching: true, watchingActive: true },
+        ])
+        expect(result.eventStream).toEqual({ connected: true, mayHaveMissedMessages: true })
+      })
+
+      it('reports a clean event stream as having missed nothing (KAI-414)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        deps.context.joinChannel('kai', 'manual', 'local', true)
+        await handleIdentityTool('introduce', { name: 'orchestrator' }, deps)
+
+        const result = JSON.parse(
+          await handleIdentityTool(
+            'whoami',
+            {},
+            { ...deps, localEventStream: () => ({ connected: true, mayHaveMissedMessages: false }) },
+          ),
+        )
+        expect(result.eventStream).toEqual({ connected: true, mayHaveMissedMessages: false })
       })
 
       it('omits activeTopic when none set', async () => {
