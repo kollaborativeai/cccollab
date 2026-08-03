@@ -529,7 +529,9 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
           .string()
           .optional()
           .describe(
-            'Organization id (from list_organizations) to create this session in. ' +
+            'Organization to create this session in, as its slug (e.g. "acme") — the readable ' +
+              "handle from list_organizations, matching the organization's web URL. Its id is " +
+              'also accepted, and is the only way to name an organization that has no slug. ' +
               'Required when connected to a remote location.',
           ),
       },
@@ -590,8 +592,9 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_organizations',
     {
       description:
-        'List the organizations you belong to on each remote location, as {id, name, location}. ' +
-        'Pick an id and pass it to introduce as the `organization` argument. ' +
+        'List the organizations you belong to on each remote location, as {id, name, slug?, location}. ' +
+        'Pass the `slug` to introduce as the `organization` argument — it is the readable handle, ' +
+        "matching the organization's web URL. Fall back to `id` for an organization with no slug. " +
         'Callable before introduce.',
       inputSchema: {},
     },

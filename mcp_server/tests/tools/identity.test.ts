@@ -6,6 +6,7 @@ import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 import { ensureLazyAttach } from '../../src/transport/attach.js'
 import { AttachDiagnostics } from '../../src/transport/diagnostics.js'
+import { OrganizationRejectedError } from '../../src/transport/index.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { Transport } from '../../src/transport/index.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
@@ -51,11 +52,14 @@ function createMockDeps(): IdentityToolDeps {
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
  * Optional `remoteOverrides` can be used to add extra methods to the fake
- * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ * remote transport (e.g. `getBoundOrganization` for the whoami tests).
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganization: () => Promise<{ name: string; slug?: string } | null>
+    introduce: (args: Record<string, unknown>) => Promise<void>
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -253,6 +257,39 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
         expect(result.name).toBe('reviewer')
       })
+
+      it('reports an error when the remote refuses the organization, instead of reporting success', async () => {
+        // KAI-407: slugs make a mistyped organization ordinary where a
+        // copy-pasted 32-char id made it near-impossible. A refusal means the
+        // session never bound, so returning the success shape would leave the
+        // caller believing it had.
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new OrganizationRejectedError('Organization not found.')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBeUndefined()
+        expect(result.error).toContain('acme')
+        expect(result.error).toContain('Organization not found.')
+      })
+
+      it('still reports success when a transport fails transiently, so a later introduce re-registers', async () => {
+        // The counterpart to the test above: a dropped connection is not a
+        // refusal. It stays non-fatal — the org is fine, the socket was not.
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new Error('WebSocket closed')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBe('reviewer')
+        expect(result.error).toBeUndefined()
+      })
     })
 
     describe('whoami — organization', () => {
@@ -272,18 +309,36 @@ describe('Identity Tools', () => {
         expect(result.locations.local.organization).toBe('local')
       })
 
-      it('reports the bound organization name for a remote location', async () => {
+      it('omits an empty bound organization slug rather than reporting it', async () => {
+        // `organizationSlug: ''` would survive JSON.stringify and read as a
+        // usable handle; echoing it back to `introduce` trips "An organization
+        // is required". Absent is the honest answer. (`undefined` is
+        // unobservable here — stringify drops it either way.)
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => 'Acme',
+          getBoundOrganization: async () => ({ name: 'Acme', slug: '' }),
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
+        expect('organizationSlug' in result.locations.remote).toBe(false)
+      })
+
+      it('reports the bound organization slug as its own field, not packed into the name', async () => {
+        // KAI-407: the slug is what `introduce` accepts, so it must be readable
+        // without parsing it back out of a display string — an org name may
+        // itself contain parentheses (`Acme (EU)`).
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganization: async () => ({ name: 'Acme (EU)', slug: 'acme_eu' }),
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme_eu' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme (EU)')
+        expect(result.locations.remote.organizationSlug).toBe('acme_eu')
       })
 
       it('omits organization when the remote location has no bound org yet', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => null,
+          getBoundOrganization: async () => null,
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))

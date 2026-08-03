@@ -184,3 +184,28 @@ export class TopicNameConflictError extends Error {
     this.name = 'TopicNameConflictError'
   }
 }
+
+/**
+ * Raised by transports when the backend refuses the `organizationId`
+ * passed to `introduce` — the org does not exist, the caller is not a
+ * member, or the value is not a shape the backend accepts.
+ *
+ * Distinct from a transient transport failure (dropped socket, timeout),
+ * which `introduce` still throws raw: those are non-fatal because a later
+ * introduce re-registers, whereas a refused organization is deterministic
+ * — retrying the same value fails identically forever. The tool layer
+ * swallows the former and surfaces this one (KAI-407).
+ *
+ * `message` is the backend's own text, forwarded verbatim. The backend
+ * deliberately collapses "no such org", "not a member" and "archived"
+ * into one indistinguishable message so `introduce` cannot be used to
+ * probe which org slugs exist (KAI-407). Never replace it with a
+ * friendlier, more specific one — that reintroduces the oracle.
+ */
+export class OrganizationRejectedError extends Error {
+  readonly code = 'ORGANIZATION_REJECTED' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'OrganizationRejectedError'
+  }
+}

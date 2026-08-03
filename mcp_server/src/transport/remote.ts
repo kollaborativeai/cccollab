@@ -5,6 +5,7 @@ import { anyApi } from 'convex/server'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
+  OrganizationRejectedError,
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
@@ -397,6 +398,13 @@ export class RemoteTransport implements Transport {
       }
     } catch (err) {
       this.registerFailure('introduce', err)
+      // A refused organization is the caller's argument being wrong, not
+      // the transport being unhealthy. Re-throw it as a distinct type so
+      // the tool layer can report it instead of swallowing it as
+      // "transient, a later introduce will re-register" (KAI-407).
+      if (args.organizationId !== undefined && isOrganizationRejection(err)) {
+        throw new OrganizationRejectedError(extractConvexErrorMessage(err))
+      }
       throw err
     }
   }
@@ -521,14 +529,16 @@ export class RemoteTransport implements Transport {
 
   /**
    * Lists the authenticated user's organizations on KAI's deployment.
-   * Backs the `list_organizations` tool.
+   * Backs the `list_organizations` tool. `slug` (KAI-407) is absent on orgs
+   * that never got one; those remain addressable by `id`.
    */
-  async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+  async listOrganizations(): Promise<Array<{ id: string; name: string; slug?: string }>> {
     if (!this.enabled) return []
     try {
       return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
+        slug?: string
       }>
     } catch (err) {
       this.registerFailure('listOrganizations', err)
@@ -537,22 +547,32 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Returns the name of the organization this transport's session is bound
-   * to, or null when no session has been introduced or the lookup fails.
-   * Backs the `organization` field of `whoami`.
+   * Returns the organization this transport's session is bound to — its
+   * display `name`, plus its `slug` (KAI-407) when it has one. Backs the
+   * `organization` / `organizationSlug` fields of `whoami`. Null when no
+   * session has been introduced or the lookup fails.
+   *
+   * The slug is reported as its own field rather than folded into the name
+   * (`"Acme (acme)"`), because the point of surfacing it is that a caller can
+   * hand it straight back to `introduce` — and a name may itself contain
+   * parentheses (`Acme (EU)`), which would make the packed form ambiguous to
+   * pick apart.
    *
    * Errors are intentionally swallowed without `registerFailure` — this
    * method backs an informational status surface (`whoami`) that is polled
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  async getBoundOrganizationName(): Promise<string | null> {
+  async getBoundOrganization(): Promise<{ name: string; slug?: string } | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
       const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
         sessionId: this.sessionId,
-      })) as { organizationName: string }
-      return ctx.organizationName
+      })) as { organizationName: string; organizationSlug?: string }
+      return {
+        name: ctx.organizationName,
+        ...(ctx.organizationSlug ? { slug: ctx.organizationSlug } : {}),
+      }
     } catch {
       return null
     }
@@ -1256,6 +1276,29 @@ function extractConvexErrorMessage(err: unknown): string {
     }
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Detect whether an introduce failure is the backend refusing the
+ * `organizationId` argument, as opposed to a transient transport fault.
+ *
+ * Two shapes reach us, one per backend generation:
+ *  - `ConvexError({code: 'ORGANIZATION_NOT_FOUND'})` — the slug-resolving
+ *    backend's own refusal (unknown slug/id, non-member, archived; all
+ *    collapsed into that one code on purpose).
+ *  - `ArgumentValidationError` — a backend whose `introduce` validator is
+ *    still `v.id('organizations')`, which rejects any slug before the
+ *    handler runs. Convex raises this by name; the string check is a
+ *    fallback for clients that only surface it in the message.
+ *
+ * Callers must additionally confirm an `organizationId` was actually sent
+ * before treating an ArgumentValidationError as an org rejection — the
+ * same error covers every other argument too.
+ */
+function isOrganizationRejection(err: unknown): boolean {
+  if (extractConvexErrorCode(err) === 'ORGANIZATION_NOT_FOUND') return true
+  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
+  return err instanceof Error && /ArgumentValidationError/i.test(err.message)
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {
