@@ -408,7 +408,7 @@ describe('Channel Tools', () => {
           Promise.resolve({
             channels: [
               { name: 'cccollab', subscriberCount: 1 },
-              { name: 'flatoutsolutions-ai', subscriberCount: 3 },
+              { name: 'acme-ai', subscriberCount: 3 },
             ],
           }),
       })
@@ -428,7 +428,7 @@ describe('Channel Tools', () => {
             watching: false,
           },
           {
-            name: 'flatoutsolutions-ai',
+            name: 'acme-ai',
             location: 'local',
             source: null,
             subscriberCount: 3,

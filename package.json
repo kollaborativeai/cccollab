@@ -1,12 +1,13 @@
 {
-  "name": "cccollab",
+  "name": "cccollab-monorepo",
   "version": "1.0.0",
   "private": true,
-  "description": "Monorepo root for the @kollaborativeai/cccollab MCP server workspace.",
+  "description": "Monorepo root for the cccollab MCP server workspace.",
   "packageManager": "yarn@4.12.0",
   "workspaces": [
     "mcp_server"
   ],
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "yarn workspaces foreach -A --topological-dev --no-private run build",
@@ -27,7 +28,14 @@
     "typescript": "^6.0.3"
   },
   "resolutions": {
-    "hono": "^4.12.14"
+    "hono": "^4.12.33",
+    "tar": "^7.5.22",
+    "fast-uri": "^3.1.5",
+    "ws": "^8.21.1",
+    "js-yaml": "^4.3.1",
+    "postcss": "^8.5.25",
+    "vite": "^8.2.0",
+    "brace-expansion": "^5.0.9"
   },
   "lint-staged": {
     "*.ts": [

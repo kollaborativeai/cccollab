@@ -928,7 +928,7 @@ describe('KAI-368: a failing remote attach does not brick local', () => {
 
 /**
  * Regression: when the user only has a single non-`local`, non-`remote`
- * location configured (e.g. `"flatout"`), `send_message_to_channel`
+ * location configured (e.g. `"acme"`), `send_message_to_channel`
  * without an explicit `location` must successfully route the message.
  * The old `ActiveContext.getChannelLocation` hardcoded checks for
  * `"local"` / `"remote"` and returned `undefined` for any other name,
@@ -936,27 +936,27 @@ describe('KAI-368: a failing remote attach does not brick local', () => {
  */
 describe('Dual transport: arbitrary location name routing', () => {
   it('send_message_to_channel without explicit location succeeds when subscribed at an arbitrary location', async () => {
-    const flatout = new FakeTransport('flatout')
-    const deps = makeDeps([flatout])
-    // User is subscribed to "dev" at "flatout" (e.g. via cccollab.json
+    const acme = new FakeTransport('acme')
+    const deps = makeDeps([acme])
+    // User is subscribed to "dev" at "acme" (e.g. via cccollab.json
     // auto-subscribe). No active channel is set yet, and the caller
     // provides `channel: "dev"` without `location`.
-    deps.context.joinChannel('dev', 'cccollab.json', 'flatout')
+    deps.context.joinChannel('dev', 'cccollab.json', 'acme')
 
     const result = JSON.parse(await handleChannelTool('send_message_to_channel', { text: 'hi', channel: 'dev' }, deps))
-    expect(result).toEqual({ channel: 'dev', location: 'flatout' })
-    expect(flatout.broadcast).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev', text: 'hi' })
+    expect(result).toEqual({ channel: 'dev', location: 'acme' })
+    expect(acme.broadcast).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev', text: 'hi' })
   })
 
   it('start_topic without explicit location uses the arbitrary location subscription', async () => {
-    const flatout = new FakeTransport('flatout')
-    const deps = makeDeps([flatout])
-    deps.context.joinChannel('dev', 'cccollab.json', 'flatout')
+    const acme = new FakeTransport('acme')
+    const deps = makeDeps([acme])
+    deps.context.joinChannel('dev', 'cccollab.json', 'acme')
 
     const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'planning', channel: 'dev' }, deps))
     expect(result.id).toBeDefined()
     expect(result.channel).toBe('dev')
-    expect(result.location).toBe('flatout')
-    expect(flatout.createTopic).toHaveBeenCalled()
+    expect(result.location).toBe('acme')
+    expect(acme.createTopic).toHaveBeenCalled()
   })
 })
