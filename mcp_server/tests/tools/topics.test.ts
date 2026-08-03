@@ -2,22 +2,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { handleTopicTool, type TopicToolDeps } from '../../src/tools/topics.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
-import { LocalTransport } from '../../src/transport/local.js'
+import { registeredLocalTransport } from '../fixtures/registered-local-transport.js'
 import { TransportRouter } from '../../src/transport/router.js'
 
-function createMockDeps(): TopicToolDeps {
+async function createMockDeps(): Promise<TopicToolDeps> {
   const context = new ActiveContext()
   context.joinChannel('default', 'fallback', 'local')
   const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
   session.setName('architect')
-  const transport = new LocalTransport(7850)
+  const transport = await registeredLocalTransport(7850)
   return { session, context, router: new TransportRouter([transport]) }
 }
 
 describe('Topic Tools', () => {
   describe('requires name', () => {
     it('returns error when session has no name and tries to start_topic', async () => {
-      const deps = createMockDeps()
+      const deps = await createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
       const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'Test' }, depsNoName))
@@ -26,15 +26,33 @@ describe('Topic Tools', () => {
     })
 
     it('returns error when session has no name and tries to send_message_to_topic', async () => {
-      const deps = createMockDeps()
+      const deps = await createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
       const result = JSON.parse(await handleTopicTool('send_message_to_topic', { text: 'Hi' }, depsNoName))
       expect(result.error).toContain('No name set')
     })
 
+    it('returns error when session has no name and tries to send_message_to_session', async () => {
+      const deps = await createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(
+        await handleTopicTool('send_message_to_session', { sessionId: 'x', text: 'Hi' }, depsNoName),
+      )
+      expect(result.error).toContain('No name set')
+    })
+
+    it('returns error when session has no name and tries to read_session_messages', async () => {
+      const deps = await createMockDeps()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      const depsNoName = { ...deps, session }
+      const result = JSON.parse(await handleTopicTool('read_session_messages', { sessionId: 'x' }, depsNoName))
+      expect(result.error).toContain('No name set')
+    })
+
     it('allows list_topics without name', async () => {
-      const deps = createMockDeps()
+      const deps = await createMockDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ topics: [] }) })
@@ -47,8 +65,8 @@ describe('Topic Tools', () => {
 
   describe('handleTopicTool', () => {
     let deps: TopicToolDeps
-    beforeEach(() => {
-      deps = createMockDeps()
+    beforeEach(async () => {
+      deps = await createMockDeps()
     })
     afterEach(() => {
       vi.unstubAllGlobals()
@@ -249,7 +267,7 @@ describe('Topic Tools', () => {
       const context = new ActiveContext()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       session.setName('architect')
-      const deps2 = { session, context, router: new TransportRouter([new LocalTransport(7850)]) }
+      const deps2 = { session, context, router: new TransportRouter([await registeredLocalTransport(7850)]) }
       const result = JSON.parse(await handleTopicTool('start_topic', { topic: 'x' }, deps2))
       expect(result.error).toContain('No active channel')
     })
@@ -468,10 +486,12 @@ describe('Topic Tools', () => {
       // Unarchiving restores the acting session's membership so isJoined is true
       // again — symmetric with archive keeping it (KAI-373).
       expect(deps.context.isTopicJoined('uuid-unarch')).toBe(true)
-      // The unarchive request carries who unarchived, mirroring archive's archivedBy.
+      // The unarchive request carries the actor's registration id; the broker
+      // resolves the display name from it, so a caller cannot claim to be
+      // someone else (KAI-514).
       const unarchiveCall = mockFetch.mock.calls.find((call) => String(call[0]).includes('/unarchive'))
       expect(unarchiveCall).toBeDefined()
-      expect(JSON.parse(unarchiveCall![1].body)).toEqual({ unarchivedBy: 'architect' })
+      expect(JSON.parse(unarchiveCall![1].body)).toEqual({ sessionId: 'test-registration-id' })
     })
 
     it('list_sessions with channel arg rejects unsubscribed', async () => {
@@ -689,16 +709,21 @@ describe('Topic Tools', () => {
       await expect(handleTopicTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown topic tool')
     })
 
-    // Direct messaging was removed from the backend and the mcp_server.
-    // These tool names must no longer be handled - they fall through to
-    // the unknown-tool guard rather than silently doing anything.
-    it('no longer handles the removed direct-message tools', async () => {
-      await expect(handleTopicTool('send_message_to_session', { to: 'bob', text: 'hi' }, deps)).rejects.toThrow(
-        'Unknown topic tool',
-      )
-      await expect(handleTopicTool('read_dm_thread', { sessionName: 'bob' }, deps)).rejects.toThrow(
-        'Unknown topic tool',
-      )
+    // Direct messaging was removed once (feat(mcp)!: remove direct
+    // messaging) because the *remote* transport's DM subscription called
+    // a Convex function that no longer existed, and a missing function
+    // used to disable the entire remote transport. KAI-333 fixed that
+    // root cause (a missing remote function now only skips that one
+    // tool), and KAI-514 reintroduces direct messaging on the local
+    // transport only, addressed by stable id rather than by name.
+    it('send_message_to_session requires sessionId and text', async () => {
+      const result = JSON.parse(await handleTopicTool('send_message_to_session', { text: 'hi' }, deps))
+      expect(result.error).toMatch(/sessionId/i)
+    })
+
+    it('read_session_messages requires sessionId', async () => {
+      const result = JSON.parse(await handleTopicTool('read_session_messages', {}, deps))
+      expect(result.error).toMatch(/sessionId/i)
     })
 
     it('read_topic_messages returns paged topic history from the transport', async () => {

@@ -8,6 +8,8 @@ import {
   TopicNameConflictError,
   type Transport,
   type TransportChannel,
+  type TransportDmPage,
+  type TransportDmResult,
   type TransportHistoryPage,
   type TransportSession,
   type TransportTopic,
@@ -821,6 +823,27 @@ export class RemoteTransport implements Transport {
       this.registerFailure('listSessions', err)
       return []
     }
+  }
+
+  // Direct messages are local-only as of KAI-514; the remote transport
+  // (KAI-517) will replace these stubs with real Convex-backed delivery.
+  async sendSessionMessage(args: {
+    sessionName: string
+    toSessionId: string
+    text: string
+  }): Promise<TransportDmResult> {
+    void args
+    return { delivered: false, reason: 'Direct messages are not supported on this location yet.' }
+  }
+
+  async readSessionMessages(args: {
+    sessionName: string
+    withSessionId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportDmPage> {
+    void args
+    return { messages: [], hasMore: false }
   }
 
   // ─── Message history ──────────────────────────────────────────────────

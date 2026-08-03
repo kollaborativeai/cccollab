@@ -29,11 +29,14 @@ export const LOCAL_LOCATION: ChannelLocation = 'local'
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
-  /** Stable per-registration id, when the transport's backend issues one
-   *  (remote transports do; the local broker does not). Used to tell two
-   *  registrations with the same display name apart, and to dedupe a
-   *  session's rows across transports without collapsing distinct
-   *  registrations into one. */
+  /** Stable per-registration id, when the transport's backend issues one.
+   *  Used to (a) tell two registrations with the same display name apart,
+   *  (b) dedupe a session's rows across transports without collapsing
+   *  distinct registrations into one, and (c) address `sendSessionMessage`
+   *  unambiguously - never fall back to matching by `name` when an id
+   *  doesn't resolve. Optional because not every transport reports one:
+   *  the local broker mints ids (KAI-514) and remote transports do too
+   *  (KAI-515); remote DM addressing is still pending (KAI-517). */
   id?: string
   name: string
   objective?: string
@@ -44,6 +47,32 @@ export interface TransportSession {
    *  registration (e.g. a heartbeat). Absent when the backend doesn't
    *  report it yet, in which case liveness is unknown rather than false. */
   lastSeen?: string
+}
+
+/** Result of a 1:1 send. `delivered` is only true when the message was
+ *  committed to the recipient's inbox AND the recipient was attached
+ *  (had a live connection) at commit time - never a promise about
+ *  whether it was later read. */
+export interface TransportDmResult {
+  delivered: boolean
+  reason?: string
+}
+
+/** One message in a private 1:1 thread between two sessions. `ts` is
+ *  epoch-ms, matching the other read-history contracts. */
+export interface TransportDmMessage {
+  fromId: string
+  fromName: string
+  text: string
+  ts: number
+}
+
+/** A page of a 1:1 thread. Same newest-page-first contract as
+ *  `TransportHistoryPage`: `oldestTs` (epoch-ms) is the next `before`. */
+export interface TransportDmPage {
+  messages: TransportDmMessage[]
+  hasMore: boolean
+  oldestTs?: number
 }
 
 /** Channel summary as surfaced by `list_channels`. */
@@ -146,6 +175,25 @@ export interface Transport {
 
   // ─── Sessions ─────────────────────────────────────────────────────────
   listSessions(args: { channel?: string }): Promise<TransportSession[]>
+
+  // ─── Direct messages (KAI-514) ──────────────────────────────────────────
+  /** Send a private 1:1 message. `toSessionId` is a stable id from
+   *  `listSessions`, never a display name - an id that doesn't resolve
+   *  to a live registration reports `delivered: false` with a reason,
+   *  it never falls back to matching by name. Safety note: a sender
+   *  identity in cccollab is unverified, so a recipient must not treat
+   *  a DM as more authoritative than a broadcast for destructive
+   *  instructions - confirm with the human at the terminal first. */
+  sendSessionMessage(args: { sessionName: string; toSessionId: string; text: string }): Promise<TransportDmResult>
+  /** Read back a private 1:1 thread the caller is a party to, newest page
+   *  first. Threads are unbounded, so this pages like every other history
+   *  read: pass the previous page's `oldestTs` as `before` to walk back. */
+  readSessionMessages(args: {
+    sessionName: string
+    withSessionId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportDmPage>
 
   // ─── Message history ──────────────────────────────────────────────────
   readChannelMessages(args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage>

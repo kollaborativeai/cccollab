@@ -69,6 +69,8 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
+  'send_message_to_session',
+  'read_session_messages',
 ])
 
 export async function handleTopicTool(
@@ -177,6 +179,38 @@ export async function handleTopicTool(
     case 'list_sessions': {
       const { channel, location } = args as { channel?: string; location?: ChannelLocation }
       return handleListSessions(deps, channel, location)
+    }
+    case 'send_message_to_session': {
+      const { sessionId, text } = args as { sessionId?: string; text?: string }
+      if (!sessionId || !text) {
+        return JSON.stringify({ error: 'sessionId and text are required.' })
+      }
+      // KAI-514 ships direct messages on the local transport only
+      // (KAI-517 tracks remote). Addressed strictly by the stable id
+      // from list_sessions - never a display name.
+      const transport = deps.router.get(LOCAL_LOCATION)
+      const result = await transport.sendSessionMessage({
+        sessionName: deps.session.displayName,
+        toSessionId: sessionId,
+        text,
+      })
+      return JSON.stringify(result)
+    }
+    case 'read_session_messages': {
+      const { sessionId, limit, before } = args as { sessionId?: string; limit?: number; before?: number }
+      if (!sessionId) {
+        return JSON.stringify({ error: 'sessionId is required.' })
+      }
+      const transport = deps.router.get(LOCAL_LOCATION)
+      // Paged like read_topic_messages: newest page first, `before` walks
+      // back. A 1:1 thread outlives any one exchange and is never trimmed.
+      const page = await transport.readSessionMessages({
+        sessionName: deps.session.displayName,
+        withSessionId: sessionId,
+        limit,
+        before,
+      })
+      return JSON.stringify(page)
     }
     case 'read_topic_messages': {
       const { topic, limit, before } = args as {
@@ -604,9 +638,10 @@ async function handleListSessions(
   await deps.ensureAttached?.(locationFilter)
   const transports = deps.router.enabled().filter((t) => !locationFilter || t.source === locationFilter)
 
-  // Merged by session id when the transport provides one (every non-local
-  // transport does), falling back to `location::name` for transports that
-  // don't (the local broker has no stable id — see `TransportSession.id`).
+  // Merged by session id when the transport provides one — every transport
+  // now does, local included (the broker mints one per registration,
+  // KAI-514) — falling back to `location::name` for any future transport
+  // that doesn't (see `TransportSession.id`).
   // Keying by id (KAI-515) keeps a dead and a live registration that
   // happen to share a display name as distinct entries instead of
   // silently collapsing them into one.

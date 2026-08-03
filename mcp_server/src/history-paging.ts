@@ -1,8 +1,9 @@
 /**
- * Pure paging logic for topic read-history, extracted from the broker so it
- * can be unit-tested without spawning the HTTP server (importing `broker.ts`
- * starts a listener as a side effect). The broker maps its in-memory messages
- * to epoch-ms `HistoryEntry`s and delegates the windowing here.
+ * Pure paging logic for read-history (topic broadcasts and 1:1 threads
+ * alike), extracted from the broker so it can be unit-tested without
+ * spawning the HTTP server (importing `broker.ts` starts a listener as a
+ * side effect). The broker normalizes its in-memory messages to epoch-ms
+ * `ts` and delegates the windowing here.
  */
 
 export const HISTORY_DEFAULT_LIMIT = 50
@@ -15,16 +16,16 @@ export function clampHistoryLimit(raw: string | null): number {
   return Math.max(1, Math.min(HISTORY_MAX_LIMIT, Math.floor(n)))
 }
 
-/** One message, timestamp already normalized to epoch-ms. */
+/** Anything pageable: one message whose timestamp is epoch-ms. Topic history
+ *  carries `{sender, text}`, a 1:1 thread carries `{fromId, fromName, text}` -
+ *  the windowing only ever looks at `ts`. */
 export interface HistoryEntry {
-  sender: string
-  text: string
   ts: number
 }
 
 /** A page of history, oldest-first. `hasMore` means older messages remain. */
-export interface HistoryPage {
-  messages: HistoryEntry[]
+export interface HistoryPage<T extends HistoryEntry> {
+  messages: T[]
   hasMore: boolean
 }
 
@@ -40,10 +41,10 @@ export interface HistoryPage {
  * group that straddles the boundary — the strict-`<` cursor then stays exact
  * (no drop, no duplicate) while the `oldestTs`-only contract is preserved.
  */
-export function pageTopicHistory(
-  all: readonly HistoryEntry[],
+export function pageHistory<T extends HistoryEntry>(
+  all: readonly T[],
   opts: { limit: number; before: number | null },
-): HistoryPage {
+): HistoryPage<T> {
   const older = opts.before === null ? all : all.filter((m) => m.ts < opts.before!)
   let start = Math.max(0, older.length - opts.limit)
   while (start > 0 && older[start - 1]!.ts === older[start]!.ts) start--

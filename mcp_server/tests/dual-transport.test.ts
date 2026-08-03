@@ -98,6 +98,14 @@ class FakeTransport implements Transport {
   listSessions = vi.fn(async (_args: { channel?: string }): Promise<TransportSession[]> => {
     return this.sessions
   })
+  sendSessionMessage = vi.fn(async (_args: { sessionName: string; toSessionId: string; text: string }) => ({
+    delivered: false,
+    reason: 'not supported in fake',
+  }))
+  readSessionMessages = vi.fn(async (_args: { sessionName: string; withSessionId: string }) => ({
+    messages: [],
+    hasMore: false,
+  }))
   deregisterSession = vi.fn(async (_args: { sessionName: string }) => {})
   readChannelMessages = vi.fn(
     async (_args: { channel: string; limit?: number; before?: number }): Promise<TransportHistoryPage> => ({
