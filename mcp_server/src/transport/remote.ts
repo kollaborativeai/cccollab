@@ -6,6 +6,7 @@ import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
+  type SessionIdentity,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -263,6 +264,11 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /** Why the last introduce's declared identity did not land on the
+   *  backend, or null if it landed (or none was declared). Surfaced by
+   *  `whoami` so a silently-dropped identity is inspectable rather than
+   *  buried in a stderr log line. */
+  private identityRejectedReason: string | null = null
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -331,6 +337,16 @@ export class RemoteTransport implements Transport {
   }
 
   /**
+   * Human-readable reason the declared identity was not stored on this
+   * location, or null when it was stored / none was declared. Unlike
+   * `degradation` this does NOT disable the transport: the session is
+   * fully functional, it just isn't identifiable. Reported by `whoami`.
+   */
+  get identityRejected(): string | null {
+    return this.identityRejectedReason
+  }
+
+  /**
    * Seed the per-topic `sinceTs` cursor so the next `subscribeTopicMessages`
    * call starts the reactive query past this ts.
    *
@@ -370,16 +386,22 @@ export class RemoteTransport implements Transport {
    * counts this against the failure window — a transient blip at startup
    * is a failure just like one mid-session.
    */
-  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+  async introduce(args: {
+    sessionName: string
+    objective?: string
+    organizationId?: string
+    identity?: SessionIdentity
+  }): Promise<void> {
     if (!this.enabled) {
       throw new Error('remote transport is disabled; cannot introduce')
     }
     try {
-      const id = (await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.introduce), {
+      const base = {
         sessionName: args.sessionName,
         objective: args.objective,
         organizationId: args.organizationId,
-      })) as string
+      }
+      const id = (await this.introduceWithIdentityFallback(base, args.identity)) as string
       this.sessionId = id
       this.startHeartbeat()
       // Preload the topic-id cache so `hasTopic` answers correctly on
@@ -398,6 +420,63 @@ export class RemoteTransport implements Transport {
     } catch (err) {
       this.registerFailure('introduce', err)
       throw err
+    }
+  }
+
+  /**
+   * Call the introduce mutation with declared identity, auto-falling-back
+   * to a no-identity call when the backend won't accept the `identity` arg
+   * (KAI-401 Option D).
+   *
+   * We deliberately do NOT try to recognise "backend doesn't know this
+   * field" by inspecting the error. That was the original design and it
+   * does not survive contact with a real deployment: production Convex
+   * redacts every backend-side rejection to an unnamed
+   * `Error: [CONVEX M(...)] [Request ID: ...] Server Error`. No
+   * `ArgumentValidationError` ever reaches the client, so a name/message
+   * matcher is calibrated against an error that only exists in tests — it
+   * never fires in production, the fallback never runs, and declaring
+   * identity turns introduce into a hard failure that leaves the session
+   * unregistered on remote (verified live, 2026-07-15).
+   *
+   * Instead the retry IS the discriminator: re-run the identical call
+   * minus identity. If that succeeds, identity was the cause — proven by
+   * experiment rather than guessed from a string. If it fails too, this
+   * was never about identity: rethrow the ORIGINAL error so the
+   * failure-window/degradation logic sees the real cause unchanged.
+   *
+   * Safe to retry: Convex mutations are transactions, so the failed
+   * attempt committed nothing to roll back over.
+   */
+  private async introduceWithIdentityFallback(
+    base: { sessionName: string; objective?: string; organizationId?: string },
+    identity: SessionIdentity | undefined,
+  ): Promise<unknown> {
+    const ref = fn<'mutation'>(this.refs.sessions.mutations.introduce)
+    if (identity === undefined) {
+      return this.client.mutation(ref, base)
+    }
+    try {
+      const accepted = await this.client.mutation(ref, { ...base, identity })
+      this.identityRejectedReason = null
+      return accepted
+    } catch (err) {
+      const withIdentityError = err instanceof Error ? err.message.split('\n')[0] : String(err)
+      let result: unknown
+      try {
+        result = await this.client.mutation(ref, base)
+      } catch {
+        // Fails with AND without identity → not an identity problem.
+        // Propagate the original error untouched.
+        throw err
+      }
+      // Succeeded without identity, failed with it → identity is the cause.
+      this.identityRejectedReason =
+        `Remote backend rejected the declared identity and it was NOT stored: ${withIdentityError}. ` +
+        `The session registered without it — grouping and stable-key restart (KAI-415) will not work ` +
+        `on this location until the backend accepts the optional \`identity\` arg on sessions:introduce.`
+      this.log(this.identityRejectedReason)
+      return result
     }
   }
 
@@ -799,6 +878,7 @@ export class RemoteTransport implements Transport {
         objective?: string
         machine?: string
         createdAt: number
+        identity?: SessionIdentity
         /** Backend field is `lastSeenAt` (see the cccollab Convex
          *  sessions.listByChannel handler); we normalise it to `lastSeen`
          *  on the transport-facing shape so the tool layer's staleness
@@ -815,6 +895,9 @@ export class RemoteTransport implements Transport {
         // session today; leave empty so the shape stays stable.
         channels: [],
         registeredAt: new Date(r.createdAt).toISOString(),
+        // Only surface identity when the backend row carries it, so a row
+        // without it serializes exactly as before (KAI-401 parity with local).
+        ...(r.identity ? { identity: r.identity } : {}),
         lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
       }))
     } catch (err) {

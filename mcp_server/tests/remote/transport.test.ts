@@ -143,6 +143,205 @@ describe('RemoteTransport graceful degradation', () => {
 })
 
 /**
+ * Self-declared identity on the remote transport (KAI-401), including the
+ * auto-fallback-on-reject path that is the no-silent-remote-regression
+ * guarantee: if KAI's Convex `introduce` validator doesn't yet accept the
+ * identity arg, sending it must NOT abort introduce (which would leave the
+ * remote transport unregistered and the session silently local-only —
+ * the KAI-413 failure family). Instead we retry once without identity.
+ */
+describe('RemoteTransport self-declared identity (KAI-401)', () => {
+  const identity = {
+    company: 'flatout',
+    repo: 'cccollab',
+    worktree: 'KAI-401',
+    branch: 'KAI-401',
+    cwd: '/projects/cccollab-KAI-401',
+    sessionId: 'uuid-401',
+    pid: 4321,
+  }
+
+  it('sends identity to introduce when the backend accepts it', async () => {
+    const introduceArgs: Array<Record<string, unknown>> = []
+    const { client } = makeStubClient(
+      async () => [], // listJoinedForUser preload
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        introduceArgs.push(args)
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.introduce({ sessionName: 'architect', identity })
+
+    expect(introduceArgs).toHaveLength(1)
+    expect(introduceArgs[0]!.identity).toEqual(identity)
+  })
+
+  it('auto-falls-back without identity on ArgumentValidationError, and stays enabled', async () => {
+    class ArgumentValidationError extends Error {
+      constructor() {
+        super('ArgumentValidationError: Object contains extra field `identity` that is not in the validator.')
+        this.name = 'ArgumentValidationError'
+      }
+    }
+    const introduceArgs: Array<Record<string, unknown>> = []
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        introduceArgs.push(args)
+        if ('identity' in args) throw new ArgumentValidationError()
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // Must not throw: a rethrow here aborts attach and loses remote entirely.
+    await expect(transport.introduce({ sessionName: 'architect', identity })).resolves.toBeUndefined()
+
+    // Transport survives: first attempt WITH identity, retry WITHOUT it.
+    expect(transport.enabled).toBe(true)
+    expect(introduceArgs).toHaveLength(2)
+    expect(introduceArgs[0]!.identity).toEqual(identity)
+    expect(introduceArgs[1]).not.toHaveProperty('identity')
+  })
+
+  it('does NOT swallow a genuine failure during the with-identity attempt: it propagates and counts toward degradation', async () => {
+    // Locks the over-catch boundary of the auto-fallback. A real failure
+    // (backend down, network partition) must NOT be mistaken for "backend
+    // rejected the field": it must propagate (introduce rethrows, so
+    // attach.ts's abort-before-register contract holds) and feed the
+    // degradation/failure-window logic.
+    //
+    // The boundary is drawn by EXPERIMENT, not by matching the error: a
+    // failure that persists when identity is removed is not about identity.
+    // (The previous shape of this test drew the boundary at
+    // `ArgumentValidationError` — an error a real deployment never returns,
+    // which is why the fallback never fired in production. The guarantee
+    // being locked is unchanged; only the discriminator is now one that
+    // survives contact with a real backend.)
+    let calls = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        calls += 1
+        void call
+        throw new Error(`network blip ${calls}`)
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // Each introduce rejects with the error from its WITH-identity attempt —
+    // the original cause, not the retry's — so degradation sees the real error.
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 1')
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 3')
+    await expect(transport.introduce({ sessionName: 'architect', identity })).rejects.toThrow('network blip 5')
+
+    // Two calls per introduce: the attempt, then the without-identity probe
+    // that proves this isn't an identity problem.
+    expect(calls).toBe(6)
+    // The failures reached the rolling-window logic and tripped degradation.
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/3 failures/)
+    // A real outage must never be misreported as "the backend rejected identity".
+    expect(transport.identityRejected).toBeNull()
+  })
+
+  /**
+   * REGRESSION (KAI-401 live): the error a real deployment actually returns.
+   *
+   * The auto-fallback above was calibrated against a locally-constructed
+   * `ArgumentValidationError`. A real Convex deployment does NOT return that
+   * to the client — it redacts the rejection to a generic, unnamed
+   * `Error: [CONVEX M(cccollab/sessions:introduce)] [Request ID: ...] Server Error`.
+   *
+   * Captured live against https://collab.kollaborativeai.com on 2026-07-15
+   * with an otherwise-identical A/B (same org, same client, same args):
+   *   - introduce WITHOUT identity -> resolves
+   *   - introduce WITH    identity -> throws the error reproduced below
+   *
+   * So on the real backend the matcher misses, the fallback never fires, and
+   * declaring identity makes introduce FAIL — leaving the session entirely
+   * unregistered on remote, silently. That is strictly worse than declaring
+   * nothing, and it is the exact "silently local-only" failure family this
+   * feature exists to prevent.
+   */
+  it('survives a real deployment rejecting identity with a redacted generic error (not ArgumentValidationError)', async () => {
+    const introduceArgs: Array<Record<string, unknown>> = []
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        introduceArgs.push(args)
+        if ('identity' in args) {
+          // Verbatim shape from the live deployment: plain `Error`, no
+          // distinguishing name, message redacted to "Server Error".
+          throw new Error(
+            '[CONVEX M(cccollab/sessions:introduce)] [Request ID: 5f1b30d3739328cb] Server Error\n  Called by client',
+          )
+        }
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // The session MUST still register. A throw here aborts attach.ts before
+    // it registers the transport -> remote silently lost.
+    await expect(transport.introduce({ sessionName: 'architect', identity })).resolves.toBeUndefined()
+
+    expect(transport.enabled).toBe(true)
+    expect(introduceArgs).toHaveLength(2)
+    expect(introduceArgs[0]!.identity).toEqual(identity)
+    expect(introduceArgs[1]).not.toHaveProperty('identity')
+  })
+
+  /**
+   * The silence is the defect. A dropped identity must be inspectable
+   * after the fact, not just written to a stderr log line nobody reads.
+   */
+  it('reports the dropped identity via identityRejected instead of failing silently', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async (...call: unknown[]) => {
+        const args = call[1] as Record<string, unknown>
+        if ('identity' in args) throw new Error('[CONVEX M(...)] Server Error')
+        return 'sess_1'
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    expect(transport.identityRejected).toBeNull()
+    await transport.introduce({ sessionName: 'architect', identity })
+    expect(transport.identityRejected).toMatch(/identity/i)
+  })
+
+  it('leaves identityRejected null when the backend accepts identity', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => 'sess_1',
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.introduce({ sessionName: 'architect', identity })
+    expect(transport.identityRejected).toBeNull()
+  })
+
+  it('reads identity back from listSessions when the row carries it', async () => {
+    const { client } = makeStubClient(async (_ref: unknown, _args: unknown) => [
+      { _id: 's1', sessionName: 'architect', createdAt: 1_700_000_000_000, identity },
+      { _id: 's2', sessionName: 'plain', createdAt: 1_700_000_000_000 },
+    ])
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    const sessions = await transport.listSessions({})
+    expect(sessions.find((s) => s.name === 'architect')?.identity).toEqual(identity)
+    expect(sessions.find((s) => s.name === 'plain')).not.toHaveProperty('identity')
+  })
+})
+
+/**
  * `subscribeTopicMessages` should pass a `sinceTs` to the reactive
  * `listByTopic` query on re-subscribe so Convex narrows results to
  * messages newer than what we've already delivered. The per-topic

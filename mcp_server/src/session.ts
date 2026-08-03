@@ -1,6 +1,19 @@
 import path from 'node:path'
+import type { SessionIdentity } from './transport/index.js'
 
 const SESSION_PREFIX_PATTERN = /^\*\[(.+?)\]\*:\s*([\s\S]*)$/
+
+/**
+ * Resolve the stable key a restarted server keys its persisted state on
+ * (KAI-415). Anchors on the Claude Code session UUID — assigned by Claude
+ * Code, not the human-typed `name` — so a session that renames itself
+ * still resolves to the same key across a restart. Returns `null` when no
+ * UUID was declared: callers fall back to today's name-keyed behavior
+ * (no persistence), which is the pre-existing floor, not a regression.
+ */
+export function sessionKey(identity: SessionIdentity | undefined): string | null {
+  return identity?.sessionId ?? null
+}
 
 interface SessionManagerOptions {
   username: string
@@ -13,6 +26,7 @@ export class SessionManager {
   private projectName: string
   private name: string | undefined
   private objective: string | undefined
+  private identity: SessionIdentity | undefined
 
   constructor(options: SessionManagerOptions) {
     this.username = options.username
@@ -41,6 +55,15 @@ export class SessionManager {
 
   getObjective(): string | undefined {
     return this.objective
+  }
+
+  /** Self-declared identity (KAI-401), or undefined when none was declared. */
+  setIdentity(identity: SessionIdentity | undefined): void {
+    this.identity = identity
+  }
+
+  getIdentity(): SessionIdentity | undefined {
+    return this.identity
   }
 
   /** Format a thread message with short display name */

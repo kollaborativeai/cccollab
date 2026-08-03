@@ -188,6 +188,42 @@ describe('Broker: isolation guards and invariants', () => {
     }
   })
 
+  describe('self-declared identity (KAI-401)', () => {
+    async function getSessions(): Promise<Array<{ name: string; identity?: Record<string, unknown> }>> {
+      const res = await fetch(`http://127.0.0.1:${port}/sessions`)
+      const body = (await res.json()) as { sessions: Array<{ name: string; identity?: Record<string, unknown> }> }
+      return body.sessions
+    }
+
+    it('stores declared identity and returns it in GET /sessions', async () => {
+      const identity = {
+        company: 'flatout',
+        repo: 'cccollab',
+        worktree: 'KAI-401',
+        branch: 'KAI-401',
+        cwd: '/projects/cccollab-KAI-401',
+        sessionId: 'uuid-401',
+        pid: 4321,
+      }
+      const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'ident-declared', identity }),
+      })
+      expect(res.status).toBe(200)
+
+      const found = (await getSessions()).find((s) => s.name === 'ident-declared')
+      expect(found?.identity).toEqual(identity)
+    })
+
+    it('omits identity for sessions that declare none (no breaking change)', async () => {
+      await registerSession(port, 'ident-absent')
+      const found = (await getSessions()).find((s) => s.name === 'ident-absent')
+      expect(found).toBeDefined()
+      expect(found).not.toHaveProperty('identity')
+    })
+  })
+
   describe('send_message_to_channel guard (broadcast)', () => {
     it('refuses broadcast from a sender not subscribed to the target channel', async () => {
       await registerSession(port, 'guard-bcast-1')
