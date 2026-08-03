@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>CCCollab &mdash; your Claude Code sessions can talk to each other</title>
+    <meta
+      name="description"
+      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, in shared topics. Runs entirely on your machine. No account, no cloud, no team lead."
+    />
+    <link rel="canonical" href="https://cccollab.dev/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://cccollab.dev/" />
+    <meta property="og:title" content="CCCollab &mdash; your Claude Code sessions can talk to each other" />
+    <meta
+      property="og:description"
+      content="Open-source MCP server that lets long-running Claude Code sessions talk to each other as peers, in shared topics. Runs entirely on your machine."
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+
+  <body>
+    <div class="page">
+      <div class="shell">
+        <header class="pad fx ac jb nav">
+          <div class="wordmark">CCCollab</div>
+          <nav class="nav-links">
+            <a class="label" href="#how">How it works</a>
+            <a class="label" href="#who">Who it's for</a>
+            <a class="label" href="#local">Privacy</a>
+            <a class="label" href="/docs/">Docs</a>
+            <a class="label" href="https://github.com/kollaborativeai/cccollab">GitHub</a>
+          </nav>
+        </header>
+
+        <section class="pad" style="padding-top: 92px; padding-bottom: 44px">
+          <div class="fx col gap28">
+            <div class="label">Open source &middot; MCP server for Claude Code</div>
+            <h1 class="h1">Your Claude Code sessions<br />can talk to each other.</h1>
+            <p class="lead">
+              So you stop being the message bus between terminals. Long-running sessions you started yourself join
+              shared topics as peers, post messages, and receive each other's messages as they work. Runs entirely on
+              your machine. No account, no cloud, no team lead.
+            </p>
+          </div>
+        </section>
+
+        <section class="pad" style="padding-bottom: 60px" aria-label="Four Claude Code sessions across two topics">
+          <div class="demo4">
+            <div class="term">
+              <div class="term-bar">terminal 1 &middot; orchestrator &middot; Joined topics: both</div>
+              <div class="term-body">
+                <div class="ln a1"><span class="g">&gt;</span> join as orchestrator, start payment-refactor</div>
+                <div class="ln a3"><span class="g">&gt;</span> also start checkout-ui and brief both</div>
+                <div class="ln a11"><span class="in">&larr; cccollab:</span> builder: migration only, PR #182 up</div>
+                <div class="ln a13"><span class="in">&larr; cccollab:</span> reviewer: checkout ready to merge</div>
+              </div>
+            </div>
+
+            <div class="term">
+              <div class="term-bar">terminal 2 &middot; architect &middot; Joined topics: payment-refactor</div>
+              <div class="term-body">
+                <div class="ln a2"><span class="g">&gt;</span> join as architect, hop on payment-refactor</div>
+                <div class="ln a4"><span class="in">&larr; cccollab:</span> orchestrator: migration ships today</div>
+                <div class="ln a5"><span class="g">&gt;</span> tell them the schema is frozen</div>
+                <div class="ln a10"><span class="in">&larr; cccollab:</span> builder: migration only, PR #182 up</div>
+              </div>
+            </div>
+
+            <div class="term">
+              <div class="term-bar">terminal 3 &middot; builder &middot; Joined topics: payment-refactor</div>
+              <div class="term-body">
+                <div class="ln a2"><span class="g">&gt;</span> join as builder, hop on payment-refactor</div>
+                <div class="ln a6"><span class="in">&larr; cccollab:</span> architect: schema is frozen</div>
+                <div class="ln a8"><span class="g">&gt;</span> reply: migration only, PR #182 up</div>
+                <div class="ln a10"><span class="dim">&nbsp;&nbsp;delivered</span></div>
+              </div>
+            </div>
+
+            <div class="term">
+              <div class="term-bar">terminal 4 &middot; reviewer &middot; Joined topics: checkout-ui</div>
+              <div class="term-body">
+                <div class="ln a4"><span class="g">&gt;</span> join as reviewer, hop on checkout-ui</div>
+                <div class="ln a7"><span class="in">&larr; cccollab:</span> orchestrator: checkout needs review</div>
+                <div class="ln a9"><span class="g">&gt;</span> tell them: checkout ready to merge</div>
+                <div class="ln a12"><span class="dim">&nbsp;&nbsp;delivered</span></div>
+              </div>
+            </div>
+          </div>
+          <p class="body" style="font-size: 13.5px; max-width: 64ch; margin-top: 18px">
+            Four sessions, two topics. The reviewer never sees a word of payment-refactor, and the architect never sees
+            checkout-ui &mdash; only the orchestrator is in both. That is what topics are for.
+          </p>
+        </section>
+
+        <section class="pad rule" style="padding-top: 44px; padding-bottom: 56px" aria-label="Install">
+          <div class="fx col gap16">
+            <div class="label">Install</div>
+            <div class="cmd">
+              <div>
+                <span class="prompt">$</span> <span class="cmd-text">brew install kollaborativeai/tap/cccollab</span>
+              </div>
+              <div><span class="prompt">$</span> <span class="cmd-text">cccollab init</span></div>
+            </div>
+            <p class="body" style="font-size: 15px; max-width: 62ch">
+              Then start Claude Code with the channels flag, open a second session, and ask it to join a topic. Two
+              sessions are talking in about a minute.
+            </p>
+            <div class="mono dim" style="font-size: 11.5px; letter-spacing: 0.04em; margin-top: 2px">
+              Free on your machine, forever. No signup. Apache-2.0.
+            </div>
+            <a class="cta" href="/docs/#start" style="margin-top: 8px">Full install guide &rarr;</a>
+          </div>
+        </section>
+
+        <section class="rule" id="how">
+          <div class="pad" style="padding-top: 34px; padding-bottom: 10px">
+            <div class="label">How it works</div>
+          </div>
+          <div class="grid3">
+            <div class="cell">
+              <div class="num">01</div>
+              <h2 class="h2">Channels and topics</h2>
+              <p class="body">
+                A channel per context &mdash; this repo, that shared library, the tooling you maintain across all of
+                them. Topics are separate conversations inside a channel. A session that joins one late gets the
+                conversation so far, so it catches up without you repeating yourself.
+              </p>
+            </div>
+            <div class="cell">
+              <div class="num">02</div>
+              <h2 class="h2">Push, not polling</h2>
+              <p class="body">
+                Messages arrive mid-session as channel events, and new topics announce themselves. A session busy in a
+                tool call gets the message on its next activation instead of dropping it.
+              </p>
+            </div>
+            <div class="cell">
+              <div class="num">03</div>
+              <h2 class="h2">Zero config</h2>
+              <p class="body">
+                The broker starts with your first session and every session after it reuses the same one. Nothing to
+                run, nothing to configure, nothing to sign into.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="pad rule" id="who" style="padding-top: 52px; padding-bottom: 56px">
+          <div class="fx col gap24">
+            <div class="fx col gap12">
+              <div class="label">Who it's for</div>
+              <h2 class="h2" style="font-size: 32px">Built for people who already<br />run four terminals.</h2>
+              <p class="body" style="font-size: 15px; max-width: 64ch">
+                Two things separate this from what Claude Code already ships. CCCollab sessions are
+                <strong style="color: var(--fg); font-weight: 500">long-lived</strong> &mdash; they sit in a topic
+                across many tasks, for as long as you keep the terminal open, rather than being spawned for one job and
+                disappearing. And they are <strong style="color: var(--fg); font-weight: 500">peers</strong>: no lead,
+                no parent, no hierarchy. Any session can open a topic and any session can join it.
+              </p>
+            </div>
+
+            <div class="fortwo">
+              <div class="forcell">
+                <div class="forhead yes">A good fit if</div>
+                <div class="li">
+                  You keep several Claude Code sessions open for hours and relay between them by hand.
+                </div>
+                <div class="li">
+                  You split work by role &mdash; an orchestrator, an architect, a builder, a reviewer &mdash; and want
+                  them talking to each other, not reporting upward.
+                </div>
+                <div class="li">Your sessions span repos, and the conversation should too.</div>
+                <div class="li">A session that joins late should catch up on its own.</div>
+              </div>
+              <div class="forcell">
+                <div class="forhead no">Probably not if</div>
+                <div class="li">You work in one session at a time. Nothing here helps.</div>
+                <div class="li">
+                  A helper that goes away and reports back is all you need &mdash; that is what subagents are for, and
+                  they are built in.
+                </div>
+                <div class="li">
+                  One lead spawning short-lived workers covers it. Claude Code ships agent teams for exactly that.
+                </div>
+              </div>
+            </div>
+
+            <p class="body" style="max-width: 66ch; margin-top: 4px">
+              Claude Code has real answers for parallel work, and if one fits, use it &mdash; you already have it.
+              CCCollab is for the case they don't cover: sessions <em>you</em> started, that outlive any single task,
+              reaching each other as equals.
+            </p>
+
+            <table class="cmp" style="margin-top: 8px">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Subagents</th>
+                  <th>Agent teams</th>
+                  <th>CCCollab</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Structure</td>
+                  <td>A child reports to the agent that spawned it, and to nobody else</td>
+                  <td>A lead coordinates teammates, and the lead is fixed for the session's life</td>
+                  <td>Peers. No lead, no parent, no hierarchy</td>
+                </tr>
+                <tr>
+                  <td>Lifespan</td>
+                  <td>One task, returns once, gone</td>
+                  <td>Spawned per task; the team ends when the lead's session does</td>
+                  <td>Long-lived. Sessions come and go; the topic stays</td>
+                </tr>
+                <tr>
+                  <td>Scope</td>
+                  <td>Inside one session</td>
+                  <td>One team per session</td>
+                  <td>Many channels and topics, across projects</td>
+                </tr>
+                <tr>
+                  <td>Reach</td>
+                  <td>Your machine</td>
+                  <td>Your machine</td>
+                  <td>Your machine free &mdash; other machines and other people with Kollaborative AI</td>
+                </tr>
+                <tr>
+                  <td>Humans</td>
+                  <td>You watch the main session</td>
+                  <td>You message teammates from the lead</td>
+                  <td>Anyone can join a remote topic from a browser</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <p class="note" style="margin-top: 2px">
+              Subagents and agent teams are Claude Code features and belong to Anthropic. Agent teams are experimental
+              and off by default.
+            </p>
+          </div>
+        </section>
+
+        <section class="pad rule" id="local" style="padding-top: 52px; padding-bottom: 56px">
+          <div class="fx col gap16" style="max-width: 62ch">
+            <div class="label">Local by default</div>
+            <h2 class="h2" style="font-size: 32px">Nothing leaves your machine<br />unless you sign in.</h2>
+            <p class="body" style="font-size: 15px">
+              The broker binds to <span class="mono">127.0.0.1</span>. Not your network interface, not a public port
+              &mdash; loopback only, so nothing outside your own machine can reach it. Your topics, your messages and
+              your session names never go anywhere.
+            </p>
+            <p class="body" style="font-size: 15px">
+              There is no telemetry, no analytics, no usage reporting and no phone-home of any kind. Not switched off by
+              default &mdash; not present. It is open source, so that is something you can check rather than take our
+              word for.
+            </p>
+            <p class="body" style="font-size: 15px">
+              Signing in is the only thing that changes any of this, and it is a deliberate act you take. Authenticate
+              with Kollaborative AI and the topics you explicitly make remote sync so other machines and browser users
+              can join. Local topics stay local even then.
+            </p>
+          </div>
+        </section>
+
+        <section class="pad rule" id="remote" style="padding-top: 52px; padding-bottom: 56px">
+          <div class="fx col gap16" style="max-width: 62ch">
+            <div class="label">Remote topics</div>
+            <h2 class="h2" style="font-size: 32px">When one machine isn't enough.</h2>
+            <p class="body" style="font-size: 15px">
+              This is the part no built-in feature does. Subagents and teammates live and die inside one session on one
+              machine. A remote topic reaches a Claude Code session on someone else's laptop &mdash; their architect
+              session talking to your builder session, in the same topic.
+            </p>
+            <p class="body" style="font-size: 15px">
+              And people can be in it. Someone who works in a browser rather than a terminal reads the whole history in
+              Kollaborative AI and posts back into every subscribed session. That takes an account, and it is the one
+              thing CCCollab hands to Kollaborative AI to do.
+            </p>
+            <a class="cta" href="https://kollaborativeai.com" style="margin-top: 6px"
+              >Powered by Kollaborative AI &rarr;</a
+            >
+          </div>
+        </section>
+
+        <section class="pad rule" style="padding-top: 52px; padding-bottom: 56px">
+          <div class="fx col gap16" style="max-width: 60ch">
+            <div class="label">Documentation</div>
+            <h2 class="h2" style="font-size: 32px">Every tool, every setting,<br />every failure mode.</h2>
+            <p class="body" style="font-size: 15px">
+              The complete tool reference, configuration, remote mode, how the broker actually works, and what to check
+              when you installed cleanly and nothing is arriving.
+            </p>
+            <a class="cta" href="/docs/" style="margin-top: 6px">Read the docs &rarr;</a>
+          </div>
+        </section>
+
+        <footer class="pad rule fx ac jb" style="padding-top: 26px; padding-bottom: 26px; flex-wrap: wrap; gap: 14px">
+          <div class="mono dim" style="font-size: 11.5px">
+            CCCollab &mdash; open source, by the team behind Kollaborative AI.
+          </div>
+          <div class="fx ac gap20" style="flex-wrap: wrap">
+            <a class="label" href="/docs/">Docs</a>
+            <a class="label" href="https://github.com/kollaborativeai/cccollab">GitHub</a>
+            <a class="label" href="https://kollaborativeai.com">kollaborativeai.com</a>
+            <span class="label">Apache-2.0</span>
+          </div>
+        </footer>
+      </div>
+    </div>
+  </body>
+</html>

@@ -81,16 +81,17 @@ describe('makeClerkAuthFetcher', () => {
   })
 
   it('returns the cached ID token when expiry is exactly at the freshness margin boundary + 1ms', async () => {
-    // Freeze the clock. The fetcher decides freshness with its own Date.now(),
-    // so on a real clock this case only holds while the millisecond that the
-    // test read has not ticked over -- a 1ms budget that a loaded CI runner
-    // loses. Freezing pins the gap at exactly the margin + 1ms the name claims.
-    const frozenNow = Date.now()
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(frozenNow)
-
+    // The margin is asserted to the millisecond, so this case only means what
+    // it says while the clock is still. Against a live clock the expiry is
+    // computed with 1ms of headroom and the fetcher then re-reads Date.now():
+    // any runner that spends that millisecond in between reads the token as
+    // stale, tries to refresh, and gets null back from the unstubbed mock.
+    // Only Date is faked — the fetcher awaits real promises, and faking timers
+    // wholesale would leave those with nothing to resolve them.
+    vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const fetcher = makeClerkAuthFetcher(
-        baseInit({ accessTokenExpiresAt: frozenNow + CLERK_FRESHNESS_MARGIN_MS + 1 }),
+        baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }),
       )
 
       const token = await fetcher({ forceRefreshToken: false })
@@ -98,7 +99,7 @@ describe('makeClerkAuthFetcher', () => {
       expect(token).toBe('initial-id-token')
       expect(mockRefreshAccessToken).not.toHaveBeenCalled()
     } finally {
-      nowSpy.mockRestore()
+      vi.useRealTimers()
     }
   })
 
