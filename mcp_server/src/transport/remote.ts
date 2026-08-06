@@ -2,7 +2,8 @@ import type { ConvexClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import type { ParsedMessage } from '../types.js'
+import { renderInboundText } from '../attachments.js'
+import type { InboundImage, ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
@@ -715,13 +716,17 @@ export class RemoteTransport implements Transport {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.messages.queries.listByTopic),
         this.orgScopedArgs({ topicId: args.topicId }),
-      )) as Array<{ fromSessionId: string; text: string; ts: number }>
+      )) as Array<{ fromSessionId: string; text: string; ts: number; images?: InboundImage[] }>
+      // This history is handed straight to the model, and its caller primes the
+      // reactive cursor past it — so anything dropped here is dropped for good.
       return {
-        history: rows.map((r) => ({
-          sender: r.fromSessionId,
-          text: r.text,
-          ts: new Date(r.ts).toISOString(),
-        })),
+        history: await Promise.all(
+          rows.map(async (r) => ({
+            sender: r.fromSessionId,
+            text: (await renderInboundText({ text: r.text, images: r.images, ts: r.ts })).text,
+            ts: new Date(r.ts).toISOString(),
+          })),
+        ),
       }
     } catch (err) {
       this.registerFailure('joinTopic', err)
@@ -825,17 +830,36 @@ export class RemoteTransport implements Transport {
 
   // ─── Message history ──────────────────────────────────────────────────
 
-  private static toHistoryPage(raw: {
-    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+  /**
+   * Maps a raw history page and materialises its attachments.
+   *
+   * The download happens HERE, on read, not when the message was sent — this is
+   * the catch-up path, so a session that was offline at send time gets the
+   * bytes the moment it asks for history. The resulting on-disk paths are
+   * appended to each message's text using the same block the live path uses, so
+   * a session sees identical framing whether an image arrived live or was read
+   * back from history.
+   */
+  private static async toHistoryPage(raw: {
+    messages: Array<{
+      fromSessionId: string
+      senderSessionName?: string
+      text: string
+      ts: number
+      images?: InboundImage[]
+    }>
     hasMore: boolean
-  }): TransportHistoryPage {
-    return {
-      messages: raw.messages.map((m) => ({
+  }): Promise<TransportHistoryPage> {
+    const messages = await Promise.all(
+      raw.messages.map(async (m) => ({
         sender: m.fromSessionId,
         senderSessionName: m.senderSessionName,
-        text: m.text,
+        text: (await renderInboundText({ text: m.text, images: m.images, ts: m.ts })).text,
         ts: m.ts,
       })),
+    )
+    return {
+      messages,
       hasMore: raw.hasMore,
       oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
     }
@@ -868,10 +892,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readChannelHistory),
         this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readChannelMessages', err)
       return { messages: [], hasMore: false }
@@ -885,10 +915,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readTopicHistory),
         this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readTopicMessages', err)
       return { messages: [], hasMore: false }
@@ -937,7 +973,13 @@ export class RemoteTransport implements Transport {
       fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
-        const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+        const arr = rows as Array<{
+          _id: string
+          fromSessionId: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         for (const row of arr) {
           if (seen.has(row._id)) continue
           seen.add(row._id)
@@ -955,6 +997,7 @@ export class RemoteTransport implements Transport {
             channel: args.channelName,
             channelName: args.channelName,
             threadTs: args.topicId,
+            images: row.images,
           })
         }
       },
@@ -977,7 +1020,14 @@ export class RemoteTransport implements Transport {
    * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  subscribeChannelMessages(
+    args: { channelName: string },
+    // May return a promise that settles when the message has actually been
+    // DELIVERED. The ack below waits on it: the read cursor is the session's
+    // only record of what it has seen, so advancing it over a message still in
+    // flight is how a message is lost for good.
+    onEvent: (msg: ParsedMessage) => void | Promise<void>,
+  ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
 
@@ -1009,33 +1059,58 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,
         (rows) => {
-          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
-          let highestTsInBatch = 0
+          const arr = rows as Array<{
+            _id: string
+            fromSessionId: string
+            text: string
+            ts: number
+            images?: InboundImage[]
+          }>
+          // Each row's ts paired with the promise that settles when it has been
+          // delivered. Rows arrive in ascending ts order, so this list is the
+          // order the cursor may advance through.
+          const deliveries: Array<{ ts: number; done: Promise<void> }> = []
           for (const row of arr) {
             if (seen.has(row._id)) continue
             seen.add(row._id)
             const prior = this.channelMaxTs.get(channelId) ?? 0
             if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
-            if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
             // Skip self-echo: own broadcasts shouldn't push back to our
             // own Claude. Cursor + ack advance above still happens so
             // we don't re-deliver our own row on reconnect. Mirrors the
             // local broker's self-broadcast drop.
-            if (sessionId !== null && row.fromSessionId === sessionId) continue
-            onEvent({
+            if (sessionId !== null && row.fromSessionId === sessionId) {
+              // Nothing to wait for, but it must not stall the cursor either.
+              deliveries.push({ ts: row.ts, done: Promise.resolve() })
+              continue
+            }
+            const delivered = onEvent({
               sender: row.fromSessionId,
               text: row.text,
               ts: new Date(row.ts).toISOString(),
               channel: args.channelName,
               channelName: args.channelName,
               threadTs: undefined,
+              images: row.images,
             })
+            deliveries.push({ ts: row.ts, done: Promise.resolve(delivered) })
           }
-          // Ack the batch's highest ts so subsequent subscribes (incl.
-          // MCP restarts) skip re-delivering it. Fire-and-forget; a
-          // failure here is non-fatal - the NEXT successful ack bumps
-          // the cursor to cover this batch's ts too (acks are monotonic
-          // and idempotent).
+          // Ack the highest ts that was actually DELIVERED, once it has been.
+          //
+          // Not the batch maximum, and not synchronously. `onEvent` hands the
+          // row to MessageBus, which downloads any attachments before notifying
+          // — so the old synchronous ack advanced the cursor over messages the
+          // session had not been shown. Kill the process in that window (an
+          // /exit, an OOM, a restart) and those messages are below the cursor
+          // forever: `listByChannel` is bounded by it and never returns them
+          // again. Silent, permanent loss.
+          //
+          // Stops at the FIRST failure rather than acking the last success:
+          // acking past a gap buries exactly the message that failed.
+          //
+          // Fire-and-forget at the mutation itself; a failure there is non-fatal
+          // — the NEXT successful ack bumps the cursor to cover this batch too
+          // (acks are monotonic and idempotent).
           //
           // Critically: ack failures MUST NOT trip the degradation
           // circuit. A transient UNAUTHENTICATED during auth-refresh or
@@ -1043,17 +1118,29 @@ export class RemoteTransport implements Transport {
           // kill the whole transport for the session. The reactive
           // listByChannel subscription's own error path still degrades
           // on persistent failure, which is the right signal.
-          if (highestTsInBatch > 0 && sessionId !== null) {
-            void this.client
-              .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
-                sessionId,
-                channelId,
-                ts: highestTsInBatch,
-              })
-              .catch((err: unknown) => {
+          if (deliveries.length > 0 && sessionId !== null) {
+            void (async () => {
+              let ackTs = 0
+              for (const delivery of deliveries) {
+                try {
+                  await delivery.done
+                } catch {
+                  break
+                }
+                if (delivery.ts > ackTs) ackTs = delivery.ts
+              }
+              if (ackTs === 0) return
+              try {
+                await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
+                  sessionId,
+                  channelId,
+                  ts: ackTs,
+                })
+              } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err)
                 this.log(`ackChannel failed (non-fatal, cursor will advance on next ack): ${msg}`)
-              })
+              }
+            })()
           }
         },
         (err) => {
