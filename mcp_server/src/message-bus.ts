@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { renderInboundText } from './attachments.js'
 import type { ParsedMessage } from './types.js'
 
 /**
@@ -49,6 +50,16 @@ function dedupKey(msg: ParsedMessage): string {
 export class MessageBus extends EventEmitter {
   private readonly mcp: Server
   private readonly dedupSeen = new Map<string, number>()
+  /**
+   * The in-flight delivery chain. Dedup stays synchronous at the head of
+   * `push` so ordering is decided by call order, not by how long each
+   * message's attachments take to fetch.
+   *
+   * ponytail: a promise chain, not a queue class — each link is released as it
+   * settles, so only the tail is retained. Head-of-line blocking is bounded by
+   * the download timeout and only occurs on messages that carry an image.
+   */
+  private tail: Promise<void> = Promise.resolve()
 
   constructor(mcp: Server) {
     super()
@@ -90,10 +101,36 @@ export class MessageBus extends EventEmitter {
       meta.thread_ts = msg.threadTs
     }
 
+    // Delivery is serialised behind whatever is already in flight. Callers fire
+    // `void push(...)` once per row from a subscription callback, so before
+    // attachments existed the notifications went out in row order simply
+    // because nothing awaited in between. Materialising an image inserts a
+    // network round-trip, and without this queue every later text-only message
+    // overtakes it: the session reads "so revert the migration" before it is
+    // shown the screenshot that sentence is about.
+    const delivery = this.tail.then(() => this.deliver(msg, source, meta))
+    // One failed delivery must not poison the queue for the next message.
+    this.tail = delivery.catch(() => {})
+    return delivery
+  }
+
+  /** Everything after dedup: materialise attachments, then notify. */
+  private async deliver(msg: ParsedMessage, source: MessageSource, meta: Record<string, string>): Promise<void> {
+    // A url in the content would be fetched as a web page and flattened to
+    // text, so the session can only SEE an image if it has a file to read.
+    // Downloading here (rather than at send time) is also what lets a session
+    // that was offline receive the image whenever it comes back.
+    const { text: content, saved } = await renderInboundText({
+      text: msg.text,
+      images: msg.images,
+      ts: Date.parse(msg.ts) || Date.now(),
+    })
+    if (saved.length > 0) meta.images = String(saved.length)
+
     try {
       await this.mcp.notification({
         method: 'notifications/claude/channel',
-        params: { content: msg.text, meta },
+        params: { content, meta },
       })
     } catch (err) {
       this.emit('notify:error', { msg, source, err })

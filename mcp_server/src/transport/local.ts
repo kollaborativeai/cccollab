@@ -1,3 +1,4 @@
+import { renderInboundText } from '../attachments.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
@@ -20,6 +21,19 @@ import {
  * `BrokerEventListener` → `MessageBus`. That flow is unchanged in
  * commit A; commit B folds it under this abstraction.
  */
+/**
+ * Neutralises cccollab markup in broker-supplied history.
+ *
+ * The local broker carries no attachments, so nothing is downloaded here — but
+ * this feature INVENTED the `<cccollab-images …>` vocabulary, which means it
+ * created something worth forging on a transport that previously had nothing to
+ * forge. Local channels are what the worker fleet runs on, so this is the text
+ * those sessions actually read.
+ */
+function sanitize(messages: TransportTopicMessage[]): Promise<TransportTopicMessage[]> {
+  return Promise.all(messages.map(async (m) => ({ ...m, text: (await renderInboundText({ text: m.text })).text })))
+}
+
 export class LocalTransport implements Transport {
   readonly source = 'local'
   enabled = true
@@ -111,7 +125,7 @@ export class LocalTransport implements Transport {
       `/topics/${encodeURIComponent(args.topicId)}/join`,
       { sessionId: args.sessionName },
     )
-    return { channel: data.channel, history: data.messages }
+    return { channel: data.channel, history: await sanitize(data.messages) }
   }
 
   async leaveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
@@ -174,14 +188,16 @@ export class LocalTransport implements Transport {
       hasMore: boolean
     }>(`/topics/${encodeURIComponent(args.topicId)}/messages${qs}`)
     return {
-      messages: data.messages.map((m) => ({
-        sender: m.sender,
-        // The local broker is single-tenant: the sender name *is* the session
-        // name, so mirror it onto senderSessionName for parity with remote.
-        senderSessionName: m.sender,
-        text: m.text,
-        ts: m.ts,
-      })),
+      messages: await Promise.all(
+        data.messages.map(async (m) => ({
+          sender: m.sender,
+          // The local broker is single-tenant: the sender name *is* the session
+          // name, so mirror it onto senderSessionName for parity with remote.
+          senderSessionName: m.sender,
+          text: (await renderInboundText({ text: m.text })).text,
+          ts: m.ts,
+        })),
+      ),
       hasMore: data.hasMore,
       oldestTs: data.messages.length > 0 ? data.messages[0]!.ts : undefined,
     }
