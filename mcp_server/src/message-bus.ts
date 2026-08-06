@@ -51,15 +51,29 @@ export class MessageBus extends EventEmitter {
   private readonly mcp: Server
   private readonly dedupSeen = new Map<string, number>()
   /**
-   * The in-flight delivery chain. Dedup stays synchronous at the head of
-   * `push` so ordering is decided by call order, not by how long each
-   * message's attachments take to fetch.
+   * One in-flight delivery chain PER STREAM, keyed by topic when there is one
+   * and by channel otherwise. Dedup stays synchronous at the head of `push`, so
+   * ordering within a stream is decided by call order rather than by how long
+   * each message's attachments take to fetch.
    *
-   * ponytail: a promise chain, not a queue class — each link is released as it
-   * settles, so only the tail is retained. Head-of-line blocking is bounded by
-   * the download timeout and only occurs on messages that carry an image.
+   * Per stream, not per process. Ordering is only meaningful between messages a
+   * reader will relate to each other — the screenshot and the sentence about it
+   * — and that relation does not cross channels. A single process-wide chain
+   * bought the ordering that matters by making every channel wait behind every
+   * download: measured, a 2-image message on one channel and a text-only
+   * "PROD IS DOWN" on another both landed at t+1603ms.
+   *
+   * Head-of-line blocking within one stream is bounded by
+   * `MESSAGE_DOWNLOAD_BUDGET_MS` (attachments.ts) — a whole-message budget, not
+   * a per-fetch timeout, because images are fetched sequentially and n images
+   * used to mean n × the per-fetch timeout. It is paid only by later messages
+   * in the SAME stream.
+   *
+   * ponytail: a map of promise chains, not a queue class — each link is released
+   * as it settles, and a stream's entry is dropped once it goes idle, so a
+   * long-lived process does not retain one promise per channel it has ever seen.
    */
-  private tail: Promise<void> = Promise.resolve()
+  private readonly tails = new Map<string, Promise<void>>()
 
   constructor(mcp: Server) {
     super()
@@ -101,16 +115,25 @@ export class MessageBus extends EventEmitter {
       meta.thread_ts = msg.threadTs
     }
 
-    // Delivery is serialised behind whatever is already in flight. Callers fire
-    // `void push(...)` once per row from a subscription callback, so before
-    // attachments existed the notifications went out in row order simply
-    // because nothing awaited in between. Materialising an image inserts a
-    // network round-trip, and without this queue every later text-only message
-    // overtakes it: the session reads "so revert the migration" before it is
-    // shown the screenshot that sentence is about.
-    const delivery = this.tail.then(() => this.deliver(msg, source, meta))
+    // Delivery is serialised behind whatever is already in flight FOR THIS
+    // STREAM. Callers fire `void push(...)` once per row from a subscription
+    // callback, so before attachments existed the notifications went out in row
+    // order simply because nothing awaited in between. Materialising an image
+    // inserts a network round-trip, and without this queue every later
+    // text-only message overtakes it: the session reads "so revert the
+    // migration" before it is shown the screenshot that sentence is about.
+    // A different channel has no such relation and waits for nothing.
+    const streamKey = msg.threadTs ?? msg.channel
+    const tail = this.tails.get(streamKey) ?? Promise.resolve()
+    const delivery = tail.then(() => this.deliver(msg, source, meta))
     // One failed delivery must not poison the queue for the next message.
-    this.tail = delivery.catch(() => {})
+    const settled = delivery.catch(() => {})
+    this.tails.set(streamKey, settled)
+    // Drop the entry once this stream goes idle. Guarded on identity so a
+    // message pushed while this one was in flight keeps its place in line.
+    void settled.then(() => {
+      if (this.tails.get(streamKey) === settled) this.tails.delete(streamKey)
+    })
     return delivery
   }
 
