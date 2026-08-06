@@ -410,6 +410,100 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     expect(transport.enabled).toBe(true)
   })
 
+  /**
+   * CRIT-4. The read cursor is the session's only record of what it has seen.
+   * `ackChannel` was called synchronously from the subscription callback, right
+   * after the rows were ENQUEUED for delivery — `onEvent` is `void push(...)`,
+   * fire-and-forget, and delivery now sits behind an image download. So the
+   * cursor advanced over messages the session had not been shown, and anything
+   * below it is never returned to that session again.
+   *
+   * Kill the process in that window — a normal /exit, an OOM, a restart — and
+   * the loss is permanent and silent.
+   */
+  function ackHarness() {
+    const callbacks: Array<(rows: unknown) => void> = []
+    const acks: number[] = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) return { channelId: 'chan_dev' }
+        if ('ts' in args) acks.push(args.ts as number)
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, _args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    return { transport, callbacks, acks }
+  }
+
+  /** Introduce + join so `channelIdsByName` is warm and `subscribeChannelMessages`
+   *  registers its callback synchronously. */
+  async function readyTransport() {
+    const h = ackHarness()
+    await h.transport.introduce({ sessionName: 'laptop' })
+    await h.transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    return h
+  }
+
+  async function settle(times = 8) {
+    for (let i = 0; i < times; i++) await Promise.resolve()
+  }
+
+  it('does not ack a batch whose delivery has not finished', async () => {
+    const { transport, callbacks, acks } = await readyTransport()
+
+    let release: () => void = () => {}
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => inFlight)
+
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'alice', text: 'hi', ts: 7 }])
+    await settle()
+
+    // Still downloading. Acking here is what loses the message on a restart.
+    expect(acks).toEqual([])
+
+    release()
+    await settle()
+    expect(acks).toEqual([7])
+  })
+
+  it('acks only up to the last message actually delivered when one fails', async () => {
+    const { transport, callbacks, acks } = await readyTransport()
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) =>
+      msg.text === 'boom' ? Promise.reject(new Error('delivery failed')) : Promise.resolve(),
+    )
+
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'alice', text: 'first', ts: 1 },
+      { _id: 'm2', fromSessionId: 'alice', text: 'boom', ts: 2 },
+      { _id: 'm3', fromSessionId: 'alice', text: 'third', ts: 3 },
+    ])
+    await settle()
+
+    // ts 2 never reached the session, so the cursor must not pass it.
+    expect(acks).toEqual([1])
+  })
+
+  it('still advances over a self-echo row, which is deliberately not delivered', async () => {
+    // Anti-vacuity: the fix must not stall the cursor on our own broadcasts.
+    const { transport, callbacks, acks } = await readyTransport()
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => Promise.resolve())
+
+    callbacks[0]!([{ _id: 'm1', fromSessionId: 'session_1', text: 'mine', ts: 5 }])
+    await settle()
+
+    expect(acks).toEqual([5])
+  })
+
   it('passes sessionId to listByChannel and ackChannel mutates with the highest ts of each batch', async () => {
     // Bug D fix: restart-replay duplicate suppression via
     // server-side per-session cursor. The reactive subscribe must

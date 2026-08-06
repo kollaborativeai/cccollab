@@ -3,11 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  CCCOLLAB_IMAGES_DIR,
+  CCCOLLAB_IMAGES_ROOT,
   IMAGE_RETENTION_MS,
+  imagesDirForSession,
   MAX_INBOUND_IMAGE_BYTES,
   imageFileName,
   renderImageBlock,
   safeImageName,
+  renderInboundText,
   saveInboundImages,
   stripFenceMarkers,
   sweepOldImages,
@@ -547,5 +551,168 @@ describe('stripFenceMarkers leaves legitimate text byte-intact', () => {
 
   it('leaves prose containing the words image and cccollab alone', () => {
     intact('the cccollab images look fine; imagine the image is a chart')
+  })
+})
+
+/**
+ * CRIT-9. The docstring on `saveInboundImages` says it never throws, and that
+ * claim is load-bearing rather than polite: its result is appended to a message
+ * about to be handed to the session, so a rejection discards healthy TEXT — the
+ * sender's words on the live path, and an entire page of other people's
+ * messages on the history path.
+ *
+ * The claim was false. `safeImageName` ran one line ABOVE the `try`, and it is
+ * called on sender-supplied fields, which `attachments.ts` states outright it
+ * "must not depend on" the sender having validated. `remote.ts` casts query
+ * results with bare `as` at five sites, so a malformed row reaches here as
+ * whatever the wire carried.
+ */
+describe('saveInboundImages is total — one malformed row cannot destroy the message', () => {
+  const wellFormed: InboundImage = {
+    name: 'ok.png',
+    url: 'https://example.com/ok.png',
+    mimeType: 'image/png',
+    size: 10,
+  }
+
+  // Each of these threw before the fix, at a different line.
+  const malformed: Array<{ label: string; image: unknown }> = [
+    { label: 'a non-string name', image: { ...wellFormed, name: 123 } },
+    { label: 'an absent name', image: { url: wellFormed.url, mimeType: 'image/png', size: 10 } },
+    { label: 'a null name', image: { ...wellFormed, name: null } },
+    { label: 'a non-string mimeType', image: { ...wellFormed, mimeType: 7 } },
+    { label: 'a null url', image: { ...wellFormed, url: null } },
+    { label: 'an entirely empty row', image: {} },
+  ]
+
+  for (const { label, image } of malformed) {
+    it(`reports ${label} as a failed image instead of throwing`, async () => {
+      const result = await saveInboundImages([image as InboundImage], { dir, ts: 1 })
+
+      expect(result.saved).toHaveLength(0)
+      expect(result.failed).toHaveLength(1)
+      // Named, so the block the session is shown says which attachment died.
+      expect(typeof result.failed[0]?.name).toBe('string')
+      expect(result.failed[0]?.name.length).toBeGreaterThan(0)
+    })
+  }
+
+  it('still delivers the healthy images in a batch that contains a malformed one', async () => {
+    // The whole point: one bad row must cost exactly one attachment.
+    stubFetch(PNG)
+    const result = await saveInboundImages([{ ...wellFormed, name: 123 } as unknown as InboundImage, wellFormed], {
+      dir,
+      ts: 1,
+    })
+
+    expect(result.failed).toHaveLength(1)
+    expect(result.saved).toHaveLength(1)
+    expect(result.saved[0]?.name).toBe('ok.png')
+  })
+
+  it('survives a malformed name when the directory itself cannot be prepared', async () => {
+    // The mkdir-failure catch block maps over the same sender-supplied names,
+    // so it was a second, independent throw site on the same input.
+    const notADirectory = join(dir, 'occupied')
+    writeFileSync(notADirectory, 'not a directory')
+
+    const result = await saveInboundImages([{ ...wellFormed, name: null } as unknown as InboundImage], {
+      dir: join(notADirectory, 'images'),
+      ts: 1,
+    })
+
+    expect(result.saved).toHaveLength(0)
+    expect(result.failed).toHaveLength(1)
+  })
+})
+
+describe('renderInboundText is total', () => {
+  it('does not throw when the message text is not a string', async () => {
+    // `stripFenceMarkers` calls `.replace`. On the live path this rejection
+    // escaped OUTSIDE the try that emits `notify:error`, so the session saw
+    // nothing at all — no notification, no event, one unhandled rejection.
+    const result = await renderInboundText({ text: undefined as unknown as string }, { dir })
+
+    expect(typeof result.text).toBe('string')
+  })
+
+  it('keeps the text when an image row is malformed', async () => {
+    const result = await renderInboundText(
+      {
+        text: 'the deploy is broken, see the trace',
+        images: [{ name: 123 } as unknown as InboundImage],
+      },
+      { dir },
+    )
+
+    expect(result.text).toContain('the deploy is broken, see the trace')
+    expect(result.failed).toHaveLength(1)
+  })
+})
+
+/**
+ * CRIT-2. `~/.cccollab/images/` was one flat directory per OS USER, while the
+ * thing the backend gates on is SESSION membership. Two Claude Code sessions on
+ * one machine as one user is the normal fleet layout, and equally one human with
+ * two client orgs in two tabs.
+ *
+ * Session A is in Topic X only; Session B receives an image in Topic Y. A's
+ * Convex path to Topic Y is correctly refused — `listByTopicImpl` returns `[]`
+ * for a non-member — but A's own Read/Glob/Bash tools listed the shared
+ * directory and opened B's image. The gated unit and the stored unit were
+ * different, and nothing bridged them.
+ *
+ * What this fix can and cannot do is stated on `imagesDirForSession` itself: two
+ * processes running as the SAME OS user have no filesystem boundary between
+ * them, so this stops the accidental cross-read that happened by default and
+ * does not stop a hostile co-resident process. That needs separate OS users.
+ */
+describe('image storage is scoped to the receiving session', () => {
+  it('gives two sessions different directories', () => {
+    expect(imagesDirForSession('session-a')).not.toBe(imagesDirForSession('session-b'))
+  })
+
+  it('does not put images in the shared root any more', () => {
+    // The root is now a container of per-session directories, never a target.
+    expect(CCCOLLAB_IMAGES_DIR).not.toBe(CCCOLLAB_IMAGES_ROOT)
+    expect(CCCOLLAB_IMAGES_DIR.startsWith(CCCOLLAB_IMAGES_ROOT)).toBe(true)
+  })
+
+  it("keeps one session's delivered image out of another session's directory", async () => {
+    stubFetch(PNG)
+    const a = join(dir, 'a')
+    const b = join(dir, 'b')
+
+    const { saved } = await saveInboundImages([image()], { dir: a, ts: 100 })
+    mkdirSync(b, { recursive: true })
+
+    expect(saved[0]!.path.startsWith(a)).toBe(true)
+    // The listing another session performs against its own directory.
+    expect(readdirSync(b)).toEqual([])
+  })
+
+  it('sweeps a whole stale session directory, not just loose files', async () => {
+    // Per-session directories must not accumulate one per process forever.
+    const stale = join(dir, 'stale-session')
+    mkdirSync(stale, { recursive: true })
+    const old = join(stale, 'old.png')
+    writeFileSync(old, 'x')
+    const ancient = Date.now() - IMAGE_RETENTION_MS * 2
+    utimesSync(old, ancient / 1000, ancient / 1000)
+    utimesSync(stale, ancient / 1000, ancient / 1000)
+
+    sweepOldImages(dir, Date.now())
+
+    expect(readdirSync(dir)).not.toContain('stale-session')
+  })
+
+  it('leaves a live session directory alone', async () => {
+    const live = join(dir, 'live-session')
+    mkdirSync(live, { recursive: true })
+    writeFileSync(join(live, 'fresh.png'), 'x')
+
+    sweepOldImages(dir, Date.now())
+
+    expect(readdirSync(dir)).toContain('live-session')
   })
 })

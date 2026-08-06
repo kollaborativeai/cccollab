@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { CCCOLLAB_HOME } from './constants.js'
+import { CCCOLLAB_HOME, SESSION_SCOPE } from './constants.js'
 import type { InboundImage } from './types.js'
 
 /**
@@ -31,11 +31,45 @@ import type { InboundImage } from './types.js'
  */
 
 /**
- * Where downloaded images land: `~/.cccollab/images`, alongside the existing
- * `run/` and `logs/`. One flat directory — predictable to find, trivial to
- * clear by hand, and cheap to sweep.
+ * Container for every session's image directory: `~/.cccollab/images`, alongside
+ * the existing `run/` and `logs/`. Never a download target itself — see
+ * {@link imagesDirForSession}.
  */
-export const CCCOLLAB_IMAGES_DIR = join(CCCOLLAB_HOME, 'images')
+export const CCCOLLAB_IMAGES_ROOT = join(CCCOLLAB_HOME, 'images')
+
+/**
+ * The directory one session's delivered images land in.
+ *
+ * Images used to share one flat directory per OS USER, while the backend gates
+ * access on SESSION membership. Two Claude Code sessions running as one user is
+ * the normal fleet layout, and one human with two client orgs in two tabs is the
+ * same shape. Session A, a member of Topic X only, was correctly refused Topic
+ * Y's messages by `listByTopicImpl` — and then read Y's image straight off disk,
+ * because its own Read/Glob/Bash tools list the directory that a co-resident
+ * session had just written into. The gated unit and the stored unit were
+ * different and nothing bridged them.
+ *
+ * WHAT THIS DOES: every path cccollab hands a session now lives under that
+ * session's own directory, so the default behaviour — glob the images directory,
+ * open what is there — returns only what this session was actually delivered.
+ * The directory name is unguessable, so a stale path from another session is not
+ * derivable either.
+ *
+ * WHAT THIS DOES NOT DO, stated plainly because a comment that overclaims is how
+ * the original shipped: this is NOT a security boundary. Two processes running
+ * as the same OS user can read each other's files whatever the mode bits say —
+ * `0600` stops other OS users and nothing else — so a session that deliberately
+ * walks `~/.cccollab/images/` can still find another's images. Enforcing session
+ * isolation on the filesystem needs one OS user per session, which is a
+ * deployment decision this module cannot make. What changed is that cross-session
+ * reads now require a deliberate hunt rather than happening by default.
+ */
+export function imagesDirForSession(sessionScope: string): string {
+  return join(CCCOLLAB_IMAGES_ROOT, sessionScope)
+}
+
+/** This process's own image directory. */
+export const CCCOLLAB_IMAGES_DIR = imagesDirForSession(SESSION_SCOPE)
 
 /** Matches the sender-side cap. Re-checked here against the actual body. */
 export const MAX_INBOUND_IMAGE_BYTES = 5 * 1024 * 1024
@@ -49,6 +83,17 @@ export const IMAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 /** How long to wait for one image body before giving up on it. */
 const DOWNLOAD_TIMEOUT_MS = 15_000
+
+/**
+ * Total wall-clock every attachment on ONE message may consume between them.
+ *
+ * The per-fetch timeout alone bounds nothing a caller cares about: images are
+ * fetched sequentially, so four of them against a black-holing host meant four
+ * full timeouts — up to a minute in which every later message on that stream
+ * waits. This is the bound `MessageBus` documents, and it holds regardless of
+ * how many images a message carries.
+ */
+export const MESSAGE_DOWNLOAD_BUDGET_MS = 20_000
 
 /**
  * Accepted image types and the file extension each one gets. The extension is
@@ -99,6 +144,23 @@ export interface SavedImage {
 export interface FailedImage {
   name: string
   reason: string
+}
+
+/** What a failed attachment is called when even its name could not be read. */
+const FALLBACK_IMAGE_NAME = 'image'
+
+/**
+ * A name for a row that may be malformed, for the paths that must report a
+ * failure without being able to trust any field on it. Total by construction:
+ * every throw becomes the fallback, because the caller's whole job at that point
+ * is to report rather than to raise.
+ */
+function describeImageName(image: InboundImage): string {
+  try {
+    return safeImageName(image.name, image.mimeType)
+  } catch {
+    return FALLBACK_IMAGE_NAME
+  }
 }
 
 /**
@@ -161,7 +223,13 @@ export function sweepOldImages(dir: string = CCCOLLAB_IMAGES_DIR, now: number = 
   for (const entry of entries) {
     const path = join(dir, entry)
     try {
-      if (now - statSync(path).mtimeMs > IMAGE_RETENTION_MS) rmSync(path, { force: true })
+      const stats = statSync(path)
+      if (now - stats.mtimeMs <= IMAGE_RETENTION_MS) continue
+      // Directories too: images are stored one directory per session now, and a
+      // machine that runs many sessions would otherwise accumulate one empty
+      // directory per process it has ever started. `recursive` because a stale
+      // session's directory still holds its (equally stale) images.
+      rmSync(path, { force: true, recursive: stats.isDirectory() })
     } catch {
       // A file that vanished under us, or one we may not stat, is not our
       // problem — sweeping is opportunistic housekeeping, never load-bearing.
@@ -188,8 +256,15 @@ export async function saveInboundImages(
   if (!images || images.length === 0) return { saved, failed }
 
   const dir = opts.dir ?? CCCOLLAB_IMAGES_DIR
+  // Real clock, deliberately not `opts.now` — that one is the sweep's reference
+  // point and tests move it freely, while this bounds actual wall-clock blocking.
+  const deadline = Date.now() + MESSAGE_DOWNLOAD_BUDGET_MS
   try {
-    sweepOldImages(dir, opts.now ?? Date.now())
+    // Sweep the ROOT when using the default location, so a machine that has run
+    // many sessions sheds their stale directories and not just this session's
+    // stale files. An explicit `dir` (tests, and the history path's override)
+    // sweeps only itself — nothing may reach outside a caller-named directory.
+    sweepOldImages(opts.dir === undefined ? CCCOLLAB_IMAGES_ROOT : dir, opts.now ?? Date.now())
     mkdirSync(dir, { recursive: true })
   } catch (err) {
     // A directory we cannot create is a purely LOCAL fault — a full disk, a
@@ -199,12 +274,20 @@ export async function saveInboundImages(
     // take the whole message down and, on the history path, latch the transport
     // off with an error telling the developer to re-authenticate.
     const reason = err instanceof Error ? err.message : String(err)
-    return { saved, failed: images.map((i) => ({ name: safeImageName(i.name, i.mimeType), reason })) }
+    return { saved, failed: images.map((i) => ({ name: describeImageName(i), reason })) }
   }
 
   for (const image of images) {
-    const name = safeImageName(image.name, image.mimeType)
+    // INSIDE the try. `safeImageName` reads two sender-supplied fields, and this
+    // module states outright that it must not depend on the sender having
+    // validated anything — `remote.ts` casts query results with a bare `as` at
+    // five sites, so a row arrives as whatever the wire carried. Computing the
+    // name one line above the try is what made "never throws" false: a
+    // non-string `name` raised `raw.split is not a function` and took down the
+    // whole message, text included.
+    let name = FALLBACK_IMAGE_NAME
     try {
+      name = safeImageName(image.name, image.mimeType)
       const path = join(dir, imageFileName({ ts: opts.ts, url: image.url, name: image.name, mimeType: image.mimeType }))
 
       // Same file name means same url means same bytes (see imageFileName), so
@@ -236,7 +319,17 @@ export async function saveInboundImages(
         continue
       }
 
-      const response = await fetch(parsed.toString(), { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+      // Whatever is left of the whole message's budget, capped by the per-fetch
+      // timeout. Without this, n images meant n × DOWNLOAD_TIMEOUT_MS, because
+      // this loop is sequential.
+      const remainingBudget = deadline - Date.now()
+      if (remainingBudget <= 0) {
+        failed.push({ name, reason: 'download budget for this message exhausted' })
+        continue
+      }
+      const response = await fetch(parsed.toString(), {
+        signal: AbortSignal.timeout(Math.min(DOWNLOAD_TIMEOUT_MS, remainingBudget)),
+      })
       if (!response.ok) {
         failed.push({ name, reason: `download failed (${response.status})` })
         continue
@@ -338,6 +431,13 @@ const FENCE_MARKER = new RegExp(`[<＜]\\s*/?\\s*${FENCE_TAG}[\\w-]*`, 'gi')
 const IMAGE_ELEMENT = /[<＜]\/?image\b[^>＞\n]*[>＞]/gi
 
 export function stripFenceMarkers(text: string): string {
+  // `text` is the message body straight off the wire. A non-string here threw
+  // `.replace is not a function` from `renderInboundText`, OUTSIDE the try that
+  // reports delivery errors — so the session saw no notification, no event, and
+  // one unhandled rejection: the message vanished entirely rather than arriving
+  // damaged. Coerced rather than rejected, because the caller's contract is to
+  // deliver what arrived, not to adjudicate it.
+  if (typeof text !== 'string') return text === undefined || text === null ? '' : String(text)
   return text.replace(FENCE_MARKER, `[${FENCE_TAG}]`).replace(IMAGE_ELEMENT, `[${FENCE_TAG}]`)
 }
 

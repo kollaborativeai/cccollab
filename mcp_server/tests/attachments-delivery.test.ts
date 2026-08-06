@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { ConvexClient } from 'convex/browser'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { CCCOLLAB_IMAGES_DIR } from '../src/attachments.js'
+import { CCCOLLAB_IMAGES_DIR, CCCOLLAB_IMAGES_ROOT } from '../src/attachments.js'
 import { MessageBus } from '../src/message-bus.js'
 import { LocalTransport } from '../src/transport/local.js'
 import { RemoteTransport } from '../src/transport/remote.js'
@@ -234,6 +234,84 @@ describe('live delivery — MessageBus', () => {
 
     const delivered = mcp.notification.mock.calls.map((c) => (c[0].params.content as string).split('\n')[0])
     expect(delivered).toEqual(['here is the failing deploy', 'so revert the migration', 'and redeploy'])
+  })
+
+  /**
+   * CRIT-3. The chain above is the RIGHT guarantee applied at the WRONG scope.
+   * Ordering only means anything between messages a reader will relate to each
+   * other — the screenshot and the sentence about it — and that is a channel, or
+   * a topic within one. Serialising ALL delivery through one process-wide chain
+   * bought that ordering by making every channel wait behind every download.
+   *
+   * Executed in review: a 2-image message on chanA against an 800ms/fetch host
+   * and a text-only "PROD IS DOWN" on chanB BOTH fired at t+1603ms. The urgent
+   * text was held up by an unrelated screenshot in a channel its reader may not
+   * even be in.
+   */
+  it('does not hold a text message on one channel behind an image download on another', async () => {
+    let release: () => void = () => {}
+    const slow = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await slow
+        return { ok: true, status: 200, arrayBuffer: async () => PNG.buffer.slice(0) }
+      }),
+    )
+
+    const mcp = makeMcp()
+    const bus = new MessageBus(mcp as never)
+    const blocked = bus.push(message({ channel: 'C1', channelName: 'design', images: [image()] }))
+    const urgent = bus.push(message({ channel: 'C2', channelName: 'incident', text: 'PROD IS DOWN' }))
+
+    // The unrelated channel must land while the download is still in flight.
+    await urgent
+    const beforeRelease = mcp.notification.mock.calls.map((c) => (c[0].params.content as string).split('\n')[0])
+    expect(beforeRelease).toContain('PROD IS DOWN')
+
+    release()
+    await blocked
+  })
+
+  it('still orders two messages that share a channel, and two that share a topic', async () => {
+    // The anti-vacuity half: per-channel chains must not become per-message.
+    let release: () => void = () => {}
+    const slow = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await slow
+        return { ok: true, status: 200, arrayBuffer: async () => PNG.buffer.slice(0) }
+      }),
+    )
+
+    const mcp = makeMcp()
+    const bus = new MessageBus(mcp as never)
+    const sameChannel = [
+      bus.push(message({ channel: 'C1', text: 'here is the failing deploy', images: [image()] })),
+      bus.push(message({ channel: 'C1', ts: '2026-05-15T10:00:01.000Z', text: 'so revert the migration' })),
+    ]
+    const sameTopic = [
+      bus.push(
+        message({
+          channel: 'C9',
+          threadTs: 'T1',
+          text: 'the trace',
+          images: [image({ url: 'https://files.example/t' })],
+        }),
+      ),
+      bus.push(message({ channel: 'C9', threadTs: 'T1', ts: '2026-05-15T10:00:01.000Z', text: 'see line 4' })),
+    ]
+    release()
+    await Promise.all([...sameChannel, ...sameTopic])
+
+    const delivered = mcp.notification.mock.calls.map((c) => (c[0].params.content as string).split('\n')[0])
+    expect(delivered.indexOf('here is the failing deploy')).toBeLessThan(delivered.indexOf('so revert the migration'))
+    expect(delivered.indexOf('the trace')).toBeLessThan(delivered.indexOf('see line 4'))
   })
 
   // Multi-image was proven at exactly one of five layers. The live demo sent
@@ -546,7 +624,9 @@ describe('live subscription wiring — image metadata reaches the bus', () => {
   it('a channel subscription forwards the image metadata', async () => {
     const { transport, emit, hasSubscribed } = subscribingClient([row])
     const events: ParsedMessage[] = []
-    transport.subscribeChannelMessages({ channelName: 'dev' }, (m) => events.push(m))
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (m) => {
+      events.push(m)
+    })
     // The channel id is resolved asynchronously before the subscription registers.
     await vi.waitFor(() => expect(hasSubscribed()).toBe(true))
     emit()
@@ -571,7 +651,13 @@ describe('live subscription wiring — image metadata reaches the bus', () => {
 })
 
 describe('download location', () => {
-  it('defaults to ~/.cccollab/images, beside the existing run/ and logs/', () => {
-    expect(CCCOLLAB_IMAGES_DIR.endsWith('/.cccollab/images')).toBe(true)
+  // Updated for CRIT-2: `~/.cccollab/images` is still where images live, but it
+  // is now a container of per-session directories rather than the target itself.
+  // The old assertion pinned the flat layout that let a co-resident session read
+  // images from topics it was never in.
+  it('defaults to a per-session directory under ~/.cccollab/images', () => {
+    expect(CCCOLLAB_IMAGES_ROOT.endsWith('/.cccollab/images')).toBe(true)
+    expect(CCCOLLAB_IMAGES_DIR.startsWith(`${CCCOLLAB_IMAGES_ROOT}/`)).toBe(true)
+    expect(CCCOLLAB_IMAGES_DIR).not.toBe(CCCOLLAB_IMAGES_ROOT)
   })
 })

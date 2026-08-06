@@ -625,9 +625,12 @@ export function ensureChannelSubscription(args: {
   const key = `${args.locationName}::${args.channelName}`
   if (args.map.has(key)) return
   if (!hasChannelSubscription(args.transport)) return
-  const unsub = args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) => {
-    void args.messageBus.push(msg, args.transport.source)
-  })
+  const unsub = args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) =>
+    // RETURNED, not `void`ed: the transport acks the read cursor only once this
+    // settles. Discarding it is what let the cursor advance over a message that
+    // was still downloading, losing it permanently on a restart.
+    args.messageBus.push(msg, args.transport.source),
+  )
   args.map.set(key, unsub)
 }
 
