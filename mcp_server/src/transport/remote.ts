@@ -2,7 +2,8 @@ import type { ConvexClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import type { ParsedMessage } from '../types.js'
+import { renderInboundText } from '../attachments.js'
+import type { InboundImage, ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
@@ -715,13 +716,17 @@ export class RemoteTransport implements Transport {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.messages.queries.listByTopic),
         this.orgScopedArgs({ topicId: args.topicId }),
-      )) as Array<{ fromSessionId: string; text: string; ts: number }>
+      )) as Array<{ fromSessionId: string; text: string; ts: number; images?: InboundImage[] }>
+      // This history is handed straight to the model, and its caller primes the
+      // reactive cursor past it — so anything dropped here is dropped for good.
       return {
-        history: rows.map((r) => ({
-          sender: r.fromSessionId,
-          text: r.text,
-          ts: new Date(r.ts).toISOString(),
-        })),
+        history: await Promise.all(
+          rows.map(async (r) => ({
+            sender: r.fromSessionId,
+            text: (await renderInboundText({ text: r.text, images: r.images, ts: r.ts })).text,
+            ts: new Date(r.ts).toISOString(),
+          })),
+        ),
       }
     } catch (err) {
       this.registerFailure('joinTopic', err)
@@ -825,17 +830,36 @@ export class RemoteTransport implements Transport {
 
   // ─── Message history ──────────────────────────────────────────────────
 
-  private static toHistoryPage(raw: {
-    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+  /**
+   * Maps a raw history page and materialises its attachments.
+   *
+   * The download happens HERE, on read, not when the message was sent — this is
+   * the catch-up path, so a session that was offline at send time gets the
+   * bytes the moment it asks for history. The resulting on-disk paths are
+   * appended to each message's text using the same block the live path uses, so
+   * a session sees identical framing whether an image arrived live or was read
+   * back from history.
+   */
+  private static async toHistoryPage(raw: {
+    messages: Array<{
+      fromSessionId: string
+      senderSessionName?: string
+      text: string
+      ts: number
+      images?: InboundImage[]
+    }>
     hasMore: boolean
-  }): TransportHistoryPage {
-    return {
-      messages: raw.messages.map((m) => ({
+  }): Promise<TransportHistoryPage> {
+    const messages = await Promise.all(
+      raw.messages.map(async (m) => ({
         sender: m.fromSessionId,
         senderSessionName: m.senderSessionName,
-        text: m.text,
+        text: (await renderInboundText({ text: m.text, images: m.images, ts: m.ts })).text,
         ts: m.ts,
       })),
+    )
+    return {
+      messages,
       hasMore: raw.hasMore,
       oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
     }
@@ -868,10 +892,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readChannelHistory),
         this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readChannelMessages', err)
       return { messages: [], hasMore: false }
@@ -885,10 +915,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readTopicHistory),
         this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readTopicMessages', err)
       return { messages: [], hasMore: false }
@@ -937,7 +973,13 @@ export class RemoteTransport implements Transport {
       fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
-        const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+        const arr = rows as Array<{
+          _id: string
+          fromSessionId: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         for (const row of arr) {
           if (seen.has(row._id)) continue
           seen.add(row._id)
@@ -955,6 +997,7 @@ export class RemoteTransport implements Transport {
             channel: args.channelName,
             channelName: args.channelName,
             threadTs: args.topicId,
+            images: row.images,
           })
         }
       },
@@ -1009,7 +1052,13 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,
         (rows) => {
-          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+          const arr = rows as Array<{
+            _id: string
+            fromSessionId: string
+            text: string
+            ts: number
+            images?: InboundImage[]
+          }>
           let highestTsInBatch = 0
           for (const row of arr) {
             if (seen.has(row._id)) continue
@@ -1029,6 +1078,7 @@ export class RemoteTransport implements Transport {
               channel: args.channelName,
               channelName: args.channelName,
               threadTs: undefined,
+              images: row.images,
             })
           }
           // Ack the batch's highest ts so subsequent subscribes (incl.
