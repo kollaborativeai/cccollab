@@ -157,7 +157,15 @@ export class MessageBus extends EventEmitter {
       })
     } catch (err) {
       this.emit('notify:error', { msg, source, err })
-      return
+      // RETHROW. The caller advances the session's read cursor over every row
+      // whose push resolved, and that cursor is the only record of what has
+      // been seen — so swallowing here acked a message the session was never
+      // shown and buried it permanently. `notify:error` cannot substitute: it
+      // has no listener in production code and this class has no logger, so a
+      // swallowed failure is invisible at every layer. The queue is protected
+      // separately in `push` (`tails` holds the caught promise), so rejecting
+      // stops the ack without stalling the next message.
+      throw err
     }
 
     this.emit(`channel:${msg.channel}`, msg)
