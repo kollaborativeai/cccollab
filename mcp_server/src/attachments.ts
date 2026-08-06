@@ -265,7 +265,12 @@ export async function saveInboundImages(
     // stale files. An explicit `dir` (tests, and the history path's override)
     // sweeps only itself — nothing may reach outside a caller-named directory.
     sweepOldImages(opts.dir === undefined ? CCCOLLAB_IMAGES_ROOT : dir, opts.now ?? Date.now())
-    mkdirSync(dir, { recursive: true })
+    // 0700, not the 0775 default. The files inside are already 0600, but the
+    // directory was world-listable, so any other OS user could read every
+    // delivered image's FILENAME — and those are sender-chosen
+    // (`prod-db-credentials.png`). It also made the "unguessable directory
+    // name" claim below hollow, since the parent could simply be listed.
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
   } catch (err) {
     // A directory we cannot create is a purely LOCAL fault — a full disk, a
     // read-only home, a stray file where the directory belongs. It says nothing
@@ -423,12 +428,22 @@ const FENCE_MARKER = new RegExp(`[<＜]\\s*/?\\s*${FENCE_TAG}[\\w-]*`, 'gi')
  * The inner `<image …>` vocabulary. Ambiguous with ordinary prose and code, so
  * this one demands a COMPLETE, single-line, parser-shaped tag before it will
  * touch anything: no whitespace after the bracket, and no newline inside.
- * `i < image.length` is not a tag to a parser or to a reader — it is a
- * comparison, and the earlier one-pattern version ate from that `<` to the next
- * `>` anywhere in the message, silently deleting whatever the sender wrote in
- * between.
+ *
+ * The discriminator is what follows the TAG NAME, and it has to be, because
+ * requiring no space after the bracket only rules out the spaced comparison
+ * `i < image.length`. The unspaced `i<image.length` is equally a comparison and
+ * matched happily, after which `[^>＞\n]*` ate to the next `>` anywhere on the
+ * line — so `if (i<image.length && ok > 0)` lost everything between, silently.
+ * A real tag has whitespace after its name (it is about to carry attributes) or
+ * is the closing form; a comparison has `.`, and a TypeScript `Promise<Image>`
+ * has `>`. Hence: attributes require ` ` or `\t`, and `</image>` is spelled out
+ * separately rather than folded in.
+ *
+ * A bare `<image>` with no attributes is deliberately NOT matched. It carries no
+ * `path` and no `name`, so it conveys nothing to the model, and matching it
+ * would take `Promise<Image>` with it.
  */
-const IMAGE_ELEMENT = /[<＜]\/?image\b[^>＞\n]*[>＞]/gi
+const IMAGE_ELEMENT = /[<＜](?:\/image\s*[>＞]|image(?=[ \t])[^>＞\n]*[>＞])/gi
 
 export function stripFenceMarkers(text: string): string {
   // `text` is the message body straight off the wire. A non-string here threw
@@ -437,8 +452,15 @@ export function stripFenceMarkers(text: string): string {
   // one unhandled rejection: the message vanished entirely rather than arriving
   // damaged. Coerced rather than rejected, because the caller's contract is to
   // deliver what arrived, not to adjudicate it.
-  if (typeof text !== 'string') return text === undefined || text === null ? '' : String(text)
-  return text.replace(FENCE_MARKER, `[${FENCE_TAG}]`).replace(IMAGE_ELEMENT, `[${FENCE_TAG}]`)
+  //
+  // Coerce, then fall through to BOTH passes. Returning the coerced string
+  // early skipped the strip entirely, which turned the crash into something
+  // worse: the local broker's `/local-event` endpoint is unauthenticated and
+  // copies `text` through verbatim, so any process on the machine could post a
+  // one-element array and hand the receiving model a forged fence wearing
+  // cccollab's own authority, complete with a `path=` it is trained to open.
+  const body = typeof text === 'string' ? text : text === undefined || text === null ? '' : String(text)
+  return body.replace(FENCE_MARKER, `[${FENCE_TAG}]`).replace(IMAGE_ELEMENT, `[${FENCE_TAG}]`)
 }
 
 /**
