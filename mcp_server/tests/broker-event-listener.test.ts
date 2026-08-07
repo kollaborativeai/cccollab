@@ -682,3 +682,151 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
     }
   }, 15_000)
 })
+
+/**
+ * A 200 status line is not proof that anything is listening. The session pins
+ * the broker's port once at startup and never rediscovers it, so if the broker
+ * dies and ANYTHING else binds that port, the listener gets a perfectly polite
+ * 200 that never carries an event — and used to report `connected: true`
+ * forever, with no reconnect and nothing logged. Same for a wedged-but-alive
+ * broker (SIGSTOP, blocked event loop, half-open TCP after a suspend), which
+ * needs no port reuse at all.
+ *
+ * These tests pin the three things that make the stream self-healing: the
+ * response must LOOK like an event stream, a stream that stops carrying data
+ * must be treated as dead, and a stream that is quiet but still heartbeating
+ * must NOT be — otherwise the read deadline is just a reconnect loop.
+ */
+describe('BrokerEventListener stream health (KAI-414)', () => {
+  /** A mock broker whose handlers deliberately hold sockets open; `close()`
+   *  therefore has to tear the sockets down itself or it would never resolve. */
+  async function startServer(handler: http.RequestListener): Promise<{ port: number; close: () => Promise<void> }> {
+    const server = http.createServer(handler)
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+    return {
+      port,
+      close: async () => {
+        server.closeAllConnections()
+        await new Promise<void>((r) => server.close(() => r()))
+      },
+    }
+  }
+
+  function makeListener(port: number, readDeadlineMs?: number): BrokerEventListener {
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    return new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+      readDeadlineMs,
+    })
+  }
+
+  const SSE_HELLO = `id: b1:0\ndata: ${JSON.stringify({ source: 'local', type: 'stream_hello' })}\n\n`
+
+  // The CRITICAL case: whatever grabbed the port answers 200 and holds the
+  // socket open. No data, no `end`, no `error` — so nothing else in the
+  // listener will ever notice. Only the content-type check can.
+  it('does not report connected on a 200 that is not an event stream, and reconnects', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.write('<html>not a broker</html>')
+      // Held open on purpose: this is the socket nothing ever tears down.
+    })
+    const listener = makeListener(server.port)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // Non-200 held open: `end`, `error` and the request's own `error` all stay
+  // silent, so without a `close` backstop the listener is permanently dead and
+  // never even schedules a retry.
+  it('reconnects when the broker answers a non-200 and holds the socket open', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.write('{"error":"not found"}')
+    })
+    const listener = makeListener(server.port)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // A real SSE stream that simply stops carrying anything. The socket stays up,
+  // so the status line and the content-type both still say "healthy" — only a
+  // read deadline can tell the difference between quiet and deaf.
+  it('flips to disconnected and reconnects when a healthy stream goes silent past the read deadline', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+      // ...and then never speaks again.
+    })
+    const listener = makeListener(server.port, 400)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(false), { timeout: 5000, interval: 10 })
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // The guard on the guard. A read deadline with nothing to reset it turns
+  // every idle-but-healthy stream into a reconnect loop; the broker's heartbeat
+  // is what keeps that from happening, and this is the test that says so. The
+  // hard wait is the assertion: absence of a reconnect can only be observed by
+  // letting several deadline windows elapse.
+  it('does not reconnect while an idle stream is still receiving heartbeats', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+      // Comment frames only — no `id:`, no `data:`. Exactly what the broker
+      // sends, and exactly what a quiet-but-alive stream looks like.
+      const beat = setInterval(() => res.write(': ping\n\n'), 50)
+      res.on('close', () => clearInterval(beat))
+    })
+    const listener = makeListener(server.port, 200)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      // Long enough to outlast several deadline windows AND the 2s reconnect
+      // delay that would follow the first one. A shorter wait would make the
+      // connection count vacuous: a listener that HAD given up at 200ms would
+      // still be sitting in its reconnect delay, showing connections:1.
+      await new Promise<void>((r) => setTimeout(r, 2600))
+      expect(connections).toBe(1)
+      expect(listener.isConnected()).toBe(true)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+})

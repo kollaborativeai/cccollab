@@ -72,6 +72,28 @@ function openStream(
   return { events, close: () => req.destroy(), ready }
 }
 
+/** Open an SSE connection collecting RAW lines, comment frames included. The
+ *  parsed `openStream` above cannot see a heartbeat at all: a comment frame has
+ *  no `data:` line, which is exactly the property that makes it safe. */
+function openRawStream(port: number): { lines: string[]; close: () => void; ready: Promise<void> } {
+  const lines: string[] = []
+  let resolveReady: () => void = () => {}
+  const ready = new Promise<void>((r) => {
+    resolveReady = r
+  })
+  const req = http.get(`http://127.0.0.1:${port}/events`, (res) => {
+    resolveReady()
+    let buffer = ''
+    res.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString()
+      const parts = buffer.split('\n')
+      buffer = parts.pop() ?? ''
+      lines.push(...parts)
+    })
+  })
+  return { lines, close: () => req.destroy(), ready }
+}
+
 async function post(port: number, path: string, body: unknown): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}${path}`, {
     method: 'POST',
@@ -109,6 +131,111 @@ describe('Broker: replay capacity validation (KAI-414)', () => {
       unlinkSync(nanRendezvous)
     } catch {
       /* ignore */
+    }
+  }, 15_000)
+})
+
+describe('Broker: SSE heartbeat (KAI-414)', () => {
+  // Without periodic traffic, a client cannot tell an idle-but-healthy stream
+  // from a wedged one — so the listener's read deadline would have nothing to
+  // reset and would reconnect-loop on a quiet channel. The heartbeat is what
+  // makes "no data for N seconds" mean something.
+  const HB_PROFILE = `heartbeat-${process.pid}`
+  const HB_RENDEZVOUS = join(homedir(), '.cccollab', 'run', `${HB_PROFILE}.json`)
+  let broker: ChildProcess
+  let port: number
+
+  beforeAll(async () => {
+    const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
+    const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
+    broker = spawn(process.execPath, [tsxCli, brokerPath], {
+      // The broker is a detached child process, so an env var is the only
+      // injection channel a test has for its interval.
+      env: { ...process.env, CCCOLLAB_PROFILE: HB_PROFILE, CCCOLLAB_HEARTBEAT_MS: '60' },
+      stdio: 'ignore',
+    })
+    await waitUntil(() => (existsSync(HB_RENDEZVOUS) ? true : null), 10_000)
+    port = (JSON.parse(readFileSync(HB_RENDEZVOUS, 'utf-8')) as { port: number }).port
+    await waitUntil(async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/health`)
+        return res.ok ? true : null
+      } catch {
+        return null
+      }
+    }, 10_000)
+  }, 20_000)
+
+  afterAll(async () => {
+    if (broker && !broker.killed) {
+      broker.kill('SIGTERM')
+      await new Promise<void>((r) => setTimeout(r, 200))
+      try {
+        unlinkSync(HB_RENDEZVOUS)
+      } catch {
+        /* ignore */
+      }
+    }
+  })
+
+  it('writes comment frames on the interval without consuming the client cursor', async () => {
+    // Seeded BEFORE the stream opens, so the only sequence numbers issued while
+    // we watch are the ones we ask for.
+    const topicId = await seedTopic(port, 'hb-sender', 'hb-ch', 'hb-topic')
+
+    const raw = openRawStream(port)
+    await raw.ready
+    await waitUntil(() => (raw.lines.some((l) => l.startsWith('id: ')) ? true : null), 5000)
+    const helloId = raw.lines
+      .find((l) => l.startsWith('id: '))!
+      .slice(4)
+      .trim()
+    const [brokerId, helloSeq] = helloId.split(':')
+
+    await waitUntil(() => (raw.lines.filter((l) => l.startsWith(':')).length >= 2 ? true : null), 5000)
+    const pings = raw.lines.filter((l) => l.startsWith(':'))
+    expect(pings[0]).toBe(': ping')
+
+    // The cursor claim, stated as a fact the client can check: the next real
+    // event is exactly one sequence number past the hello, so the heartbeats
+    // in between issued no ids and left the cursor where it was.
+    await post(port, `/topics/${topicId}/messages`, { sender: 'hb-sender', text: 'after the pings' })
+    await waitUntil(() => (raw.lines.some((l) => l.includes('after the pings')) ? true : null), 5000)
+    const messageId = raw.lines
+      .filter((l) => l.startsWith('id: '))
+      .at(-1)!
+      .slice(4)
+      .trim()
+    expect(messageId).toBe(`${brokerId}:${Number(helloSeq) + 1}`)
+    raw.close()
+  }, 15_000)
+
+  // A NaN interval would make setInterval fire on the next tick, forever: a
+  // silent CPU burn dressed up as a working broker. Same reasoning, and the
+  // same shape, as CCCOLLAB_REPLAY_CAPACITY's guard.
+  it('refuses to boot with a non-numeric CCCOLLAB_HEARTBEAT_MS', async () => {
+    const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
+    if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
+    const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
+    const badProfile = `nan-hb-${process.pid}`
+    const badRendezvous = join(homedir(), '.cccollab', 'run', `${badProfile}.json`)
+    const child = spawn(process.execPath, [tsxCli, brokerPath], {
+      env: { ...process.env, CCCOLLAB_PROFILE: badProfile, CCCOLLAB_HEARTBEAT_MS: 'soon' },
+      stdio: 'ignore',
+    })
+    try {
+      const code = await new Promise<number>((r) => child.on('exit', (c) => r(c ?? 0)))
+      expect(code).not.toBe(0)
+    } finally {
+      // A broker that WRONGLY boots would otherwise outlive the failing test
+      // and keep its rendezvous file, poisoning the next run.
+      child.kill('SIGKILL')
+      try {
+        unlinkSync(badRendezvous)
+      } catch {
+        /* ignore */
+      }
     }
   }, 15_000)
 })

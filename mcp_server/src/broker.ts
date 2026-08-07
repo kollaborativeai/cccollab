@@ -22,19 +22,31 @@ const clients = new Set<SSEResponse>()
  *  so a cursor carrying a different id cannot be honoured — and the client must
  *  be told that, not silently resumed from nothing. */
 const BROKER_ID = crypto.randomUUID()
-/** Events retained for replay to a reconnecting client. Bounded: a client that
- *  falls further behind than this gets an explicit `stream_gap`, never a
- *  quietly-incomplete replay. Rejects garbage/<1 rather than silently coercing
- *  to NaN (which would defeat eviction: `length > NaN` is false forever). */
-const REPLAY_CAPACITY = ((): number => {
-  const raw = process.env.CCCOLLAB_REPLAY_CAPACITY
-  if (raw === undefined) return 1000
+/** Read a positive-integer tuning knob from the environment. Rejects garbage
+ *  rather than silently coercing to NaN: every one of these knobs degrades
+ *  SILENTLY when it is NaN (eviction never fires because `length > NaN` is
+ *  false; an interval fires every tick), and silent degradation is the exact
+ *  failure mode this stream work exists to eliminate. */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
   const n = Number(raw)
   if (!Number.isFinite(n) || n < 1) {
-    throw new Error(`CCCOLLAB_REPLAY_CAPACITY must be an integer >= 1, got ${JSON.stringify(raw)}`)
+    throw new Error(`${name} must be an integer >= 1, got ${JSON.stringify(raw)}`)
   }
   return Math.floor(n)
-})()
+}
+
+/** Events retained for replay to a reconnecting client. Bounded: a client that
+ *  falls further behind than this gets an explicit `stream_gap`, never a
+ *  quietly-incomplete replay. */
+const REPLAY_CAPACITY = positiveIntEnv('CCCOLLAB_REPLAY_CAPACITY', 1000)
+/** How often every open SSE stream gets a comment frame. Its job is to make
+ *  silence MEAN something: a client can only tell "quiet but healthy" from
+ *  "wedged" if a healthy stream is never silent for long. The listener's read
+ *  deadline is sized against this (see broker-event-listener.ts), so shortening
+ *  one without the other turns an idle stream into a reconnect loop. */
+const HEARTBEAT_MS = positiveIntEnv('CCCOLLAB_HEARTBEAT_MS', 15_000)
 const replayBuffer: Array<{ seq: number; data: string }> = []
 let lastSeq = 0
 
@@ -43,11 +55,7 @@ function log(msg: string): void {
   appendFileSync(LOG_FILE, line)
 }
 
-function broadcast(data: string): void {
-  lastSeq += 1
-  replayBuffer.push({ seq: lastSeq, data })
-  if (replayBuffer.length > REPLAY_CAPACITY) replayBuffer.shift()
-  const payload = sseFrame(`${BROKER_ID}:${lastSeq}`, data)
+function writeToClients(payload: string): void {
   for (const client of clients) {
     try {
       client.write(payload)
@@ -56,6 +64,24 @@ function broadcast(data: string): void {
     }
   }
 }
+
+function broadcast(data: string): void {
+  lastSeq += 1
+  replayBuffer.push({ seq: lastSeq, data })
+  if (replayBuffer.length > REPLAY_CAPACITY) replayBuffer.shift()
+  writeToClients(sseFrame(`${BROKER_ID}:${lastSeq}`, data))
+}
+
+/** An SSE comment frame: no `id:`, no `data:`. That is what makes it safe to
+ *  send into a cursored stream — clients skip it without advancing their
+ *  cursor, and it consumes no sequence number, so a reconnect resumes exactly
+ *  where it would have anyway. */
+const HEARTBEAT_FRAME = ': ping\n\n'
+
+// One timer for every client rather than one per client: they all want the
+// same frame at the same time. `.unref()` because a heartbeat must never be
+// the reason this process stays alive — the HTTP server is.
+setInterval(() => writeToClients(HEARTBEAT_FRAME), HEARTBEAT_MS).unref()
 
 function sseFrame(id: string | undefined, data: string): string {
   return `${id ? `id: ${id}\n` : ''}data: ${data}\n\n`
