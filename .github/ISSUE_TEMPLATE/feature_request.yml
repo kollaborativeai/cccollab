@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a capability cccollab does not have
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: |
+        Describe the situation, not the solution. What are you coordinating, and
+        where does cccollab currently make that awkward or impossible?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do
+      description: If you have a specific shape in mind — a tool, a config key, a behaviour change — describe it here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: How you handle it today, if at all. This helps gauge how much the gap costs.

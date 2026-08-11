@@ -12,8 +12,24 @@ const here = dirname(fileURLToPath(import.meta.url))
 // installed from npm (so dist/server.js exists), or mcp_server/ during dev
 // (so src/server.ts exists).
 const DIR = resolve(here, '..')
-const srcEntry = join(DIR, 'src', 'server.ts')
-const distEntry = join(DIR, 'dist', 'server.js')
+
+// Subcommand dispatch. Everything except a recognised subcommand — including
+// the no-argument case — starts the stdio MCP server, because that is how
+// Claude Code spawns this binary (plugin/.mcp.json runs bare `cccollab`).
+// Adding a subcommand must never intercept that path.
+// --version is handled here rather than as a subcommand entry: it must stay
+// offline and side-effect free, because `brew test` runs it on every install.
+if (['--version', '-v'].includes(process.argv[2])) {
+  console.log(require(join(DIR, 'package.json')).version)
+  process.exit(0)
+}
+
+const SUBCOMMANDS = { init: 'init-cli', doctor: 'doctor-cli' }
+const subcommand = SUBCOMMANDS[process.argv[2]]
+const entryName = subcommand ?? 'server'
+
+const srcEntry = join(DIR, 'src', `${entryName}.ts`)
+const distEntry = join(DIR, 'dist', `${entryName}.js`)
 
 function runChild(child) {
   child.on('exit', (code) => process.exit(code ?? 1))

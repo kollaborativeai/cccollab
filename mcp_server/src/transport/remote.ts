@@ -196,6 +196,15 @@ const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
 
 /**
+ * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
+ * so the backend can distinguish a live registration from a dead one
+ * (KAI-515). The mutation was already wired into `Refs` but never called;
+ * short enough that a session that crashes is flagged stale within a
+ * couple of minutes, long enough not to spam the backend.
+ */
+export const HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
  * Per-subscription cap on the message-id dedup set. Each `onUpdate` call
  * hands us the full set of rows matching the current `sinceTs` window, so
  * the dedup set grows as messages accumulate within the window. 10k entries
@@ -324,6 +333,10 @@ export class RemoteTransport implements Transport {
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
 
+  /** Handle for the periodic `updateLastSeen` ping started once `introduce`
+   *  sets `sessionId`. Cleared on `shutdown`. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+
   constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
@@ -421,6 +434,7 @@ export class RemoteTransport implements Transport {
       // Successful re-bind is a recovery signal: clear permanent mutes so the
       // session is not stuck after the user fixed network / org and re-introduced.
       this.clearSkippedOps()
+      this.startHeartbeat()
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
@@ -437,6 +451,67 @@ export class RemoteTransport implements Transport {
     } catch (err) {
       this.registerFailure('introduce', err)
       throw err
+    }
+  }
+
+  /**
+   * Start the periodic `updateLastSeen` ping (KAI-515). Idempotent: a
+   * second call replaces any prior timer rather than stacking intervals.
+   */
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    const timer = setInterval(() => {
+      void this.sendHeartbeat()
+    }, HEARTBEAT_INTERVAL_MS)
+    // Don't hold the process open on this timer alone.
+    if (typeof timer.unref === 'function') timer.unref()
+    this.heartbeatTimer = timer
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+  }
+
+  /**
+   * A transient heartbeat failure (a blip, a token refresh in flight) must
+   * not trip the degradation circuit the way a real operation failure
+   * does — losing liveness reporting for one tick is harmless. But a
+   * heartbeat is often the ONLY remote call a long-lived, mostly-idle
+   * session makes, so a structural failure (renamed/removed mutation) or
+   * an auth failure IS a real transport-health signal indistinguishable
+   * from any other operation's — swallowing those unconditionally would
+   * leave `enabled: true` forever while liveness silently never gets
+   * reported. Route those two cases through `registerFailure` like every
+   * other mutation in this class; only the generic-transient case stays
+   * swallowed here.
+   */
+  private async sendHeartbeat(): Promise<void> {
+    if (!this.enabled || this.sessionId === null) return
+    try {
+      await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.updateLastSeen), {
+        sessionId: this.sessionId,
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      // Heartbeat is often the ONLY remote call a long-lived idle session
+      // makes. A missing updateLastSeen (schema drift) must disable the
+      // whole transport — not the soft one-shot FNF path, which only
+      // counts toward a per-op skip (KAI-333). Auth still trips via
+      // registerFailure.
+      if (isFunctionNotFoundError(err)) {
+        this.enabled = false
+        this.degradationReason = `Remote sync disabled: function not found on deployment (${msg})`
+        this.log(this.degradationReason)
+        return
+      }
+      if (isAuthError(err)) {
+        this.registerFailure('heartbeat', err)
+        return
+      }
+      this.log(`heartbeat failed (non-fatal, transient): ${msg}`)
     }
   }
 
@@ -820,8 +895,15 @@ export class RemoteTransport implements Transport {
         objective?: string
         machine?: string
         createdAt: number
+        /** Backend field is `lastSeenAt` (see the cccollab Convex
+         *  sessions.listByChannel handler); we normalise it to `lastSeen`
+         *  on the transport-facing shape so the tool layer's staleness
+         *  filter has a signal to bite on. Optional because a session
+         *  pre-dating the field would have it null. */
+        lastSeenAt?: number
       }>
       return rows.map((r) => ({
+        id: r._id,
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
@@ -829,6 +911,7 @@ export class RemoteTransport implements Transport {
         // session today; leave empty so the shape stays stable.
         channels: [],
         registeredAt: new Date(r.createdAt).toISOString(),
+        lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
@@ -1160,6 +1243,7 @@ export class RemoteTransport implements Transport {
     if (this.shutdownStarted) return
     this.shutdownStarted = true
     this.enabled = false
+    this.stopHeartbeat()
     for (const unsub of this.trackedUnsubscribes) {
       try {
         unsub()

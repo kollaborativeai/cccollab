@@ -366,7 +366,7 @@ describe('Identity Tools', () => {
         }
         const transport = new RemoteTransport({
           client: stubClient as unknown as import('convex/browser').ConvexClient,
-          source: 'flatout',
+          source: 'acme',
           log: () => {},
         })
         const customDeps: IdentityToolDeps = {
@@ -374,19 +374,19 @@ describe('Identity Tools', () => {
           router: new TransportRouter([transport]),
           locations: [
             {
-              name: 'flatout',
+              name: 'acme',
               isLocal: false,
               url: 'https://example.convex.cloud',
               accessToken: 'a',
               refreshToken: 'r',
-              userEmail: 'stefan@flatout.solutions',
+              userEmail: 'stefan@cccollab.dev',
               channels: [],
             },
           ],
         }
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
-        expect(result).toContain('Already authenticated to "flatout"')
-        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
+        expect(result).toContain('Already authenticated to "acme"')
+        expect(result).toContain('(signed in as stefan@cccollab.dev)')
         expect(result).toContain('Pass force: true to re-authenticate.')
       })
 
@@ -401,7 +401,7 @@ describe('Identity Tools', () => {
         }
         const transport = new RemoteTransport({
           client: stubClient as unknown as import('convex/browser').ConvexClient,
-          source: 'flatout',
+          source: 'acme',
           log: () => {},
         })
         const customDeps: IdentityToolDeps = {
@@ -409,7 +409,7 @@ describe('Identity Tools', () => {
           router: new TransportRouter([transport]),
           locations: [
             {
-              name: 'flatout',
+              name: 'acme',
               isLocal: false,
               url: 'https://example.convex.cloud',
               accessToken: 'a',
@@ -418,8 +418,8 @@ describe('Identity Tools', () => {
             },
           ],
         }
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
-        expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
+        expect(result).toBe('Already authenticated to "acme". Pass force: true to re-authenticate.')
       })
 
       it('lazily attaches a dormant token-bearing location and short-circuits without a fresh sign-in', async () => {
@@ -432,7 +432,7 @@ describe('Identity Tools', () => {
         ;(runClerkPkce as ReturnType<typeof vi.fn>).mockClear()
 
         const dormant: ResolvedLocation = {
-          name: 'flatout',
+          name: 'acme',
           isLocal: false,
           url: 'https://example.convex.cloud',
           accessToken: 'a',
@@ -440,7 +440,7 @@ describe('Identity Tools', () => {
           idToken: 'i',
           clerkIssuer: 'https://x.clerk.accounts.dev',
           clerkClientId: 'cid',
-          userEmail: 'stefan@flatout.solutions',
+          userEmail: 'stefan@cccollab.dev',
           channels: [],
         }
         const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
@@ -449,7 +449,7 @@ describe('Identity Tools', () => {
         const router = new TransportRouter([new LocalTransport(7850)])
         const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
         const fakeRemote = {
-          source: 'flatout',
+          source: 'acme',
           enabled: true,
           introduce: vi.fn(async () => {}),
         } as unknown as Transport
@@ -463,7 +463,7 @@ describe('Identity Tools', () => {
             remoteTopicUnsubscribes: new Map(),
             remoteChannelUnsubscribes: new Map(),
             inflight: new Map<string, Promise<void>>(),
-            candidates: ['flatout'],
+            candidates: ['acme'],
             resolve: () => ({
               locations: [dormant],
               activeLocation: undefined,
@@ -481,12 +481,12 @@ describe('Identity Tools', () => {
           ensureAttached,
         }
 
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
 
         expect(runClerkPkce).not.toHaveBeenCalled()
-        expect(router.has('flatout')).toBe(true)
-        expect(result).toContain('Already authenticated to "flatout"')
-        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+        expect(router.has('acme')).toBe(true)
+        expect(result).toContain('Already authenticated to "acme"')
+        expect(result).toContain('(signed in as stefan@cccollab.dev)')
       })
 
       it('authenticate dispatches to runClerkPkce when location.authType === "clerk"', async () => {
@@ -558,6 +558,58 @@ describe('Identity Tools', () => {
         expect(result).toContain('clerkIssuer')
         expect(result).toContain('clerkClientId')
       })
+    })
+  })
+})
+
+describe('version handshake surfacing', () => {
+  const aligned = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.5.0',
+    pluginRoot: '/cache/3.5.0',
+    status: 'aligned' as const,
+  }
+  const drifted = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.4.0',
+    pluginRoot: '/cache/3.4.0',
+    status: 'drifted' as const,
+  }
+
+  describe('introduce', () => {
+    it('warns about drift on the one tool every session must call first', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toContain('3.4.0')
+      expect(result.warning).toContain('3.5.0')
+    })
+
+    it('stays silent when the skill matches the server', async () => {
+      const deps = { ...createMockDeps(), versionState: aligned }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toBeUndefined()
+      expect(result.name).toBe('architect')
+    })
+
+    it('stays silent when no handshake was performed', async () => {
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, createMockDeps()))
+      expect(result.warning).toBeUndefined()
+    })
+  })
+
+  describe('whoami', () => {
+    it('reports both versions so drift is visible on demand, not only at startup', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toEqual({ server: '3.5.0', skill: '3.4.0', status: 'drifted' })
+    })
+
+    it('omits the versions block when no handshake was performed', async () => {
+      const deps = createMockDeps()
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toBeUndefined()
     })
   })
 })
