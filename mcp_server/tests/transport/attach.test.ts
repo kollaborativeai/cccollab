@@ -165,6 +165,16 @@ class FakeRemoteTransport implements Transport {
     }
   }
 
+  /** Topic-created feed (KAI-413 dual-feed). attach tests must see both unsubs. */
+  subscribedTopicsCreated = new Map<string, { onEvent: (msg: ParsedMessage) => void; unsubscribeCalled: boolean }>()
+  subscribeTopicsCreated(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+    const entry = { onEvent, unsubscribeCalled: false }
+    this.subscribedTopicsCreated.set(args.channelName, entry)
+    return () => {
+      entry.unsubscribeCalled = true
+    }
+  }
+
   /** Expose the topic cache so tests can pre-populate for listTopics. */
   registerTopic(t: TransportTopic): void {
     this.topics.set(t.id, t)
@@ -463,6 +473,9 @@ describe('attachLocation', () => {
 
     const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.subscribedChannels.size).toBe(1)
+    // Dual-feed (KAI-413 I1): topic-created shares the same map entry lifecycle.
+    expect(transport.subscribedTopicsCreated.size).toBe(1)
+    expect(transport.subscribedTopicsCreated.has('dev')).toBe(true)
     const sub = transport.subscribedChannels.get('dev')!
     expect(ctx.remoteChannelUnsubscribes.size).toBe(1)
     expect(ctx.remoteChannelUnsubscribes.has('acme::dev')).toBe(true)

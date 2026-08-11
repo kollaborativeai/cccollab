@@ -261,9 +261,9 @@ describe('ActiveContext', () => {
     // The tool layer refuses `watch: true` on a remote (and on an unstated
     // location when remotes exist). The state layer itself does NOT enforce
     // that — `joinChannel('kai','manual','flatout', true)` succeeds and
-    // reports watching:true. That is intentional for KAI-413 (remote watch);
-    // this test pins the state-layer fact so nobody re-claims it is enforced
-    // here after reading the older comment.
+    // reports watching:true. Full remote watch (per-topic MESSAGE fan-out)
+    // is KAI-425; KAI-413 only delivered topic-CREATED parity. This test
+    // pins the state-layer fact so nobody re-claims watch is enforced here.
     it('state layer allows watch on a non-local channel (tool layer refuses it)', () => {
       expect(() => ctx.joinChannel('kai', 'manual', 'flatout', true)).not.toThrow()
       expect(ctx.isChannelWatched('kai', 'flatout')).toBe(true)

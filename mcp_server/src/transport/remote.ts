@@ -990,12 +990,23 @@ export class RemoteTransport implements Transport {
    */
   subscribeTopicsCreated(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
+    // Half-wired call before introduce: refuse rather than capture null
+    // self-drop for the life of the sub (KAI-413 I4).
+    if (this.sessionId === null) return () => {}
     // A DEDICATED dedup set — deliberately NOT `knownTopicIds`. That set is an
     // ownership cache populated by list_topics / get_topic_by_id / join etc.;
     // reusing it would let a `list_topics` call silently mark a not-yet-created
     // topic as "seen" and suppress its real notification, reintroducing this
     // exact bug through the back door (KAI-413).
-    const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    //
+    // Unbounded (not BoundedIdSet): message feeds need a capacity bound because
+    // a long `sinceTs` window can hold 10k+ rows; a channel's active topic list
+    // stays small. Bounded eviction + full-list resend would storm false
+    // "New topic" notifications (KAI-413 I2). Residual race (I3): a topic
+    // created after client registration but included in the first snapshot is
+    // still treated as baseline — remote snapshot priming is lossy for that
+    // window; local SSE is event-based while connected.
+    const seen = new Set<string>()
     let primed = false
     const ownSessionId = this.sessionId
     // includeArchived:false — the active-topics set is exactly what "a new

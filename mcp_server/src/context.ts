@@ -22,8 +22,9 @@ interface SubscribedChannel {
    *  subscription to watched. Remote delivers topic messages per-topic, so a
    *  "watched" remote channel would report watching while receiving nothing
    *  from topics created after the join. This layer does not re-check it (the
-   *  tool is the sole caller that passes `watch`), so whoever lands remote watch
-   *  (KAI-413) must re-establish the invariant at whatever new caller they add.
+   *  tool is the sole caller that passes `watch`), so whoever lands full remote
+   *  watch (KAI-425 — per-topic MESSAGE fan-out; KAI-413 only did topic-CREATED)
+   *  must re-establish the invariant at whatever new caller they add.
    *  `whoami`'s `watchingActive` refuses to call a non-local watch active. */
   watching: boolean
 }

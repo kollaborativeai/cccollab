@@ -141,6 +141,17 @@ class FakeRemoteTransport implements Transport {
       entry.unsubscribeCalled = true
     }
   }
+
+  /** Topic-created feed (KAI-413). Leave/join tests must witness this half of
+   *  the dual-feed ensureChannelSubscription wiring (cc#36 I1). */
+  subscribedTopicsCreated = new Map<string, { onEvent: (msg: ParsedMessage) => void; unsubscribeCalled: boolean }>()
+  subscribeTopicsCreated(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+    const entry = { onEvent, unsubscribeCalled: false }
+    this.subscribedTopicsCreated.set(args.channelName, entry)
+    return () => {
+      entry.unsubscribeCalled = true
+    }
+  }
 }
 
 function makeRemoteDeps(): {
@@ -334,6 +345,13 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
     expect(channelUnsubs.has('acme::dev')).toBe(true)
   })
 
+  it('join_channel also wires the topic-created feed (dual-feed, KAI-413 I1)', async () => {
+    const { deps, transport, channelUnsubs } = makeChannelDeps()
+    await handleChannelTool('join_channel', { name: 'dev', location: 'acme' }, deps)
+    expect(transport.subscribedTopicsCreated.has('dev')).toBe(true)
+    expect(channelUnsubs.has('acme::dev')).toBe(true)
+  })
+
   it('leave_channel tears down the channel-broadcast subscription', async () => {
     const { deps, transport, channelUnsubs } = makeChannelDeps()
     await handleChannelTool('join_channel', { name: 'dev', location: 'acme' }, deps)
@@ -343,6 +361,19 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
     const res = JSON.parse(await handleChannelTool('leave_channel', { name: 'dev', location: 'acme' }, deps))
     expect(res.removed).toBe(true)
     expect(sub.unsubscribeCalled).toBe(true)
+    expect(channelUnsubs.has('acme::dev')).toBe(false)
+  })
+
+  it('leave_channel also tears down the topic-created feed (dual-feed, KAI-413 I1)', async () => {
+    const { deps, transport, channelUnsubs } = makeChannelDeps()
+    await handleChannelTool('join_channel', { name: 'dev', location: 'acme' }, deps)
+    const createdSub = transport.subscribedTopicsCreated.get('dev')!
+    expect(createdSub.unsubscribeCalled).toBe(false)
+
+    const res = JSON.parse(await handleChannelTool('leave_channel', { name: 'dev', location: 'acme' }, deps))
+    expect(res.removed).toBe(true)
+    expect(createdSub.unsubscribeCalled).toBe(true)
+    expect(transport.subscribedChannels.get('dev')!.unsubscribeCalled).toBe(true)
     expect(channelUnsubs.has('acme::dev')).toBe(false)
   })
 })

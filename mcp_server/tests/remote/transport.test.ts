@@ -653,6 +653,56 @@ describe('RemoteTransport.subscribeTopicsCreated (remote topic-created parity, K
     unsub()
     expect(rawUnsubscribed).toBe(true)
   })
+
+  it('does not subscribe when sessionId is null (KAI-413 I4)', () => {
+    const { stub, onUpdateCalls } = makeCapturingStub()
+    // No introduce → sessionId stays null
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    const unsub = transport.subscribeTopicsCreated({ channelName: 'product' }, () => {})
+    expect(onUpdateCalls).toHaveLength(0)
+    // No-op unsub is safe
+    expect(() => unsub()).not.toThrow()
+  })
+
+  it('does not re-notify after many distinct ids (unbounded topic-created set, KAI-413 I2)', async () => {
+    // Topic-created uses an unbounded Set (not BoundedIdSet) so full-list
+    // resends never storm false "New topic" after FIFO eviction.
+    const { stub, callbacks } = makeCapturingStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'sessionB' })
+
+    const delivered: Array<{ text: string }> = []
+    transport.subscribeTopicsCreated({ channelName: 'product' }, (m) => delivered.push(m))
+
+    callbacks[0]!([topicRow({ topicId: 'old-kept', name: 'Ancient', createdAt: 1000 })])
+    expect(delivered).toHaveLength(0)
+
+    const filler: ReturnType<typeof topicRow>[] = []
+    for (let i = 0; i < 10_001; i++) {
+      filler.push(
+        topicRow({
+          topicId: `fill-${i}`,
+          name: `Fill ${i}`,
+          creatorSessionId: 'sessionA',
+          createdAt: 2000 + i,
+        }),
+      )
+    }
+    callbacks[0]!([topicRow({ topicId: 'old-kept', name: 'Ancient', createdAt: 1000 }), ...filler])
+    expect(delivered).toHaveLength(10_001)
+    delivered.length = 0
+
+    // Full resend including the ancient baseline id — still no re-notify.
+    callbacks[0]!([topicRow({ topicId: 'old-kept', name: 'Ancient', createdAt: 1000 }), ...filler.slice(0, 10)])
+    expect(delivered).toHaveLength(0)
+
+    callbacks[0]!([
+      topicRow({ topicId: 'old-kept', name: 'Ancient', createdAt: 1000 }),
+      topicRow({ topicId: 'brand-new', name: 'Fresh', creatorSessionId: 'sessionA', createdAt: 99_999 }),
+    ])
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.text).toBe('New topic in "product": "Fresh"')
+  })
 })
 
 describe('RemoteTransport read-history methods', () => {
