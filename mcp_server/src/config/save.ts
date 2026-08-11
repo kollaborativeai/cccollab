@@ -11,6 +11,7 @@ import {
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
+import { CLERK_FETCH_TIMEOUT_MS } from '../remote/auth-clerk.js'
 import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
 export interface ClerkLocationAuth {
@@ -65,8 +66,17 @@ export type LocationAuth = ClerkLocationAuth
  *     since the lock only protects same-machine contention anyway.
  *   - We poll on EEXIST with short backoff up to `LOCK_TIMEOUT_MS`. In
  *     the common case (no contention) the loop runs once.
+ *
+ * LOCK_TIMEOUT_MS must EXCEED the longest work held under the lock
+ * (Clerk token refresh, {@link CLERK_FETCH_TIMEOUT_MS}). A 5 s lock with a
+ * 10 s fetch made every healthy-but-slow refresh time out every peer and
+ * told them to delete a live lock — exactly the concurrent double-refresh
+ * this module exists to prevent (cc#33 / KAI-417). Derived in code so the
+ * two constants cannot drift apart again.
  */
-const LOCK_TIMEOUT_MS = 5_000
+/** Headroom after the in-lock Clerk fetch so a peer waits out a full refresh. */
+const LOCK_HEADROOM_MS = 5_000
+export const LOCK_TIMEOUT_MS = CLERK_FETCH_TIMEOUT_MS + LOCK_HEADROOM_MS
 const STALE_LOCK_MS = 30_000
 const LOCK_POLL_MS = 50
 
@@ -81,6 +91,26 @@ const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4))
 
 function syncSleep(ms: number): void {
   Atomics.wait(SLEEP_BUF, 0, 0, ms)
+}
+
+/**
+ * One contention retry: honour the acquire deadline and sleep before the
+ * next `wx` attempt. Bare `continue` in the acquire loop used to skip both
+ * the deadline check and `syncSleep`, so a persistent lock-read failure
+ * (EISDIR, EACCES on a stale path) spun the event loop at 100 % forever
+ * (cc#33 C1). Keep the fail-closed reaper logic; never skip loop liveness.
+ */
+function waitForLockRetry(lock: string, deadline: number, cause?: unknown): void {
+  if (Date.now() >= deadline) {
+    throw new Error(
+      `cccollab: timed out after ${LOCK_TIMEOUT_MS}ms waiting for ${lock}. ` +
+        `Another cccollab process may still be refreshing tokens — wait and retry. ` +
+        `Only delete the lock file if you are certain no cccollab process is running ` +
+        `(deleting a live lock can burn the single-use Clerk refresh token).`,
+      { cause },
+    )
+  }
+  syncSleep(LOCK_POLL_MS)
 }
 
 function lockFilePath(): string {
@@ -141,10 +171,13 @@ function acquireLock(): void {
             holderPid = readFileSync(lock, 'utf-8')
           } catch {
             // The lock vanished between `stat` and this read — a peer
-            // reaped it. Retry the `wx` create immediately rather than
-            // falling through: everything below reasons about a holder we
-            // just failed to identify, and acting on that was the KAI-417
+            // reaped it. Retry the `wx` create rather than falling
+            // through: everything below reasons about a holder we just
+            // failed to identify, and acting on that was the KAI-417
             // reaper bug (the empty `holderPid` was read as "dead").
+            // MUST still sleep + honour the deadline (cc#33): bare
+            // `continue` spun forever when the path is permanently unreadable.
+            waitForLockRetry(lock, deadline, err)
             continue
           }
           if (isPidDead(holderPid)) {
@@ -153,27 +186,17 @@ function acquireLock(): void {
             } catch {
               /* another waiter unlinked it first; fall through to retry */
             }
+            waitForLockRetry(lock, deadline, err)
             continue
           }
         }
       } catch {
-        // Lock vanished between EEXIST and stat: retry immediately.
+        // Lock vanished between EEXIST and stat: retry with sleep + deadline.
+        waitForLockRetry(lock, deadline, err)
         continue
       }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `cccollab: timed out after ${LOCK_TIMEOUT_MS}ms waiting for ${lock}. ` +
-            `If you are sure no other cccollab process is running, delete the lock file and try again.`,
-          { cause: err },
-        )
-      }
-      // Sleep briefly before retrying. `acquireLock` is synchronous, so
-      // we can't await `setTimeout`; `Atomics.wait` is the standard Node
-      // sync-sleep primitive that does not burn CPU. Same-process callers
-      // never reach this loop under contention (they queue on the
-      // in-process gate below), so the only waiters here are genuinely
-      // foreign processes.
-      syncSleep(LOCK_POLL_MS)
+      // Live holder still holding (or age under STALE_LOCK_MS): wait and retry.
+      waitForLockRetry(lock, deadline, err)
     }
   }
 }

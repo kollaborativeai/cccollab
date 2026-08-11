@@ -397,14 +397,21 @@ describe('Dual transport: list_sessions merging', () => {
 // wiring without running the real PKCE flow. The mock is hoisted to
 // the top of the module by vitest; `identity.ts` imports the mocked
 // symbol transparently.
-vi.mock('../src/remote/auth-clerk.js', () => ({
-  runClerkPkce: vi.fn(async () => ({
-    accessToken: 'jwt',
-    refreshToken: 'refresh',
-    idToken: 'id-jwt',
-    accessTokenExpiresAt: Date.now() + 3_600_000,
-  })),
-}))
+// Partial mock: keep real exports (incl. CLERK_FETCH_TIMEOUT_MS, which
+// config/save.ts imports so LOCK_TIMEOUT_MS can derive from it) and stub only
+// the PKCE entry that authenticate tests drive.
+vi.mock('../src/remote/auth-clerk.js', async (importActual) => {
+  const actual = await importActual<typeof import('../src/remote/auth-clerk.js')>()
+  return {
+    ...actual,
+    runClerkPkce: vi.fn(async () => ({
+      accessToken: 'jwt',
+      refreshToken: 'refresh',
+      idToken: 'id-jwt',
+      accessTokenExpiresAt: Date.now() + 3_600_000,
+    })),
+  }
+})
 
 // `saveLocationAuth` writes to ~/.cccollab/config.json on the real disk.
 // Mock it so the authenticate-tool tests don't touch the user's home dir.

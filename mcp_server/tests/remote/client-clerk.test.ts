@@ -218,6 +218,24 @@ describe('makeClerkAuthFetcher', () => {
     expect(token).toBeNull()
   })
 
+  it('logs a token-refresh failure instead of swallowing it silently (cc#33)', async () => {
+    // auth-clerk claims a bounded fetch is "loud"; client.ts used to bare-catch
+    // with no log, so TimeoutError / invalid_grant were invisible.
+    mockRefreshAccessToken.mockRejectedValueOnce(new Error('TimeoutError: fetch aborted'))
+    const writes: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
+      writes.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write)
+
+    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: staleExpiresAt() }))
+    const token = await fetcher({ forceRefreshToken: false })
+
+    expect(token).toBeNull()
+    expect(writes.some((w) => /token refresh failed:.*TimeoutError/i.test(w))).toBe(true)
+    spy.mockRestore()
+  })
+
   it('returns null when the refresh token is an empty string', async () => {
     const fetcher = makeClerkAuthFetcher(baseInit({ refreshToken: '', accessTokenExpiresAt: staleExpiresAt() }))
 

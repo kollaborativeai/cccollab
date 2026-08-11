@@ -172,12 +172,12 @@ describe('saveLocationAuth', () => {
       }),
     ).rejects.toThrow(/timed out/)
     const elapsed = Date.now() - start
-    // Should have taken at least LOCK_TIMEOUT_MS (5s) — confirming the
-    // lock was not reaped. Allow a generous lower bound (4s) for clock
-    // jitter and a higher bound that just sanity-checks we didn't loop
-    // forever.
-    expect(elapsed).toBeGreaterThanOrEqual(4_000)
-    expect(elapsed).toBeLessThan(15_000)
+    // Should have taken at least most of LOCK_TIMEOUT_MS (now derived from
+    // CLERK_FETCH_TIMEOUT_MS + headroom ≈ 15s) — confirming the lock was
+    // not reaped. Lower bound stays well under the floor so clock jitter
+    // does not flake; upper bound just proves we did not spin forever.
+    expect(elapsed).toBeGreaterThanOrEqual(10_000)
+    expect(elapsed).toBeLessThan(25_000)
     // Critical section was never entered, so the config file must not
     // exist (this test runs after `clearUserConfig` in beforeEach).
     expect(existsSync(CCCOLLAB_CONFIG_FILE)).toBe(false)
@@ -188,7 +188,7 @@ describe('saveLocationAuth', () => {
     } catch {
       /* already gone */
     }
-  }, 20_000)
+  }, 30_000)
 
   it('throws rather than overwriting when the prior config cannot be parsed', async () => {
     // A prior config that exists but cannot be parsed must NOT be silently

@@ -140,9 +140,12 @@ export interface TokenExchangeArgs {
  * (blocking every other location's fetcher and `authenticate`'s save) and
  * the on-disk lock (timing out every other cccollab process on the
  * machine). An unbounded fetch therefore converts one hung request into a
- * machine-wide silent stall. Bounding it turns that back into a prompt,
- * loud, recoverable failure: the fetcher returns null, the SDK flips to
- * unauthenticated, and the user re-runs `authenticate`.
+ * machine-wide silent stall.
+ *
+ * Peers waiting on the lock use `LOCK_TIMEOUT_MS` from `config/save.ts`,
+ * which is **derived as this value plus headroom**. This constant must stay
+ * strictly below that lock deadline — a 10 s fetch inside a 5 s lock made
+ * every slow-but-healthy refresh time out every peer (cc#33 timeout inversion).
  */
 export const CLERK_FETCH_TIMEOUT_MS = 10_000
 

@@ -50,18 +50,18 @@ describe('stale-lock reaper acts only on positive proof of death', () => {
     // and fail LOUDLY at the timeout (the error tells the user to delete it).
     await expect(saveLocationAuth('remote', AUTH)).rejects.toThrow(/timed out after \d+ms waiting for/)
     expect(existsSync(LOCK)).toBe(true) // we did not steal it
-  }, 20000)
+  }, 30_000)
 
   it('does NOT reap a lock whose body is unparseable garbage', async () => {
     plantAncientLock('not-a-pid\n')
     await expect(saveLocationAuth('remote', AUTH)).rejects.toThrow(/timed out after \d+ms waiting for/)
     expect(existsSync(LOCK)).toBe(true)
-  }, 20000)
+  }, 30_000)
 
   it('still reaps a stale lock whose holder PID is provably dead', async () => {
     // 2^22 is above Linux's default pid_max (4194304 is the ceiling; this
     // pid is not live in the test env) — process.kill(pid, 0) => ESRCH.
     plantAncientLock('4194303')
     await expect(saveLocationAuth('remote', AUTH)).resolves.toBeUndefined()
-  }, 20000)
+  }, 30_000)
 })
