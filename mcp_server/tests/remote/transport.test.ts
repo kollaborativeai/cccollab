@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
 import { getFunctionName } from 'convex/server'
 
-import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
+import { RemoteTransport, HEARTBEAT_INTERVAL_MS, DEGRADATION_WINDOW_MS } from '../../src/transport/remote.js'
 
 /**
  * Self-disable / per-tool-skip transition tests.
@@ -242,6 +242,67 @@ describe('RemoteTransport graceful degradation', () => {
     onError!(new SchemaDriftError('Could not find function messages:listByTopic on deployment'))
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('a function-not-found on a channel reactive subscription also disables the transport (cc#30 I8)', async () => {
+    // Topic path above is covered; channel listByChannel must trip the same way.
+    let onError: ((err: unknown) => void) | undefined
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 0 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn(
+        (
+          _query: unknown,
+          _args: Record<string, unknown>,
+          _onNext: (rows: unknown) => void,
+          onErr: (err: unknown) => void,
+        ) => {
+          onError = onErr
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(transport.enabled).toBe(true)
+    onError!(new SchemaDriftError('Could not find function messages:listByChannel on deployment'))
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('detects FunctionNotFound by error name alone and by message alone (cc#30 S2)', async () => {
+    // SchemaDriftError sets both; half-deletion of either arm must not go untested.
+    class NameOnly extends Error {
+      constructor() {
+        super('opaque')
+        this.name = 'FunctionNotFoundError'
+      }
+    }
+    class MessageOnly extends Error {
+      constructor() {
+        super('Could not find function channels:listAll on deployment')
+        this.name = 'Error'
+      }
+    }
+    for (const factory of [() => new NameOnly(), () => new MessageOnly()]) {
+      const { client } = makeStubClient(async () => {
+        throw factory()
+      })
+      const transport = new RemoteTransport({ client, log: () => {} })
+      // One-shot FNF must NOT brick the transport (per-op path).
+      await transport.listChannels({})
+      expect(transport.enabled).toBe(true)
+      expect(transport.degradation).toBeNull()
+    }
   })
 })
 
@@ -513,6 +574,56 @@ describe('RemoteTransport write/join skip fails closed (cc#30 C1)', () => {
     const before = mutationMock.mock.calls.length
     await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'c' })
     expect(mutationMock.mock.calls.length).toBe(before + 1)
+  })
+
+  it('failures outside the rolling window do not count toward skip (window expiry, cc#30 I8)', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const { transport, mutationMock } = await introduceReady(async () => {
+        calls += 1
+        throw new Error(`blip ${calls}`)
+      })
+      // Two failures near t=0.
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'a' })
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'b' })
+      // Past the window the early failures must age out.
+      await vi.advanceTimersByTimeAsync(DEGRADATION_WINDOW_MS + 1)
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'c' })
+      expect(transport.skippedOps.map((s) => s.op)).not.toContain('broadcast')
+      // Still only one failure inside the window — a fourth call still reaches backend.
+      const before = mutationMock.mock.calls.length
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'd' })
+      expect(mutationMock.mock.calls.length).toBe(before + 1)
+      expect(transport.skippedOps.map((s) => s.op)).not.toContain('broadcast')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('one failure each on three different ops never skips any of them (multi-op isolation, cc#30 I8)', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [],
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/sessions:introduce') return 'session_1'
+        throw new Error(`fail ${name}`)
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    // 1 failure per op — must not trip any skip (threshold is 3 of the SAME op).
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'x' }).catch(() => {})
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    await transport.sendTopicMessage({ sessionName: 'laptop', topicId: 't1', text: 'y' }).catch(() => {})
+    // broadcast and sendTopicMessage throw only when skipped; join soft-returns.
+    // None should be in skippedOps.
+    expect(transport.skippedOps).toEqual([])
+    expect(transport.enabled).toBe(true)
+    const before = mutationMock.mock.calls.length
+    // A second broadcast still reaches the backend (only 1 prior failure).
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'z' }).catch(() => {})
+    expect(mutationMock.mock.calls.length).toBeGreaterThan(before)
   })
 
   it('joinTopic history-query failure does not permanent-mute future joins (cc#30 I6)', async () => {

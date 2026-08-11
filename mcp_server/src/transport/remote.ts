@@ -192,8 +192,10 @@ function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): Functio
  * genuinely transport-wide signals. Short window so a transient blip
  * recovers fast but doesn't cascade.
  */
-const DEGRADATION_WINDOW_MS = 60_000
-const DEGRADATION_THRESHOLD = 3
+/** Rolling window for per-op failure counts (cc#30 / KAI-333). Exported for tests. */
+export const DEGRADATION_WINDOW_MS = 60_000
+/** Failures of one op within {@link DEGRADATION_WINDOW_MS} before that op is skipped. */
+export const DEGRADATION_THRESHOLD = 3
 
 /**
  * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
