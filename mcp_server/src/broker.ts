@@ -102,6 +102,22 @@ interface SessionInfo {
   objective?: string
   registeredAt: string
   channels: Set<string>
+  /**
+   * How many live `POST /sessions` registrations currently claim this name
+   * (KAI-446 C1). Two processes that `introduce` under the same display name
+   * share one registry row; without a holder count the first `DELETE
+   * /sessions/:name` (ordinary shutdown) wiped memberships and permanently
+   * deafened every other open SSE stream still tagged with that name.
+   * Each register increments; each unregister decrements; the row is only
+   * removed when the count hits zero.
+   */
+  holders: number
+  /**
+   * Per-channel join refcount for the same reason: two processes sharing a
+   * name both call `join_channel`, then either may `leave_channel`. Drop
+   * entitlement only when the last holder leaves the channel.
+   */
+  channelHolds: Map<string, number>
 }
 
 const topics = new Map<string, LocalTopic>()
@@ -115,10 +131,34 @@ function normalizeChannel(raw: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
+/**
+ * Push an untagged diagnostic event to every SSE stream currently tagged
+ * with `sessionName`. Untagged so it still arrives after channel membership
+ * is gone — channel-scoped delivery would miss the very clients that just
+ * lost entitlement (KAI-446 C1 observability half).
+ */
+function notifySession(sessionName: string, event: Record<string, unknown>): void {
+  const payload = `data: ${JSON.stringify(event)}\n\n`
+  for (const client of clients) {
+    if (client.sessionName !== sessionName) continue
+    try {
+      client.res.write(payload)
+    } catch {
+      clients.delete(client)
+    }
+  }
+}
+
 function ensureSession(name: string): SessionInfo {
   let info = sessions.get(name)
   if (!info) {
-    info = { name, registeredAt: new Date().toISOString(), channels: new Set() }
+    info = {
+      name,
+      registeredAt: new Date().toISOString(),
+      channels: new Set(),
+      holders: 0,
+      channelHolds: new Map(),
+    }
     sessions.set(name, info)
   }
   return info
@@ -126,6 +166,8 @@ function ensureSession(name: string): SessionInfo {
 
 function joinChannel(sessionName: string, channel: string): boolean {
   const info = ensureSession(sessionName)
+  const prev = info.channelHolds.get(channel) ?? 0
+  info.channelHolds.set(channel, prev + 1)
   const already = info.channels.has(channel)
   info.channels.add(channel)
   let members = channels.get(channel)
@@ -137,9 +179,22 @@ function joinChannel(sessionName: string, channel: string): boolean {
   return !already
 }
 
+/**
+ * Drop one hold on `channel` for `sessionName`. Entitlement (and topic
+ * residue) is only removed when the hold count reaches zero — so a sibling
+ * process that still holds the channel under the same display name keeps
+ * receiving events (KAI-446 C1).
+ */
 function leaveChannel(sessionName: string, channel: string): boolean {
   const info = sessions.get(sessionName)
   if (!info) return false
+  const prev = info.channelHolds.get(channel) ?? 0
+  if (prev <= 0 && !info.channels.has(channel)) return false
+  if (prev > 1) {
+    info.channelHolds.set(channel, prev - 1)
+    return false
+  }
+  info.channelHolds.delete(channel)
   const removed = info.channels.delete(channel)
   const members = channels.get(channel)
   if (members) {
@@ -149,13 +204,26 @@ function leaveChannel(sessionName: string, channel: string): boolean {
   for (const t of topics.values()) {
     if (t.channel === channel) t.joinedSessions.delete(sessionName)
   }
+  if (removed) {
+    // Untagged: streams tagged with this session must hear the loss even
+    // though they are no longer entitled to the channel's fan-out.
+    notifySession(sessionName, {
+      source: 'local',
+      type: 'channel_unsubscribed',
+      sessionId: sessionName,
+      channel,
+      ts: new Date().toISOString(),
+    })
+  }
   return removed
 }
 
 function removeSessionFromAllChannels(sessionName: string): void {
   const info = sessions.get(sessionName)
   if (!info) return
+  // Force-drop every channel regardless of hold count (full unregister).
   for (const ch of [...info.channels]) {
+    info.channelHolds.set(ch, 1)
     leaveChannel(sessionName, ch)
   }
 }
@@ -671,12 +739,26 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
+        // Each register takes a holder slot. Two processes introducing under
+        // the same display name must both hold the row so one shutdown cannot
+        // wipe the other's channel memberships (KAI-446 C1).
         const existing = sessions.get(body.name)
         const info: SessionInfo = existing
-          ? { ...existing, objective: body.objective ?? existing.objective }
-          : { name: body.name, objective: body.objective, registeredAt: new Date().toISOString(), channels: new Set() }
+          ? {
+              ...existing,
+              objective: body.objective ?? existing.objective,
+              holders: existing.holders + 1,
+            }
+          : {
+              name: body.name,
+              objective: body.objective,
+              registeredAt: new Date().toISOString(),
+              channels: new Set(),
+              holders: 1,
+              channelHolds: new Map(),
+            }
         sessions.set(body.name, info)
-        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
+        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''} (holders=${info.holders})`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -688,8 +770,30 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   const sessionNameMatch = SESSION_NAME_ROUTE.exec(pathname)
   if (sessionNameMatch && method === 'DELETE') {
     const name = decodeURIComponent(sessionNameMatch[1]!)
+    const info = sessions.get(name)
+    if (!info) {
+      jsonResponse(res, 200, { ok: true })
+      return
+    }
+    info.holders = Math.max(0, info.holders - 1)
+    if (info.holders > 0) {
+      // Sibling process still claims this name — keep memberships and streams
+      // alive. The caller already stopped listening; the remaining holders
+      // must not go deaf (KAI-446 C1).
+      log(`SESSION UNREGISTER retained: ${name} (holders=${info.holders})`)
+      jsonResponse(res, 200, { ok: true, retained: true })
+      return
+    }
     removeSessionFromAllChannels(name)
     sessions.delete(name)
+    // Untagged notice so any still-open stream tagged with this name can
+    // re-introduce / re-join instead of sitting silently deaf.
+    notifySession(name, {
+      source: 'local',
+      type: 'session_unregistered',
+      sessionId: name,
+      ts: new Date().toISOString(),
+    })
     log(`SESSION UNREGISTERED: ${name}`)
     jsonResponse(res, 200, { ok: true })
     return

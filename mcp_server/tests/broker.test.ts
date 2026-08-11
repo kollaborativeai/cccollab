@@ -849,7 +849,183 @@ describe('Broker: isolation guards and invariants', () => {
         expect((await leaveChannel(port, outsider, channel)).status).toBe(200)
         expect((await postTopicMessage(port, topicId, victim, 'after leaving')).status).toBe(200)
       })
-      expect(seen.outsider.map((e) => e.text)).toEqual(['while subscribed'])
+      // Message texts only — leave also pushes an untagged `channel_unsubscribed`
+      // diagnostic (KAI-446 C1) which has no `text`.
+      expect(seen.outsider.filter((e) => typeof e.text === 'string').map((e) => e.text)).toEqual(['while subscribed'])
+      expect(seen.outsider.some((e) => e.type === 'channel_unsubscribed' && e.channel === channel)).toBe(true)
+    })
+  })
+
+  /**
+   * KAI-446 C1: two processes that introduce under the same display name share
+   * one broker SessionInfo. Pre-fix, either one's leave_channel or DELETE
+   * /sessions permanently deafened the other's already-open SSE stream. The
+   * holder/join refcounts + eviction events close that path.
+   */
+  describe('KAI-446 C1: shared display-name sessions do not permanently deafen each other', () => {
+    async function deleteSession(name: string): Promise<Response> {
+      return fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    }
+
+    async function openSse(sessionId: string): Promise<{
+      events: Array<Record<string, unknown>>
+      destroy: () => void
+      ready: Promise<void>
+    }> {
+      const events: Array<Record<string, unknown>> = []
+      let resolveReady: () => void = () => {}
+      const ready = new Promise<void>((r) => {
+        resolveReady = r
+      })
+      const req = http.get(
+        {
+          host: '127.0.0.1',
+          port,
+          path: `/events?sessionId=${encodeURIComponent(sessionId)}`,
+          headers: { Accept: 'text/event-stream' },
+        },
+        (res) => {
+          res.setEncoding('utf-8')
+          let buffer = ''
+          // Headers mean the broker has registered the client.
+          resolveReady()
+          res.on('data', (chunk: string) => {
+            buffer += chunk
+            const frames = buffer.split('\n\n')
+            buffer = frames.pop() ?? ''
+            for (const frame of frames) {
+              const line = frame.split('\n').find((l) => l.startsWith('data:'))
+              if (!line) continue
+              try {
+                events.push(JSON.parse(line.slice(5).trim()) as Record<string, unknown>)
+              } catch {
+                /* keepalive */
+              }
+            }
+          })
+        },
+      )
+      req.on('error', () => {})
+      return {
+        events,
+        destroy: () => req.destroy(),
+        ready,
+      }
+    }
+
+    it('one of two same-named holders leaving a channel leaves the other still receiving', async () => {
+      // Two introduce() under "reviewer" → two POST /sessions → two holders.
+      // Both join the channel → two channel holds. One leave must not mute the other.
+      const name = 'c1-shared-leave'
+      const channel = 'c1-leave-ch'
+      await registerSession(port, name)
+      await registerSession(port, name)
+      await joinChannel(port, name, channel)
+      await joinChannel(port, name, channel)
+      const createRes = await createTopic(port, name, 'c1-leave-topic', channel)
+      expect(createRes.status).toBe(200)
+      const { id: topicId } = (await createRes.json()) as { id: string }
+
+      const a = await openSse(name)
+      const b = await openSse(name)
+      await a.ready
+      await b.ready
+      try {
+        expect((await postTopicMessage(port, topicId, name, 'BEFORE-LEAVE')).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 300))
+        expect(a.events.some((e) => e.text === 'BEFORE-LEAVE')).toBe(true)
+        expect(b.events.some((e) => e.text === 'BEFORE-LEAVE')).toBe(true)
+
+        // One holder leaves (the ordinary leave_channel path).
+        expect((await leaveChannel(port, name, channel)).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 200))
+
+        expect((await postTopicMessage(port, topicId, name, 'AFTER-LEAVE')).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 300))
+        // Both streams must still get the post-leave message — membership held.
+        expect(a.events.some((e) => e.text === 'AFTER-LEAVE')).toBe(true)
+        expect(b.events.some((e) => e.text === 'AFTER-LEAVE')).toBe(true)
+        // No channel_unsubscribed yet — a holder remains.
+        expect(a.events.some((e) => e.type === 'channel_unsubscribed')).toBe(false)
+        expect(b.events.some((e) => e.type === 'channel_unsubscribed')).toBe(false)
+
+        // Second leave drops the last hold — now both go deaf, and both are told.
+        expect((await leaveChannel(port, name, channel)).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 200))
+        expect((await postTopicMessage(port, topicId, name, 'AFTER-LAST-LEAVE')).status).toBe(403)
+        expect(a.events.some((e) => e.type === 'channel_unsubscribed' && e.channel === channel)).toBe(true)
+        expect(b.events.some((e) => e.type === 'channel_unsubscribed' && e.channel === channel)).toBe(true)
+        expect(a.events.some((e) => e.text === 'AFTER-LAST-LEAVE')).toBe(false)
+        expect(b.events.some((e) => e.text === 'AFTER-LAST-LEAVE')).toBe(false)
+      } finally {
+        a.destroy()
+        b.destroy()
+      }
+    })
+
+    it('DELETE /sessions for one same-named holder retains memberships for the sibling', async () => {
+      // Ordinary shutdown: server.ts DELETEs /sessions/:name while the sibling
+      // still holds the name. Pre-fix this wiped channels and deafened the peer.
+      const name = 'c1-shared-delete'
+      const channel = 'c1-delete-ch'
+      await registerSession(port, name)
+      await registerSession(port, name)
+      await joinChannel(port, name, channel)
+      await joinChannel(port, name, channel)
+      const createRes = await createTopic(port, name, 'c1-delete-topic', channel)
+      expect(createRes.status).toBe(200)
+      const { id: topicId } = (await createRes.json()) as { id: string }
+
+      const survivor = await openSse(name)
+      await survivor.ready
+      try {
+        expect((await postTopicMessage(port, topicId, name, 'BEFORE-DELETE')).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 300))
+        expect(survivor.events.some((e) => e.text === 'BEFORE-DELETE')).toBe(true)
+
+        const del = await deleteSession(name)
+        expect(del.status).toBe(200)
+        const delBody = (await del.json()) as { ok: boolean; retained?: boolean }
+        expect(delBody.retained).toBe(true)
+
+        expect((await postTopicMessage(port, topicId, name, 'AFTER-DELETE')).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 300))
+        expect(survivor.events.some((e) => e.text === 'AFTER-DELETE')).toBe(true)
+
+        // Final unregister actually drops.
+        const del2 = await deleteSession(name)
+        expect(del2.status).toBe(200)
+        const del2Body = (await del2.json()) as { ok: boolean; retained?: boolean }
+        expect(del2Body.retained).toBeUndefined()
+        await new Promise<void>((r) => setTimeout(r, 200))
+        expect(survivor.events.some((e) => e.type === 'session_unregistered')).toBe(true)
+        expect((await postTopicMessage(port, topicId, name, 'AFTER-FINAL')).status).toBe(403)
+        expect(survivor.events.some((e) => e.text === 'AFTER-FINAL')).toBe(false)
+      } finally {
+        survivor.destroy()
+      }
+    })
+
+    it('a single holder leave still stops delivery and emits channel_unsubscribed', async () => {
+      const name = 'c1-solo-leave'
+      const channel = 'c1-solo-ch'
+      await registerSession(port, name)
+      await joinChannel(port, name, channel)
+      const createRes = await createTopic(port, name, 'c1-solo-topic', channel)
+      const { id: topicId } = (await createRes.json()) as { id: string }
+      const stream = await openSse(name)
+      await stream.ready
+      try {
+        expect((await postTopicMessage(port, topicId, name, 'SOLO-BEFORE')).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 300))
+        expect((await leaveChannel(port, name, channel)).status).toBe(200)
+        await new Promise<void>((r) => setTimeout(r, 200))
+        expect(stream.events.some((e) => e.type === 'channel_unsubscribed' && e.channel === channel)).toBe(true)
+        expect((await postTopicMessage(port, topicId, name, 'SOLO-AFTER')).status).toBe(403)
+        expect(stream.events.some((e) => e.text === 'SOLO-AFTER')).toBe(false)
+      } finally {
+        stream.destroy()
+      }
     })
   })
 
