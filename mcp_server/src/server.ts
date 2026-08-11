@@ -108,6 +108,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     // to this session reach it. Read lazily: the stream opens before
     // `introduce` mints the id.
     sessionId: () => localTransport.sessionId,
+    sessionToken: () => localTransport.holdToken,
   })
 
   // Topic-message subscriptions are keyed by `${location}::${topicId}`

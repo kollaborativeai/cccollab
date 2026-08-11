@@ -24,6 +24,8 @@ describe('BrokerEventListener (channel-aware)', () => {
       messageBus: mockBus as never,
       sessionManager: session,
       context,
+      // DM gate requires addressed toId === this registration (cc#43 C4/I3).
+      sessionId: () => 'id-us',
     })
   })
 

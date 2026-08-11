@@ -70,12 +70,16 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
     sessionManager: session,
     context,
     sessionId: () => transport.sessionId,
+    // Hold-token tags DM delivery (cc#43 C1); free sessionId no longer tags.
+    sessionToken: () => transport.holdToken,
   })
   await listener.start()
 
   const router = new TransportRouter([transport])
   const deps: HarnessDeps = { session, context, router, eventListener: listener }
   await handleIdentityTool('introduce', { name: displayName }, deps)
+  // Re-tag SSE now that introduce minted the hold-token.
+  listener.reconnectForIdentity()
 
   return {
     name: displayName,

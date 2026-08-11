@@ -116,7 +116,10 @@ describe('Identity Tools', () => {
     it('introduce sets display name on session', async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+        .mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
       vi.stubGlobal('fetch', mockFetch)
       await handleIdentityTool('introduce', { name: 'architect' }, deps)
       expect(deps.session.displayName).toBe('architect')
@@ -125,7 +128,10 @@ describe('Identity Tools', () => {
     it('introduce returns JSON with name', async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+        .mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
       expect(result).toEqual({ name: 'architect' })
@@ -134,7 +140,10 @@ describe('Identity Tools', () => {
     it('introduce includes objective in JSON when provided', async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+        .mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(
         await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps),
@@ -145,7 +154,10 @@ describe('Identity Tools', () => {
     it('introduce re-registers already-subscribed channels with broker', async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+        .mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback', 'local')
       await handleIdentityTool('introduce', { name: 'architect' }, deps)
@@ -165,7 +177,10 @@ describe('Identity Tools', () => {
       it('reports active channel with location and subscriptions with source+location', async () => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         deps.context.joinChannel('project_x', 'manual', 'local')
@@ -184,7 +199,10 @@ describe('Identity Tools', () => {
       it('omits activeTopic when none set', async () => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
@@ -195,7 +213,10 @@ describe('Identity Tools', () => {
       it('reports active topic with channel and location', async () => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         deps.context.joinTopic('uuid-1', 'Auth refactor', 'default', 'local')
@@ -212,7 +233,10 @@ describe('Identity Tools', () => {
       it('includes the locations map with the local transport enabled by default', async () => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
@@ -227,7 +251,10 @@ describe('Identity Tools', () => {
         // missing without the plugin having bricked.
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
         const diagnostics = new AttachDiagnostics()
         diagnostics.recordFailure('personal', 'introduce() failed for "personal": Server Error')
@@ -248,7 +275,10 @@ describe('Identity Tools', () => {
       beforeEach(() => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
       })
 
@@ -280,7 +310,10 @@ describe('Identity Tools', () => {
       beforeEach(() => {
         const mockFetch = vi
           .fn()
-          .mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, id: 'test-registration-id' }) })
+          .mockResolvedValue({
+            ok: true,
+            json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+          })
         vi.stubGlobal('fetch', mockFetch)
       })
 

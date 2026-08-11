@@ -20,27 +20,47 @@ async function waitUntil<T>(fn: () => Promise<T | null> | T | null, timeoutMs = 
   throw new Error('waitUntil timeout')
 }
 
-/** Display name -> most recent registration id, so the helpers below can keep
- *  their readable name-based signatures while the wire talks ids. */
-const idByName = new Map<string, string>()
+/** Display name -> registration id + hold-token. */
+const regByName = new Map<string, { id: string; token: string }>()
+const tokenById = new Map<string, string>()
 
 function idOf(name: string): string {
-  const id = idByName.get(name)
-  if (!id) throw new Error(`register "${name}" before using it`)
-  return id
+  const r = regByName.get(name)
+  if (!r) throw new Error(`register "${name}" before using it`)
+  return r.id
+}
+
+function tokenOf(name: string): string {
+  const r = regByName.get(name)
+  if (!r) throw new Error(`register "${name}" before using it`)
+  return r.token
+}
+
+function tokenForId(id: string): string {
+  const t = tokenById.get(id)
+  if (!t) throw new Error(`no token for id ${id}`)
+  return t
 }
 
 /** `id` re-registers an existing registration in place (what `introduce`
- *  does mid-session); omitting it is a brand-new registration. */
+ *  does mid-session); omitting it is a brand-new registration. Re-register
+ *  requires the hold-token (cc#43). Token is looked up by id so a mid-session
+ *  rename (new display name, same id) still authenticates. */
 async function registerSession(port: number, name: string, id?: string): Promise<string> {
+  const token = id ? tokenForId(id) : undefined
   const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, ...(id ? { id } : {}) }),
+    body: JSON.stringify({
+      name,
+      ...(id ? { id, token } : {}),
+    }),
   })
   expect(res.status).toBe(200)
-  const body = (await res.json()) as { ok: boolean; id: string }
-  idByName.set(name, body.id)
+  const body = (await res.json()) as { ok: boolean; id: string; token: string }
+  expect(body.token).toBeTruthy()
+  regByName.set(name, { id: body.id, token: body.token })
+  tokenById.set(body.id, body.token)
   return body.id
 }
 
@@ -52,7 +72,10 @@ async function listSessions(port: number): Promise<Array<{ id: string; name: str
 async function sendDm(port: number, toId: string, from: string, text: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(toId)}/dm`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${tokenOf(from)}`,
+    },
     body: JSON.stringify({ fromId: idOf(from), text }),
   })
 }
@@ -68,7 +91,10 @@ async function readDmPage(
   asName: string,
   opts: { limit?: number; before?: number } = {},
 ): Promise<DmPage> {
-  const params = new URLSearchParams({ asId: idOf(asName) })
+  const params = new URLSearchParams({
+    asId: idOf(asName),
+    token: tokenOf(asName),
+  })
   if (opts.limit !== undefined) params.set('limit', String(opts.limit))
   if (opts.before !== undefined) params.set('before', String(opts.before))
   const res = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(withId)}/dm?${params.toString()}`)
@@ -83,16 +109,17 @@ async function readDm(
   return (await readDmPage(port, withId, asName)).messages
 }
 
-/** Opens an SSE stream (tagged with a sessionId, or untagged) and keeps it
+/** Opens an SSE stream (tagged with hold-token, or untagged) and keeps it
  *  open, collecting every event into `events`. Returns a `close()` to tear
  *  it down. Used to assert a connection does NOT receive a message over a
  *  window. */
 function openStream(
   port: number,
-  sessionId: string | undefined,
+  /** Hold-token tags DM delivery; free sessionId alone no longer tags (C1). */
+  holdToken: string | undefined,
 ): { events: Array<Record<string, unknown>>; close: () => void } {
   const events: Array<Record<string, unknown>> = []
-  const path = sessionId ? `/events?sessionId=${encodeURIComponent(sessionId)}` : '/events'
+  const path = holdToken ? `/events?token=${encodeURIComponent(holdToken)}` : '/events'
   const req = http.get(
     {
       host: '127.0.0.1',
@@ -125,8 +152,50 @@ function openStream(
   return { events, close: () => req.destroy() }
 }
 
+/** Old attack surface: free `?sessionId=` with no hold-token. Must never
+ *  land on the DM delivery lane (cc#43 C1). */
+function openFreeSessionIdStream(
+  port: number,
+  sessionId: string,
+): { events: Array<Record<string, unknown>>; close: () => void } {
+  const events: Array<Record<string, unknown>> = []
+  const req = http.get(
+    {
+      host: '127.0.0.1',
+      port,
+      path: `/events?sessionId=${encodeURIComponent(sessionId)}`,
+      headers: { Accept: 'text/event-stream' },
+    },
+    (res) => {
+      res.setEncoding('utf-8')
+      let buffer = ''
+      res.on('data', (chunk: string) => {
+        buffer += chunk
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const line = frame.split('\n').find((l) => l.startsWith('data:'))
+          if (!line) continue
+          try {
+            events.push(JSON.parse(line.slice(5).trim()) as Record<string, unknown>)
+          } catch {
+            /* keepalive */
+          }
+        }
+      })
+    },
+  )
+  req.on('error', () => {
+    /* torn down */
+  })
+  return { events, close: () => req.destroy() }
+}
+
 async function deleteSession(port: number, name: string): Promise<void> {
-  await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(idOf(name))}`, { method: 'DELETE' })
+  await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(idOf(name))}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${tokenOf(name)}` },
+  })
 }
 
 /** Opens the broker's SSE stream tagged to a sessionId, resolving once a
@@ -134,7 +203,7 @@ async function deleteSession(port: number, name: string): Promise<void> {
  *  broker.test.ts / local.test.ts. */
 function nextEventFor(
   port: number,
-  sessionId: string,
+  holdToken: string,
   predicate: (evt: Record<string, unknown>) => boolean,
   onConnected: () => Promise<void>,
   timeoutMs = 4000,
@@ -153,7 +222,7 @@ function nextEventFor(
       {
         host: '127.0.0.1',
         port,
-        path: `/events?sessionId=${encodeURIComponent(sessionId)}`,
+        path: `/events?token=${encodeURIComponent(holdToken)}`,
         headers: { Accept: 'text/event-stream' },
       },
       (res) => {
@@ -263,8 +332,8 @@ describe('Broker: direct messages (send_message_to_session)', () => {
 
     const sender = 'dm-twin-sender'
     await registerSession(port, sender)
-    const streamA = openStream(port, twinA)
-    const streamB = openStream(port, twinB)
+    const streamA = openStream(port, tokenForId(twinA))
+    const streamB = openStream(port, tokenForId(twinB))
     await new Promise<void>((r) => setTimeout(r, 100))
 
     const res = await sendDm(port, twinA, sender, 'for twin A only')
@@ -285,7 +354,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
   it('refuses a DM addressed to a registered peer display name, with no name fallback', async () => {
     await registerSession(port, 'dm-byname-recipient')
     await registerSession(port, 'dm-byname-sender')
-    const stream = openStream(port, 'dm-byname-recipient')
+    const stream = openStream(port, tokenOf('dm-byname-recipient'))
     await new Promise<void>((r) => setTimeout(r, 100))
 
     const res = await sendDm(port, 'dm-byname-recipient', 'dm-byname-sender', 'by name?')
@@ -299,14 +368,16 @@ describe('Broker: direct messages (send_message_to_session)', () => {
   })
 
   /**
-   * The delivery lane is keyed by registration id, so a connection can only
-   * receive a session's DMs by knowing that session's id. Tagging a stream
-   * with a display name - which any process can guess - reaches nothing.
+   * The delivery lane is keyed by hold-token, so a connection can only
+   * receive a session's DMs by possessing that session's token. Tagging a
+   * stream with a free sessionId / display name - which any process can
+   * list or guess - reaches nothing (cc#43 C1).
    */
   it('never delivers to a stream tagged with the recipient display name instead of its id', async () => {
     const victimId = await registerSession(port, 'dm-impostor-victim')
     await registerSession(port, 'dm-impostor-sender')
-    const impostor = openStream(port, 'dm-impostor-victim')
+    // Free sessionId=display-name (old attack surface); hold-token absent.
+    const impostor = openFreeSessionIdStream(port, 'dm-impostor-victim')
     await new Promise<void>((r) => setTimeout(r, 100))
 
     const res = await sendDm(port, victimId, 'dm-impostor-sender', 'victim eyes only')
@@ -335,7 +406,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
       return row!.lastSeen!
     }
 
-    const stream = openStream(port, id)
+    const stream = openStream(port, tokenForId(id))
     await new Promise<void>((r) => setTimeout(r, 100))
     const attachedFirst = await lastSeenOf()
     await new Promise<void>((r) => setTimeout(r, 30))
@@ -387,7 +458,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
 
     const evtPromise = nextEventFor(
       port,
-      recipientId,
+      tokenForId(recipientId),
       (evt) => evt.type === 'dm' && evt.fromName === senderName,
       async () => {
         const res = await sendDm(port, recipientId, senderName, 'hi there')
@@ -457,7 +528,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     const name = 'dm-reuse-name'
     const idFirst = await registerSession(port, name)
     // The first registration holds an open, tagged SSE connection.
-    const stale = openStream(port, idFirst)
+    const stale = openStream(port, tokenForId(idFirst))
     // Give the connection a moment to attach at the broker.
     await new Promise<void>((r) => setTimeout(r, 100))
 
@@ -491,7 +562,7 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     // Also open the recipient's tagged stream so the DM has somewhere
     // legitimate to land - otherwise `delivered:false` would trivially
     // starve the leak channel.
-    const recipientTagged = openStream(port, recipientId)
+    const recipientTagged = openStream(port, tokenForId(recipientId))
     await new Promise<void>((r) => setTimeout(r, 100))
 
     const res = await sendDm(port, recipientId, senderName, 'private for recipient only')
@@ -504,5 +575,84 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     expect(untagged.events.some((e) => e.type === 'dm')).toBe(false)
     untagged.close()
     recipientTagged.close()
+  })
+
+  // ─── cc#43 possession: hold-token is required (C1–C4) ─────────────────
+
+  it('C1: free sessionId SSE tag receives no DMs without the hold-token', async () => {
+    const victimId = await registerSession(port, 'c1-victim')
+    await registerSession(port, 'c1-sender')
+    // Impostor tags with public id only (old attack surface).
+    const freeIdPath = openFreeSessionIdStream(port, victimId)
+    await new Promise<void>((r) => setTimeout(r, 80))
+    const res = await sendDm(port, victimId, 'c1-sender', 'secret-for-victim')
+    // delivered false: no legitimate tagged connection
+    const body = (await res.json()) as { delivered: boolean }
+    expect(body.delivered).toBe(false)
+    await new Promise<void>((r) => setTimeout(r, 150))
+    expect(freeIdPath.events.some((e) => e.type === 'dm')).toBe(false)
+    freeIdPath.close()
+  })
+
+  it('C2: forged fromId without hold-token is rejected', async () => {
+    const aliceId = await registerSession(port, 'c2-alice')
+    const bobId = await registerSession(port, 'c2-bob')
+    const res = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(bobId)}/dm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromId: aliceId, text: 'forged-as-alice' }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('C3: spoofed asId without hold-token cannot read a pair thread', async () => {
+    const bobId = await registerSession(port, 'c3-bob')
+    await registerSession(port, 'c3-alice')
+    // Real exchange
+    expect((await sendDm(port, bobId, 'c3-alice', 'private-thread')).status).toBe(200)
+    // Mallory lists ids and tries to read as alice (no token)
+    const aliceId = idOf('c3-alice')
+    const res = await fetch(
+      `http://127.0.0.1:${port}/sessions/${encodeURIComponent(bobId)}/dm?asId=${encodeURIComponent(aliceId)}`,
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('C4: POST /local-event rejects type dm', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/local-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'dm',
+        fromName: 'orchestrator',
+        text: 'broadcast-fake-dm',
+      }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/dm/i)
+  })
+
+  it('I1: POST /sessions with a known id but no token cannot hijack the name', async () => {
+    const aliceId = await registerSession(port, 'i1-alice')
+    const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: aliceId, name: 'trusted-orchestrator' }),
+    })
+    expect(res.status).toBe(401)
+    const listed = await listSessions(port)
+    const row = listed.find((s) => s.id === aliceId)
+    expect(row?.name).toBe('i1-alice')
+  })
+
+  it('I2: DELETE /sessions/:id without token is rejected', async () => {
+    const bobId = await registerSession(port, 'i2-bob')
+    const res = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(bobId)}`, {
+      method: 'DELETE',
+    })
+    expect(res.status).toBe(401)
+    const listed = await listSessions(port)
+    expect(listed.some((s) => s.id === bobId)).toBe(true)
   })
 })

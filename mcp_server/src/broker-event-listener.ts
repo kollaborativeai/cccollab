@@ -22,6 +22,8 @@ interface BrokerEventListenerOptions {
    *  mints the id (KAI-514). Optional: a listener without one stays
    *  untagged and simply receives no DMs. */
   sessionId?: () => string | undefined
+  /** Hold-token for DM-tagged SSE (cc#43 C1). */
+  sessionToken?: () => string | undefined
 }
 
 export interface BrokerLocalEvent {
@@ -54,6 +56,7 @@ export class BrokerEventListener {
   private readonly session: SessionManager
   private readonly context: ActiveContext
   private readonly getSessionId: () => string | undefined
+  private readonly getSessionToken: () => string | undefined
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
 
@@ -63,6 +66,7 @@ export class BrokerEventListener {
     this.session = options.sessionManager
     this.context = options.context
     this.getSessionId = options.sessionId ?? (() => undefined)
+    this.getSessionToken = options.sessionToken ?? (() => undefined)
   }
 
   async start(): Promise<void> {
@@ -89,19 +93,21 @@ export class BrokerEventListener {
    */
   reconnectForIdentity(): void {
     if (this.stopped) return
-    const id = this.getSessionId()
-    if (!id || this.taggedSessionId === id) return
+    const token = this.getSessionToken()
+    // Tag identity is the hold-token now; re-open when it appears after introduce.
+    if (!token || this.taggedToken === token) return
     if (this.currentRequest) this.currentRequest.destroy()
     this.connect()
   }
 
-  private taggedSessionId: string | undefined
+  private taggedToken: string | undefined
 
   private connect(): void {
     if (this.stopped) return
 
-    this.taggedSessionId = this.getSessionId()
-    const qs = this.taggedSessionId ? `?sessionId=${encodeURIComponent(this.taggedSessionId)}` : ''
+    // cc#43 C1: tag SSE with hold-token, not free sessionId.
+    this.taggedToken = this.getSessionToken()
+    const qs = this.taggedToken ? `?token=${encodeURIComponent(this.taggedToken)}` : ''
     const url = `${this.brokerUrl}/events${qs}`
     this.log(`Connecting to broker at ${url}`)
 
@@ -293,12 +299,16 @@ export class BrokerEventListener {
         return
       }
       case 'dm': {
-        // No channel/topic gate: the broker only sends `dm` events down
-        // the SSE connection(s) tagged with the addressed session's own
-        // registration id (KAI-514), so every listener that sees one is
-        // the intended recipient. The self-check is defense in depth only.
-        if (event.fromName && this.session.isExactSelf(event.fromName)) {
-          this.log(`DROPPED: self dm from ${event.fromName}`)
+        // cc#43 C4: require this session is the addressed recipient. /local-event
+        // used to broadcast type:dm to every SSE client; this gate + broker ban
+        // close that path. Prefer registration id over display name (I3).
+        const selfId = this.getSessionId()
+        if (!selfId || event.toId !== selfId) {
+          this.log(`DROPPED dm: not addressed to this session (toId=${event.toId})`)
+          return
+        }
+        if (event.fromId && event.fromId === selfId) {
+          this.log(`DROPPED: self dm fromId=${event.fromId}`)
           return
         }
         const msg: ParsedMessage = {

@@ -92,6 +92,14 @@ interface SessionInfo {
    *  crashed and relaunched can never inherit the id an orchestrator is
    *  still holding for the dead one. Never derived from `name`. */
   id: string
+  /**
+   * Hold-token (capability). Minted once at registration, returned only then,
+   * never listed on GET /sessions. Required to tag SSE for DM delivery, to
+   * send/read as this registration, to re-register, and to delete it.
+   * The public registration id alone is an address, not possession proof
+   * (cc#43 C1–C3 / I1–I2).
+   */
+  token: string
   objective?: string
   registeredAt: string
   /** Last time this registration was known attached (SSE connect, or the
@@ -114,10 +122,12 @@ const topics = new Map<string, LocalTopic>()
  *  `LocalTopic.joinedSessions` hold ids too, so two sessions sharing a
  *  display name are independent everywhere. */
 const sessions = new Map<string, SessionInfo>()
+/** Reverse index: hold-token → registration id. Never enumerated publicly. */
+const sessionsByToken = new Map<string, string>()
 const channels = new Map<string, Set<string>>()
 
 /** SSE connections tagged with the registration id that opened them (via
- *  `/events?sessionId=`), used to route DMs and to answer "is this session
+ *  hold-token on `/events`), used to route DMs and to answer "is this session
  *  currently attached" for delivery honesty. Distinct from the untargeted
  *  `clients` set that channel/topic broadcasts fan out to. */
 const sseBySession = new Map<string, Set<SSEResponse>>()
@@ -130,6 +140,39 @@ const dmThreads = new Map<string, DmMessage[]>()
 
 function dmPairKey(idA: string, idB: string): string {
   return [idA, idB].sort().join('|')
+}
+
+function mintHoldToken(): string {
+  return crypto.randomBytes(32).toString('base64url')
+}
+
+/** Extract hold-token from Authorization: Bearer, ?token=, or JSON body.token. */
+function extractHoldToken(
+  req: IncomingMessage,
+  searchParams: URLSearchParams,
+  bodyToken?: unknown,
+): string | undefined {
+  const auth = req.headers.authorization
+  if (typeof auth === 'string') {
+    const m = /^Bearer\s+(\S+)/i.exec(auth)
+    if (m?.[1]) return m[1]
+  }
+  const q = searchParams.get('token')
+  if (q) return q
+  if (typeof bodyToken === 'string' && bodyToken.length > 0) return bodyToken
+  return undefined
+}
+
+function sessionFromHoldToken(token: string | undefined): SessionInfo | undefined {
+  if (!token) return undefined
+  const id = sessionsByToken.get(token)
+  if (!id) return undefined
+  return sessions.get(id)
+}
+
+function forgetSessionToken(info: SessionInfo | undefined): void {
+  if (!info) return
+  sessionsByToken.delete(info.token)
 }
 
 /** Is this registration currently holding at least one SSE connection? */
@@ -237,11 +280,13 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     const sseRes = res as SSEResponse
     clients.add(sseRes)
-    // Optional registration tag: routes DMs to this session and lets
-    // delivery know it is currently attached (KAI-514). It must be the
-    // registration id from `POST /sessions` - a tag that matches no
-    // registration receives nothing beyond the usual broadcasts.
-    const sessionId = searchParams.get('sessionId') ?? undefined
+    // DM delivery tag requires the hold-token (cc#43 C1). A free sessionId is
+    // an address, not possession — accepting it let any local process open
+    // /events?sessionId=<victim> and receive private DMs with delivered:true.
+    // Resolve token server-side; never trust client-supplied sessionId alone.
+    const hold = extractHoldToken(req, searchParams)
+    const authed = sessionFromHoldToken(hold)
+    const sessionId = authed?.id
     if (sessionId) {
       let conns = sseBySession.get(sessionId)
       if (!conns) {
@@ -249,8 +294,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         sseBySession.set(sessionId, conns)
       }
       conns.add(sseRes)
-      const info = sessions.get(sessionId)
-      if (info) info.lastSeenAt = new Date().toISOString()
+      authed!.lastSeenAt = new Date().toISOString()
     }
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
@@ -283,6 +327,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         const event = JSON.parse(await readBody(req)) as Record<string, unknown>
         if (!event.type) {
           jsonResponse(res, 400, { error: 'type is required' })
+          return
+        }
+        // cc#43 C4: private types must never fan out on the untagged broadcast
+        // lane. Real DMs use sendToSessionConnections only.
+        if (event.type === 'dm') {
+          jsonResponse(res, 400, {
+            error: 'type "dm" is not allowed on /local-event; use POST /sessions/:id/dm',
+          })
           return
         }
         const payload = { source: 'local', ...event }
@@ -696,37 +748,49 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (pathname === '/sessions' && method === 'POST') {
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { name?: string; objective?: string; id?: string }
+        const body = JSON.parse(await readBody(req)) as {
+          name?: string
+          objective?: string
+          id?: string
+          token?: string
+        }
         if (!body.name) {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
-        // Echoing a live registration id updates that registration in place:
-        // that is a session calling `introduce` again to rename or restate
-        // its objective, and it must not spawn a second row. Anything else -
-        // including a relaunch after a crash, which has no id to echo - is a
-        // NEW registration with a NEW id, even under the same display name
-        // (KAI-514 AC2). Never key this on the name.
+        // Echoing a live registration id updates that registration in place —
+        // but only with the hold-token (cc#43 I1). Without the token, anyone
+        // who listed the public id could rename/hijack it.
         const existing = body.id ? sessions.get(body.id) : undefined
         if (existing) {
+          if (!body.token || body.token !== existing.token) {
+            jsonResponse(res, 401, {
+              error: 'Hold-token required to update an existing registration.',
+            })
+            return
+          }
           existing.name = body.name
           if (body.objective !== undefined) existing.objective = body.objective
           log(`SESSION RE-REGISTERED: ${body.name} (${existing.id})`)
-          jsonResponse(res, 200, { ok: true, id: existing.id })
+          jsonResponse(res, 200, { ok: true, id: existing.id, token: existing.token })
           return
         }
         const now = new Date().toISOString()
+        const token = mintHoldToken()
         const info: SessionInfo = {
           name: body.name,
           id: crypto.randomUUID(),
+          token,
           objective: body.objective,
           registeredAt: now,
           lastSeenAt: now,
           channels: new Set(),
         }
         sessions.set(info.id, info)
+        sessionsByToken.set(token, info.id)
         log(`SESSION REGISTERED: ${body.name} (${info.id})${body.objective ? ` (${body.objective})` : ''}`)
-        jsonResponse(res, 200, { ok: true, id: info.id })
+        // Return token ONCE. Never include it in GET /sessions.
+        jsonResponse(res, 200, { ok: true, id: info.id, token })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
       }
@@ -739,14 +803,23 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const toId = decodeURIComponent(sessionDmMatch[1]!)
     void (async () => {
       try {
-        const body = JSON.parse(await readBody(req)) as { fromId?: string; text?: string }
-        if (!body.fromId || !body.text) {
-          jsonResponse(res, 400, { error: 'fromId and text are required' })
+        const body = JSON.parse(await readBody(req)) as {
+          fromId?: string
+          text?: string
+          token?: string
+        }
+        if (!body.text) {
+          jsonResponse(res, 400, { error: 'text is required' })
           return
         }
-        const sender = sessions.get(body.fromId)
+        // cc#43 C2: sender is the hold-token holder, not free body.fromId.
+        const sender = sessionFromHoldToken(extractHoldToken(req, searchParams, body.token))
         if (!sender) {
-          jsonResponse(res, 400, { error: `Unknown sender session id "${body.fromId}".` })
+          jsonResponse(res, 401, { error: 'Hold-token required to send a direct message.' })
+          return
+        }
+        if (body.fromId !== undefined && body.fromId !== sender.id) {
+          jsonResponse(res, 403, { error: 'fromId does not match the authenticated registration.' })
           return
         }
         // AC1: an unknown/stale id is a normal outcome, never a name
@@ -790,14 +863,15 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (sessionDmMatch && method === 'GET') {
     const withId = decodeURIComponent(sessionDmMatch[1]!)
-    const asId = searchParams.get('asId')
-    if (!asId) {
-      jsonResponse(res, 400, { error: 'asId query parameter is required' })
+    // cc#43 C3: reader is the hold-token holder, not free asId.
+    const self = sessionFromHoldToken(extractHoldToken(req, searchParams))
+    if (!self) {
+      jsonResponse(res, 401, { error: 'Hold-token required to read a direct-message thread.' })
       return
     }
-    const self = sessions.get(asId)
-    if (!self) {
-      jsonResponse(res, 400, { error: `Unknown session id "${asId}".` })
+    const asId = searchParams.get('asId')
+    if (asId !== null && asId !== self.id) {
+      jsonResponse(res, 403, { error: 'asId does not match the authenticated registration.' })
       return
     }
     // Paged the same way as topic history (newest page first, `before`
@@ -823,7 +897,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   if (sessionIdMatch && method === 'DELETE') {
     const id = decodeURIComponent(sessionIdMatch[1]!)
     const info = sessions.get(id)
+    // cc#43 I2: unauthenticated DELETE was a DoS on any listed id.
+    const authed = sessionFromHoldToken(extractHoldToken(req, searchParams))
+    if (!authed || authed.id !== id) {
+      jsonResponse(res, 401, { error: 'Hold-token required to delete this registration.' })
+      return
+    }
     removeSessionFromAllChannels(id)
+    forgetSessionToken(info)
     sessions.delete(id)
     // Drop the delivery tag too, so a still-closing connection from this
     // registration can't receive anything after deregistration. Channel/

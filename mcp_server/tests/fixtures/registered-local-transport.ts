@@ -17,7 +17,10 @@ export async function registeredLocalTransport(
 ): Promise<LocalTransport> {
   const transport = new LocalTransport(port)
   const realFetch = globalThis.fetch
-  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ok: true, id }) })) as unknown as typeof fetch
+  globalThis.fetch = (async () => ({
+    ok: true,
+    json: async () => ({ ok: true, id, token: 'test-hold-token' }),
+  })) as unknown as typeof fetch
   try {
     await transport.introduce({ sessionName })
   } finally {

@@ -35,6 +35,7 @@ export class LocalTransport implements Transport {
    * registration. Undefined until `introduce` has run.
    */
   private registrationId: string | undefined
+  private registrationToken: string | undefined
 
   constructor(private readonly brokerPort: number) {}
 
@@ -42,6 +43,10 @@ export class LocalTransport implements Transport {
    *  with it so DMs can reach this session. */
   get sessionId(): string | undefined {
     return this.registrationId
+  }
+
+  get holdToken(): string | undefined {
+    return this.registrationToken
   }
 
   /** Session-scoped calls are gated behind `introduce` at the tool layer, so
@@ -65,10 +70,11 @@ export class LocalTransport implements Transport {
     // Echoing our own id (when we have one) makes a repeat introduce a rename
     // of THIS registration rather than a second one; the first call has none,
     // so the broker mints a fresh id for this process (KAI-514 AC2).
-    const body = await this.brokerPost<{ ok: boolean; id: string }>('/sessions', {
+    const body = await this.brokerPost<{ ok: boolean; id: string; token?: string }>('/sessions', {
       name: args.sessionName,
       objective: args.objective,
       id: this.registrationId,
+      token: this.registrationToken,
     })
     if (!body.id) {
       // The id is the only way this session can be addressed or can address
@@ -77,6 +83,12 @@ export class LocalTransport implements Transport {
       throw new Error('Broker did not return a registration id for this session.')
     }
     this.registrationId = body.id
+    // Hold-token is returned on first register and on re-register; store it
+    // for SSE tagging and authenticated DM send/read/delete.
+    if (body.token) this.registrationToken = body.token
+    if (!this.registrationToken) {
+      throw new Error('Broker did not return a hold-token for this session.')
+    }
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────
@@ -199,9 +211,13 @@ export class LocalTransport implements Transport {
     toSessionId: string
     text: string
   }): Promise<TransportDmResult> {
+    if (!this.registrationToken) {
+      throw new Error('Not registered with the local broker yet - call introduce first.')
+    }
     return this.brokerPost<TransportDmResult>(`/sessions/${encodeURIComponent(args.toSessionId)}/dm`, {
       fromId: this.requireId(),
       text: args.text,
+      token: this.registrationToken,
     })
   }
 
@@ -211,7 +227,13 @@ export class LocalTransport implements Transport {
     limit?: number
     before?: number
   }): Promise<TransportDmPage> {
-    const params = new URLSearchParams({ asId: this.requireId() })
+    if (!this.registrationToken) {
+      throw new Error('Not registered with the local broker yet - call introduce first.')
+    }
+    const params = new URLSearchParams({
+      asId: this.requireId(),
+      token: this.registrationToken,
+    })
     if (args.limit !== undefined) params.set('limit', String(args.limit))
     if (args.before !== undefined) params.set('before', String(args.before))
     const data = await this.brokerGet<{ messages: TransportDmMessage[]; hasMore: boolean }>(
@@ -274,6 +296,7 @@ export class LocalTransport implements Transport {
     try {
       await fetch(`${this.base()}/sessions/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+        headers: this.registrationToken ? { Authorization: `Bearer ${this.registrationToken}` } : undefined,
         signal: controller.signal,
       })
     } catch {
