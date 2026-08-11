@@ -271,10 +271,10 @@ describe('attachLocation', () => {
     ctx.session.setOrganizationId('org_a')
     ctx.session.setIdentity(identity)
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(true)
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.introduce).toHaveBeenCalledWith({
       sessionName: 'architect',
       objective: 'ship KAI-401',
@@ -288,10 +288,10 @@ describe('attachLocation', () => {
     // before KAI-401 — `undefined` fields, not empty objects.
     const ctx = makeCtx(location)
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(true)
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     const [args] = transport.introduce.mock.calls[0]!
     expect(args.identity).toBeUndefined()
     expect(args.organizationId).toBeUndefined()
