@@ -130,7 +130,7 @@ export class ActiveContext {
 
   /** Returns the location of a subscribed channel. `ChannelLocation` is
    *  a free-form string - the user may configure arbitrary names
-   *  (`"flatout"`, `"acme"`) alongside or instead of the reserved
+   *  (`"acme"`, `"staging"`) alongside or instead of the reserved
    *  `"local"`. We check `"local"` first as a deterministic tie-break
    *  (matching the routing preference in `list_sessions`), then fall back
    *  to whichever subscription has this channel name. */

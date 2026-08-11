@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in cccollab does not work as documented
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: if no messages are arriving at all, check that you launched
+        Claude Code with the channel flag. Without it the tools load and nothing is
+        ever delivered, which looks exactly like a bug:
+
+        ```
+        claude --dangerously-load-development-channels plugin:cccollab@kollaborativeai
+        ```
+
+        On a Team or Enterprise plan, an admin must also enable `channelsEnabled`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Numbered steps. If it involves two sessions, say what each one did and in
+        which order — most transport bugs only appear with a specific interleaving.
+      placeholder: |
+        1. Session A: introduce, join_channel "dev"
+        2. Session B: introduce, join_channel "dev"
+        3. Session A: start_topic "demo", send_message_to_topic "hi"
+        4. Session B: never receives it
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Which transport
+      options:
+        - Local (same machine, no account)
+        - Remote (cross-machine, signed in)
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: cccollab version
+      description: 'Output of `npm ls -g cccollab`'
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: 'Output of `claude --version`'
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version and how it is managed
+      description: 'Output of `node --version`, plus volta / nvm / fnm / asdf / system if applicable'
+    validations:
+      required: true
+
+  - type: textarea
+    id: whoami
+    attributes:
+      label: whoami output
+      description: |
+        Run the `whoami` tool and paste the JSON. It reports your subscriptions and
+        each transport's enabled state, which is the fastest way to see whether the
+        session is where you think it is. Redact tokens if you paste config.
+      render: json

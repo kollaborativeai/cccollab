@@ -176,18 +176,18 @@ describe('ActiveContext', () => {
 
   describe('getChannelLocation', () => {
     it('returns the location for a subscription at an arbitrary (non-local, non-remote) name', () => {
-      ctx.joinChannel('dev', 'cccollab.json', 'flatout')
-      expect(ctx.getChannelLocation('dev')).toBe('flatout')
+      ctx.joinChannel('dev', 'cccollab.json', 'acme')
+      expect(ctx.getChannelLocation('dev')).toBe('acme')
     })
 
     it('prefers local on a tie with another location', () => {
-      ctx.joinChannel('dev', 'manual', 'flatout')
+      ctx.joinChannel('dev', 'manual', 'acme')
       ctx.joinChannel('dev', 'manual', 'local')
       expect(ctx.getChannelLocation('dev')).toBe('local')
     })
 
     it('returns undefined when the channel is not subscribed anywhere', () => {
-      ctx.joinChannel('dev', 'manual', 'flatout')
+      ctx.joinChannel('dev', 'manual', 'acme')
       expect(ctx.getChannelLocation('other')).toBeUndefined()
     })
   })

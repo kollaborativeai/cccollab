@@ -15,7 +15,7 @@ clear
 # Prepend the mcp_server workspace's bin/ to PATH so the cccollab MCP server
 # (spawned by Claude Code as `command: "cccollab"` per plugin/.mcp.json)
 # resolves to this repo's mcp_server/src/ via tsx, not the globally installed
-# @kollaborativeai/cccollab. This isolates the test harness from the production
+# cccollab. This isolates the test harness from the production
 # install without touching it.
 export PATH="$(cd ../mcp_server/bin && pwd):$PATH"
 

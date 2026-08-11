@@ -1,0 +1,17 @@
+{
+  "name": "kollaborativeai",
+  "owner": {
+    "name": "Kollaborative AI",
+    "email": "stefan@cccollab.dev"
+  },
+  "metadata": {
+    "description": "Kollaborative AI plugins for Claude Code. Register with `claude plugin marketplace add kollaborativeai/cccollab`."
+  },
+  "plugins": [
+    {
+      "name": "cccollab",
+      "source": "./plugin",
+      "description": "Real-time collaboration between Claude Code sessions via channels and threaded topics"
+    }
+  ]
+}

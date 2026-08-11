@@ -211,7 +211,7 @@ describe('attachLocation', () => {
 
   beforeEach(() => {
     location = {
-      name: 'flatout',
+      name: 'acme',
       isLocal: false,
       url: 'https://example.convex.cloud',
       accessToken: 'a',
@@ -225,23 +225,23 @@ describe('attachLocation', () => {
     const fakeFactory = vi.fn((loc: ResolvedLocation) => new FakeRemoteTransport(loc.name))
     ctx.transportFactory = fakeFactory
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(true)
-    expect(ctx.router.has('flatout')).toBe(true)
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    expect(ctx.router.has('acme')).toBe(true)
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.introduce).toHaveBeenCalledWith({ sessionName: 'architect', objective: undefined })
     expect(fakeFactory).toHaveBeenCalledTimes(1)
   })
 
   it('auto-subscribes to configured channels and topics', async () => {
     const ctx = makeCtx(location)
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
-    expect(ctx.context.isChannelSubscribed('dev', 'flatout')).toBe(true)
+    expect(ctx.context.isChannelSubscribed('dev', 'acme')).toBe(true)
 
     // "planning" doesn't exist on the fake yet so createTopic is called.
     expect(transport.createTopic).toHaveBeenCalledWith({
@@ -268,31 +268,31 @@ describe('attachLocation', () => {
   it('keys auto-subscribe by the NORMALIZED channel name, not the raw config key', async () => {
     const ctx = makeCtx({ ...location, channels: [{ name: 'Dev', topics: [] }] })
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
     // The feed must be registered under the NORMALIZED channel name — the same
     // one the context (and therefore leave_channel, the deaf check, ...) will
     // later ask for. A raw config key like "Dev" used to key the shared map
-    // under `flatout::Dev` while every later lookup asked for `flatout::dev`.
+    // under `acme::Dev` while every later lookup asked for `acme::dev`.
     expect([...transport.subscribedChannels.keys()]).toEqual(['dev'])
-    expect(ctx.context.isChannelSubscribed('dev', 'flatout')).toBe(true)
+    expect(ctx.context.isChannelSubscribed('dev', 'acme')).toBe(true)
   })
 
   it('returns ok: false and does NOT register when introduce throws', async () => {
     const ctx = makeCtx(location)
-    const failing = new FakeRemoteTransport('flatout')
+    const failing = new FakeRemoteTransport('acme')
     failing.shouldFailIntroduce = true
     failing.introduceError = new Error('backend rejected introduce')
     ctx.transportFactory = () => failing
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain('backend rejected introduce')
-    expect(ctx.router.has('flatout')).toBe(false)
+    expect(ctx.router.has('acme')).toBe(false)
   })
 
   it('shuts down the orphaned transport when introduce throws, so its ConvexClient websocket does not leak', async () => {
@@ -302,12 +302,12 @@ describe('attachLocation', () => {
     // and a subsequent background "Server Error" rejection can crash the
     // whole process — bricking the local broker for every session.
     const ctx = makeCtx(location)
-    const failing = new FakeRemoteTransport('flatout')
+    const failing = new FakeRemoteTransport('acme')
     failing.shouldFailIntroduce = true
     failing.introduceError = new Error('Server Error')
     ctx.transportFactory = () => failing
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(false)
     expect(failing.shutdown).toHaveBeenCalledTimes(1)
@@ -319,39 +319,39 @@ describe('attachLocation', () => {
     // separate diagnostics registry is how whoami surfaces "✗ personal".
     const diagnostics = new AttachDiagnostics()
     const ctx = makeCtx(location, { diagnostics })
-    const failing = new FakeRemoteTransport('flatout')
+    const failing = new FakeRemoteTransport('acme')
     failing.shouldFailIntroduce = true
     failing.introduceError = new Error('Server Error')
     ctx.transportFactory = () => failing
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(false)
-    expect(diagnostics.get('flatout')?.reason).toContain('Server Error')
+    expect(diagnostics.get('acme')?.reason).toContain('Server Error')
   })
 
   it('clears a prior diagnostics failure once the location attaches successfully', async () => {
     const diagnostics = new AttachDiagnostics()
-    diagnostics.recordFailure('flatout', 'earlier introduce() failure')
+    diagnostics.recordFailure('acme', 'earlier introduce() failure')
     const ctx = makeCtx(location, { diagnostics })
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(true)
-    expect(diagnostics.get('flatout')).toBeUndefined()
+    expect(diagnostics.get('acme')).toBeUndefined()
   })
 
   it('replaces an existing transport in place when one is already registered for the same name', async () => {
     const ctx = makeCtx(location)
-    const old = new FakeRemoteTransport('flatout')
+    const old = new FakeRemoteTransport('acme')
     ctx.router.register(old)
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
     // Old transport got shut down; new one is in the router.
     expect(old.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
-    const live = ctx.router.get('flatout')
+    const live = ctx.router.get('acme')
     expect(live).not.toBe(old)
   })
 
@@ -365,16 +365,16 @@ describe('attachLocation', () => {
     const ctx = makeCtx(location)
 
     // First attach
-    const first = await attachLocation('flatout', ctx)
+    const first = await attachLocation('acme', ctx)
     expect(first.ok).toBe(true)
-    const originalTransport = ctx.router.get('flatout') as FakeRemoteTransport
+    const originalTransport = ctx.router.get('acme') as FakeRemoteTransport
 
     // Prepare a distinct new transport for the second attach.
-    const replacement = new FakeRemoteTransport('flatout')
+    const replacement = new FakeRemoteTransport('acme')
     ctx.transportFactory = () => replacement
 
     // Second attach (what `authenticate({force:true})` triggers).
-    const second = await attachLocation('flatout', ctx)
+    const second = await attachLocation('acme', ctx)
     expect(second.ok).toBe(true)
 
     // 1. Old transport's shutdown() was called.
@@ -383,7 +383,7 @@ describe('attachLocation', () => {
     // 2. Old transport got a deregisterSession too.
     expect(originalTransport.deregisterSession).toHaveBeenCalledWith({ sessionName: 'architect' })
     // 3. Router now points at the replacement.
-    const live = ctx.router.get('flatout') as FakeRemoteTransport
+    const live = ctx.router.get('acme') as FakeRemoteTransport
     expect(live).toBe(replacement)
     expect(live).not.toBe(originalTransport)
   })
@@ -394,7 +394,7 @@ describe('attachLocation', () => {
     ctx.context.joinChannel('dev', 'manual', 'local')
     ctx.context.setActiveChannel('dev', 'local')
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
     // The prior active is preserved.
@@ -406,7 +406,7 @@ describe('attachLocation', () => {
     const ctx = makeCtx(location, {
       resolved: { locations: [], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
     })
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(false)
   })
 
@@ -416,10 +416,10 @@ describe('attachLocation', () => {
     // establish a `subscribeTopicMessages` per auto-subscribed topic,
     // not just a server-side membership row via `joinTopic`.
     const ctx = makeCtx(location)
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     // The cccollab.json configured exactly one topic ("planning") under
     // "dev". `attachLocation` should have created it (listTopics was
     // empty) and subscribed to its message stream.
@@ -446,7 +446,7 @@ describe('attachLocation', () => {
     const [msg, sourceArg] = push.mock.calls[0] as [ParsedMessage, string]
     expect(msg.text).toBe('hello from peer')
     expect(msg.threadTs).toBe(topicId)
-    expect(sourceArg).toBe('flatout')
+    expect(sourceArg).toBe('acme')
   })
 
   it('primes the topic cursor from joinTopic history so auto-subscribe does not replay past messages', async () => {
@@ -454,7 +454,7 @@ describe('attachLocation', () => {
     // path goes down joinTopic (not createTopic), and make joinTopic
     // return history so attachLocation can prime the cursor past it.
     const ctx = makeCtx(location)
-    const fake = new FakeRemoteTransport('flatout')
+    const fake = new FakeRemoteTransport('acme')
     fake.registerTopic({
       id: 'topic-existing',
       topic: 'planning',
@@ -472,7 +472,7 @@ describe('attachLocation', () => {
     }))
     ctx.transportFactory = () => fake
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
     // Cursor primed to the highest history ts.
     const primed = fake.primedCursors.get('topic-existing')
@@ -487,10 +487,10 @@ describe('attachLocation', () => {
     // subscribeChannelMessages for each configured channel so broadcasts
     // travel back through MessageBus just like topic messages and DMs do.
     const ctx = makeCtx(location)
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
     expect(result.ok).toBe(true)
 
-    const transport = ctx.router.get('flatout') as FakeRemoteTransport
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.subscribedChannels.size).toBe(1)
     const sub = transport.subscribedChannels.get('dev')!
     expect(transport.subscribedChannels.size).toBe(1)
@@ -509,22 +509,22 @@ describe('attachLocation', () => {
     const [msg, sourceArg] = push.mock.calls[0] as [ParsedMessage, string]
     expect(msg.text).toBe('hello-from-peer-on-dev')
     expect(msg.channel).toBe('dev')
-    expect(sourceArg).toBe('flatout')
+    expect(sourceArg).toBe('acme')
   })
 
   it('tears down topic subscriptions on prior-transport replace (force re-authenticate)', async () => {
     const ctx = makeCtx(location)
-    const first = await attachLocation('flatout', ctx)
+    const first = await attachLocation('acme', ctx)
     expect(first.ok).toBe(true)
 
-    const originalTransport = ctx.router.get('flatout') as FakeRemoteTransport
+    const originalTransport = ctx.router.get('acme') as FakeRemoteTransport
     const topicId = [...originalTransport.subscribedTopics.keys()][0]!
     const priorSub = originalTransport.subscribedTopics.get(topicId)!
 
     // Replace-in-place attach (what `authenticate({force:true})` does).
-    const replacement = new FakeRemoteTransport('flatout')
+    const replacement = new FakeRemoteTransport('acme')
     ctx.transportFactory = () => replacement
-    const second = await attachLocation('flatout', ctx)
+    const second = await attachLocation('acme', ctx)
     expect(second.ok).toBe(true)
 
     // The prior transport's feed went down with the prior transport (its own
@@ -585,10 +585,10 @@ describe('planStartupAttachments', () => {
   })
 
   it('skips an engaged-but-legacy remote (missing Clerk pointer) as not-constructable', () => {
-    const legacy = loc({ name: 'flatout', clerkIssuer: undefined, clerkClientId: undefined })
-    const plan = planStartupAttachments([localLoc(), legacy], 'flatout')
+    const legacy = loc({ name: 'acme', clerkIssuer: undefined, clerkClientId: undefined })
+    const plan = planStartupAttachments([localLoc(), legacy], 'acme')
     expect(plan.attach).toHaveLength(0)
-    expect(plan.skipped.find((s) => s.name === 'flatout')?.reason).toBe('not-constructable')
+    expect(plan.skipped.find((s) => s.name === 'acme')?.reason).toBe('not-constructable')
   })
 
   it('skips an engaged remote with no tokens, flagging no-tokens', () => {
@@ -869,7 +869,7 @@ describe('ensureLazyAttach', () => {
 describe('attachLocation — organization binding', () => {
   it('introduces with the org the location is already bound to, and keeps it recorded', async () => {
     const location: ResolvedLocation = {
-      name: 'flatout',
+      name: 'acme',
       isLocal: false,
       url: 'https://example.convex.cloud',
       accessToken: 'a',
@@ -880,16 +880,16 @@ describe('attachLocation — organization binding', () => {
     // The session already knows this location is on org_1 (an earlier introduce
     // recorded it). A re-attach — e.g. `authenticate` swapping the transport in
     // place — must not silently forget that.
-    ctx.session.setOrganizationFor('flatout', 'org_1')
-    const transport = new FakeRemoteTransport('flatout')
+    ctx.session.setOrganizationFor('acme', 'org_1')
+    const transport = new FakeRemoteTransport('acme')
     ctx.transportFactory = () => transport
 
-    const result = await attachLocation('flatout', ctx)
+    const result = await attachLocation('acme', ctx)
 
     expect(result.ok).toBe(true)
     expect(transport.introduce).toHaveBeenCalledWith(
       expect.objectContaining({ sessionName: 'architect', organizationId: 'org_1' }),
     )
-    expect(ctx.session.getOrganizationFor('flatout')).toBe('org_1')
+    expect(ctx.session.getOrganizationFor('acme')).toBe('org_1')
   })
 })
