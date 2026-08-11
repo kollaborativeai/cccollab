@@ -633,9 +633,9 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
       { _id: 'm1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_100_000 },
       { _id: 'm2', fromSessionId: 'alice', text: 'b', ts: 1_700_000_200_000 },
     ])
-    // Drain microtasks so the mutation fire-and-forget settles.
-    await Promise.resolve()
-    await Promise.resolve()
+    // Drain microtasks so the delivery finally + fire-and-forget ack settle
+    // (inFlight finally + seen/maxTs + mutation need more than two ticks).
+    for (let i = 0; i < 12; i++) await Promise.resolve()
 
     const ackCalls = mutationCalls.filter(
       (c) =>

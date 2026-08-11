@@ -300,8 +300,13 @@ export class RemoteTransport implements Transport {
 
   /** Highest `ts` per channel id. Mirrors `topicMaxTs` - seeds the
    *  reactive `listByChannel` query's `sinceTs` so the initial batch
-   *  doesn't replay pre-subscribe broadcasts. */
+   *  doesn't replay pre-subscribe broadcasts. Advanced only after
+   *  successful delivery (C2). */
   private readonly channelMaxTs = new Map<string, number>()
+
+  /** Message ids currently mid-delivery for any channel subscription.
+   *  Concurrent onUpdate must not re-call onEvent for the same id. */
+  private readonly channelInFlight = new Set<string>()
 
   /** Handle for the periodic `updateLastSeen` ping started once `introduce`
    *  sets `sessionId`. Cleared on `shutdown`. */
@@ -1075,6 +1080,7 @@ export class RemoteTransport implements Transport {
           const deliveries: Array<{ id: string; ts: number; done: Promise<void> }> = []
           for (const row of arr) {
             if (seen.has(row._id)) continue
+            if (this.channelInFlight.has(row._id)) continue
             // Skip self-echo: own broadcasts shouldn't push back to our
             // own Claude. Still count as delivered for ack/seen/maxTs so we
             // don't re-offer our own row on reconnect. Mirrors the local
@@ -1083,16 +1089,21 @@ export class RemoteTransport implements Transport {
               deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve() })
               continue
             }
-            const delivered = onEvent({
-              sender: row.fromSessionId,
-              text: row.text,
-              ts: new Date(row.ts).toISOString(),
-              channel: args.channelName,
-              channelName: args.channelName,
-              threadTs: undefined,
-              images: row.images,
+            this.channelInFlight.add(row._id)
+            const delivered = Promise.resolve(
+              onEvent({
+                sender: row.fromSessionId,
+                text: row.text,
+                ts: new Date(row.ts).toISOString(),
+                channel: args.channelName,
+                channelName: args.channelName,
+                threadTs: undefined,
+                images: row.images,
+              }),
+            ).finally(() => {
+              this.channelInFlight.delete(row._id)
             })
-            deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve(delivered) })
+            deliveries.push({ id: row._id, ts: row.ts, done: delivered })
           }
           // Ack the highest ts that was actually DELIVERED, once it has been.
           //

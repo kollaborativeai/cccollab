@@ -180,5 +180,20 @@ describe('MessageBus', () => {
       await expect(bus.push(createMessage({ text: 'second' }))).resolves.toBeUndefined()
       expect(mcp.notification).toHaveBeenCalledTimes(2)
     })
+
+    // I6 / C2 interaction: dedup must not claim success on a retry of a
+    // message whose first notify failed. Recording dedup before notify made
+    // the second push resolve without notifying — and the channel ack path
+    // then advanced past an undelivered row.
+    it('re-notifies after a failed push instead of resolving as a dedup hit', async () => {
+      const mcp = {
+        notification: vi.fn().mockRejectedValueOnce(new Error('disconnected')).mockResolvedValue(undefined),
+      }
+      const bus = new MessageBus(mcp as never)
+      const msg = createMessage({ text: 'retry-me' })
+      await expect(bus.push(msg)).rejects.toThrow('disconnected')
+      await expect(bus.push(msg)).resolves.toBeUndefined()
+      expect(mcp.notification).toHaveBeenCalledTimes(2)
+    })
   })
 })

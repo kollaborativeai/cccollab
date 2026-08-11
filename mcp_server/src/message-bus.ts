@@ -101,8 +101,10 @@ export class MessageBus extends EventEmitter {
       this.emit('dedup:dropped', { msg, source, previousTs: last })
       return
     }
-    this.dedupSeen.set(key, now)
-    if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
+    // Do NOT record dedup until delivery succeeds. Recording first (I6) made a
+    // failed notify look like a successful no-op on retry within DEDUP_WINDOW_MS
+    // — and once C2 advances seen/ack only after push resolves, that false
+    // success permanently acks a message the session never saw.
 
     const meta: Record<string, string> = {
       sender: msg.sender,
@@ -125,7 +127,12 @@ export class MessageBus extends EventEmitter {
     // A different channel has no such relation and waits for nothing.
     const streamKey = msg.threadTs ?? msg.channel
     const tail = this.tails.get(streamKey) ?? Promise.resolve()
-    const delivery = tail.then(() => this.deliver(msg, source, meta))
+    const delivery = tail.then(async () => {
+      await this.deliver(msg, source, meta)
+      // Only a successful notify claims the dedup key.
+      this.dedupSeen.set(key, Date.now())
+      if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
+    })
     // One failed delivery must not poison the queue for the next message.
     const settled = delivery.catch(() => {})
     this.tails.set(streamKey, settled)
