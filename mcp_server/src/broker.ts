@@ -22,19 +22,40 @@ const clients = new Set<SSEResponse>()
  *  so a cursor carrying a different id cannot be honoured — and the client must
  *  be told that, not silently resumed from nothing. */
 const BROKER_ID = crypto.randomUUID()
-/** Events retained for replay to a reconnecting client. Bounded: a client that
- *  falls further behind than this gets an explicit `stream_gap`, never a
- *  quietly-incomplete replay. Rejects garbage/<1 rather than silently coercing
- *  to NaN (which would defeat eviction: `length > NaN` is false forever). */
-const REPLAY_CAPACITY = ((): number => {
-  const raw = process.env.CCCOLLAB_REPLAY_CAPACITY
-  if (raw === undefined) return 1000
+/** Read a positive-integer tuning knob from the environment. Rejects garbage
+ *  rather than silently coercing to NaN: every one of these knobs degrades
+ *  SILENTLY when it is NaN (eviction never fires because `length > NaN` is
+ *  false; an interval fires every tick), and silent degradation is the exact
+ *  failure mode this stream work exists to eliminate. */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
   const n = Number(raw)
   if (!Number.isFinite(n) || n < 1) {
-    throw new Error(`CCCOLLAB_REPLAY_CAPACITY must be an integer >= 1, got ${JSON.stringify(raw)}`)
+    // The broker is typically spawned with stdio ignored, so a bare throw is a
+    // 10s hang and a generic rendezvous timeout that names neither variable
+    // nor value. Write the reason to the log file before dying so the operator
+    // has somewhere to look.
+    try {
+      log(`${name} must be an integer >= 1, got ${JSON.stringify(raw)}`)
+    } catch {
+      /* LOG_FILE may not be writable; the throw is the real signal. */
+    }
+    throw new Error(`${name} must be an integer >= 1, got ${JSON.stringify(raw)}`)
   }
   return Math.floor(n)
-})()
+}
+
+/** Events retained for replay to a reconnecting client. Bounded: a client that
+ *  falls further behind than this gets an explicit `stream_gap`, never a
+ *  quietly-incomplete replay. */
+const REPLAY_CAPACITY = positiveIntEnv('CCCOLLAB_REPLAY_CAPACITY', 1000)
+/** How often every open SSE stream gets a comment frame. Its job is to make
+ *  silence MEAN something: a client can only tell "quiet but healthy" from
+ *  "wedged" if a healthy stream is never silent for long. The listener's read
+ *  deadline is sized against this (see broker-event-listener.ts), so shortening
+ *  one without the other turns an idle stream into a reconnect loop. */
+const HEARTBEAT_MS = positiveIntEnv('CCCOLLAB_HEARTBEAT_MS', 15_000)
 const replayBuffer: Array<{ seq: number; data: string }> = []
 let lastSeq = 0
 
@@ -43,19 +64,32 @@ function log(msg: string): void {
   appendFileSync(LOG_FILE, line)
 }
 
+function writeToClients(payload: string): void {
+  // ServerResponse.write() does NOT throw synchronously on a dead socket — the
+  // try/catch that used to wrap this never fired. Dead clients are removed by
+  // the `error` and `close` handlers registered when they join the set.
+  for (const client of clients) {
+    client.write(payload)
+  }
+}
+
 function broadcast(data: string): void {
   lastSeq += 1
   replayBuffer.push({ seq: lastSeq, data })
   if (replayBuffer.length > REPLAY_CAPACITY) replayBuffer.shift()
-  const payload = sseFrame(`${BROKER_ID}:${lastSeq}`, data)
-  for (const client of clients) {
-    try {
-      client.write(payload)
-    } catch {
-      clients.delete(client)
-    }
-  }
+  writeToClients(sseFrame(`${BROKER_ID}:${lastSeq}`, data))
 }
+
+/** An SSE comment frame: no `id:`, no `data:`. That is what makes it safe to
+ *  send into a cursored stream — clients skip it without advancing their
+ *  cursor, and it consumes no sequence number, so a reconnect resumes exactly
+ *  where it would have anyway. */
+const HEARTBEAT_FRAME = ': ping\n\n'
+
+// One timer for every client rather than one per client: they all want the
+// same frame at the same time. `.unref()` because a heartbeat must never be
+// the reason this process stays alive — the HTTP server is.
+setInterval(() => writeToClients(HEARTBEAT_FRAME), HEARTBEAT_MS).unref()
 
 function sseFrame(id: string | undefined, data: string): string {
   return `${id ? `id: ${id}\n` : ''}data: ${data}\n\n`
@@ -66,7 +100,15 @@ function sseFrame(id: string | undefined, data: string): string {
  *  at all, which the client must hear about rather than infer from silence. */
 function resumeFrom(lastEventId: string | undefined): { replay: typeof replayBuffer; gap?: string } {
   if (!lastEventId) return { replay: [] } // fresh client: forward-only by design
-  const [brokerId, rawSeq] = lastEventId.split(':')
+  // `Number('')` is 0, `Number('1e2')` is 100, `split(':')` discards extra
+  // segments — any of those would either replay everything with NO gap or
+  // accept a forgeable cursor. Sequence numbers are non-negative integers only.
+  const parts = lastEventId.split(':')
+  const brokerId = parts[0]
+  const rawSeq = parts[1]
+  if (parts.length !== 2 || !brokerId || rawSeq === undefined || !/^\d+$/.test(rawSeq)) {
+    return { replay: [], gap: `cursor "${lastEventId}" is not a position this broker ever issued` }
+  }
   const since = Number(rawSeq)
   if (brokerId !== BROKER_ID) {
     return { replay: [], gap: 'cursor is from a previous broker instance; its events are gone' }
@@ -74,15 +116,19 @@ function resumeFrom(lastEventId: string | undefined): { replay: typeof replayBuf
   if (!Number.isFinite(since) || since < 0 || since > lastSeq) {
     return { replay: [], gap: `cursor "${lastEventId}" is not a position this broker ever issued` }
   }
-  // A client behind lastSeq needs proof we still hold its next event. An empty
-  // buffer holds nothing, so the ONLY safe answer is "gap" — the `oldest &&`
-  // short-circuit that used to sit here fell through to a silent zero-length
-  // replay whenever REPLAY_CAPACITY was 0, i.e. the confidently-blind failure
-  // this ticket exists to kill, one env-var away.
+  // A client behind lastSeq needs proof we still hold its next event. When the
+  // buffer is empty the only safe answer is "gap" — a silent zero-length
+  // replay is the confidently-blind failure this ticket exists to kill.
+  // (REPLAY_CAPACITY cannot be 0: positiveIntEnv refuses n < 1 at boot. The
+  // empty-buffer arm still runs after eviction of everything, or a brand-new
+  // broker that has not yet published.)
   const oldest = replayBuffer[0]
   if (since < lastSeq && (!oldest || since < oldest.seq - 1)) {
+    // Still hand back whatever we hold. Returning `replay: []` alone threw away
+    // up to REPLAY_CAPACITY events the client has never seen; stream_hello then
+    // jumps their cursor to lastSeq and those events are gone forever.
     return {
-      replay: [],
+      replay: replayBuffer.filter((e) => e.seq > since),
       gap: `client fell more than ${REPLAY_CAPACITY} events behind; the missed events have been evicted`,
     }
   }
@@ -229,24 +275,45 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // Resume BEFORE registering as a live client: this handler is synchronous,
     // so no broadcast can interleave, and the client sees the replay and the
     // live stream in one unbroken order.
+    //
+    // The resume/replay writes run BEFORE the client is in `clients` and before
+    // any error handler is attached. An exception here would escape the request
+    // listener and kill the daemon — every session on the machine goes deaf at
+    // once. Guard the whole burst; on failure abandon this client rather than
+    // the process.
     const { replay, gap } = resumeFrom(req.headers['last-event-id'] as string | undefined)
-    if (gap) {
-      res.write(sseFrame(undefined, JSON.stringify({ source: 'local', type: 'stream_gap', reason: gap })))
-      log(`SSE client resumed with an UNFILLABLE cursor: ${gap}`)
-    }
-    for (const event of replay) {
-      res.write(sseFrame(`${BROKER_ID}:${event.seq}`, event.data))
-    }
-    if (replay.length > 0) log(`SSE client resumed: replayed ${replay.length} missed event(s)`)
+    try {
+      if (gap) {
+        res.write(sseFrame(undefined, JSON.stringify({ source: 'local', type: 'stream_gap', reason: gap })))
+        log(`SSE client resumed with an UNFILLABLE cursor: ${gap}`)
+      }
+      for (const event of replay) {
+        res.write(sseFrame(`${BROKER_ID}:${event.seq}`, event.data))
+      }
+      if (replay.length > 0) log(`SSE client resumed: replayed ${replay.length} missed event(s)`)
 
-    // Hand the client a cursor IMMEDIATELY, before it has heard any traffic. A
-    // listener whose cursor only exists after its first event has none at all
-    // during the quiet window — and a drop there would silently swallow
-    // everything published in the gap. The quiet watcher is precisely the one
-    // this feature exists to protect.
-    res.write(sseFrame(`${BROKER_ID}:${lastSeq}`, JSON.stringify({ source: 'local', type: 'stream_hello' })))
+      // Hand the client a cursor IMMEDIATELY, before it has heard any traffic. A
+      // listener whose cursor only exists after its first event has none at all
+      // during the quiet window — and a drop there would silently swallow
+      // everything published in the gap. The quiet watcher is precisely the one
+      // this feature exists to protect.
+      res.write(sseFrame(`${BROKER_ID}:${lastSeq}`, JSON.stringify({ source: 'local', type: 'stream_hello' })))
+    } catch (err) {
+      log(`SSE resume write failed: ${err instanceof Error ? err.message : String(err)}`)
+      try {
+        res.destroy()
+      } catch {
+        /* ignore */
+      }
+      return
+    }
 
     clients.add(sseRes)
+    // write() never throws on a dead socket; 'error' is the real signal.
+    // Without this, an 'error' with no listener becomes an uncaught throw.
+    sseRes.on('error', () => {
+      clients.delete(sseRes)
+    })
     log(`SSE client connected (total: ${clients.size})`)
 
     req.on('close', () => {

@@ -81,12 +81,26 @@ describe('makeClerkAuthFetcher', () => {
   })
 
   it('returns the cached ID token when expiry is exactly at the freshness margin boundary + 1ms', async () => {
-    const fetcher = makeClerkAuthFetcher(baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }))
+    // The margin is asserted to the millisecond, so this case only means what
+    // it says while the clock is still. Against a live clock the expiry is
+    // computed with 1ms of headroom and the fetcher then re-reads Date.now():
+    // any runner that spends that millisecond in between reads the token as
+    // stale, tries to refresh, and gets null back from the unstubbed mock.
+    // Only Date is faked — the fetcher awaits real promises, and faking timers
+    // wholesale would leave those with nothing to resolve them.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const fetcher = makeClerkAuthFetcher(
+        baseInit({ accessTokenExpiresAt: Date.now() + CLERK_FRESHNESS_MARGIN_MS + 1 }),
+      )
 
-    const token = await fetcher({ forceRefreshToken: false })
+      const token = await fetcher({ forceRefreshToken: false })
 
-    expect(token).toBe('initial-id-token')
-    expect(mockRefreshAccessToken).not.toHaveBeenCalled()
+      expect(token).toBe('initial-id-token')
+      expect(mockRefreshAccessToken).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refreshes and returns the new ID token when the token is expired', async () => {

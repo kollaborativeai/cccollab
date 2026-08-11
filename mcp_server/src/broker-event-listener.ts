@@ -12,12 +12,20 @@ import { CCCOLLAB_LOGS_DIR } from './constants.js'
 mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
 const LOG_FILE = join(CCCOLLAB_LOGS_DIR, 'debug.log')
 const RECONNECT_DELAY_MS = 2000
+/** How long an open-but-silent stream is tolerated before we call it dead. The
+ *  broker heartbeats every CCCOLLAB_HEARTBEAT_MS (15s by default), so this is
+ *  deliberately more than two beats: a healthy stream is never silent this
+ *  long, and anything shorter would reconnect-loop on ordinary jitter. */
+const READ_DEADLINE_MS = 40_000
 
 interface BrokerEventListenerOptions {
   brokerUrl: string
   messageBus: MessageBus
   sessionManager: SessionManager
   context: ActiveContext
+  /** Override for the read deadline. Exists so a test can drive it in tens of
+   *  milliseconds instead of waiting out the real one. */
+  readDeadlineMs?: number
 }
 
 export interface BrokerLocalEvent {
@@ -58,11 +66,13 @@ export class BrokerEventListener {
   private readonly context: ActiveContext
   private currentRequest: http.ClientRequest | null = null
   private stopped = false
-  /** Whether an SSE response is currently open. This is the ONLY thing that
-   *  carries local topic traffic into the session, so it is also the honest
-   *  answer to "is my channel watch actually in effect right now?" — see
-   *  `whoami`'s `watchingActive`. Not a heartbeat: it tracks the socket we
-   *  already hold, nothing more. */
+  /** Whether an SSE response is open AND has spoken within the read deadline.
+   *  This is the ONLY thing that carries local topic traffic into the session,
+   *  so it is also the honest answer to "is my channel watch actually in effect
+   *  right now?" — see `whoami`'s `watchingActive`. Deliberately more than "a
+   *  socket is open": an open socket that answers 200 with the wrong
+   *  content-type, or that has gone silent through a heartbeat window, is not a
+   *  stream that will ever deliver anything. */
   private connected = false
   /** True while a reconnect timer is already queued. Without this, a single
    *  socket teardown can fan out into multiple reconnects — req.on('error')
@@ -80,12 +90,19 @@ export class BrokerEventListener {
    *  that cannot say "I may have missed messages" is unsound — a socket being
    *  open now says nothing about what happened while it was not. */
   private missedEvents = false
+  /** Watchdog for a stream that is open but carrying nothing. A socket staying
+   *  up proves only that something is on the other end — not that it is the
+   *  broker, and not that it still works. Reset by every `data` event, which
+   *  the broker's heartbeat guarantees will keep arriving on a healthy stream. */
+  private readDeadline: NodeJS.Timeout | null = null
+  private readonly readDeadlineMs: number
 
   constructor(options: BrokerEventListenerOptions) {
     this.brokerUrl = options.brokerUrl
     this.bus = options.messageBus
     this.session = options.sessionManager
     this.context = options.context
+    this.readDeadlineMs = options.readDeadlineMs ?? READ_DEADLINE_MS
   }
 
   async start(): Promise<void> {
@@ -111,10 +128,10 @@ export class BrokerEventListener {
    *  from its cursor. Exists so the reconnect gap — the failure mode that hid
    *  behind an always-healthy stream — can actually be exercised, in tests and
    *  by a caller who suspects a wedged socket. Destroy alone: the socket
-   *  teardown fires res.on('error')/req.on('error'), each of which already
-   *  schedules the reconnect. Calling scheduleReconnect() here in addition
-   *  would open TWO sockets (proven: connections:3 for 2 sessions, message
-   *  delivered twice). */
+   *  teardown fires res.on('close')/res.on('error')/req.on('error'), each of
+   *  which already schedules the reconnect. Calling scheduleReconnect() here in
+   *  addition would open TWO sockets (proven: connections:3 for 2 sessions,
+   *  message delivered twice). */
   dropStream(): void {
     this.currentRequest?.destroy()
   }
@@ -122,6 +139,7 @@ export class BrokerEventListener {
   stop(): void {
     this.stopped = true
     this.connected = false
+    this.clearReadDeadline()
     if (this.currentRequest) {
       this.currentRequest.destroy()
       this.currentRequest = null
@@ -142,55 +160,93 @@ export class BrokerEventListener {
     const req = http.get(url, { headers }, (res) => {
       let buffer = ''
       let pendingId: string | undefined
-      this.connected = res.statusCode === 200
 
-      res.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString()
+      // Wired FIRST because the rejection path below destroys this stream, and
+      // a destroy that races a socket reset would emit 'error' on a stream with
+      // no listener — an uncaught throw that takes the whole session down.
+      res.on('error', (err) => {
+        this.log(`SSE response error: ${err.message}`)
+        this.scheduleReconnect()
+      })
+
+      // A 200 status line is NOT evidence that the broker is on the other end.
+      // The session pins the broker's port once at startup and never
+      // rediscovers it, so once the broker dies anything that binds that port
+      // answers 200 — politely, forever, carrying nothing, emitting neither
+      // 'end' nor 'error'. Trusting the status line alone is what let `whoami`
+      // report `connected: true` for a permanently deaf session.
+      const contentType = (res.headers['content-type'] ?? '').toLowerCase().trim()
+      if (res.statusCode !== 200 || !contentType.startsWith('text/event-stream')) {
+        this.log(`SSE rejected: status=${res.statusCode ?? 'unknown'} content-type="${contentType}"`)
+        // Destroy rather than leave the socket dangling: nothing else will ever
+        // tear it down, and the response holds it open.
+        res.destroy()
+        this.scheduleReconnect()
+        return
+      }
+      this.connected = true
+      this.armReadDeadline()
+
+      // Decode as UTF-8 across chunk boundaries. `chunk.toString()` per Buffer
+      // splits multi-byte characters at the seam into U+FFFD, which is still
+      // legal JSON so nothing errors — and a resume replay can dump up to
+      // REPLAY_CAPACITY frames in one synchronous write, making the seam
+      // materially likely.
+      res.setEncoding('utf8')
+
+      res.on('data', (chunk: string | Buffer) => {
+        // Any byte proves the stream is alive — including a heartbeat comment
+        // frame, which is the only thing that arrives on an idle channel.
+        this.armReadDeadline()
+        buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) {
-          if (line.startsWith('id: ')) {
-            pendingId = line.slice(4).trim()
+          // SSE allows optional space after the colon (`id:1` and `id: 1`).
+          if (line.startsWith('id:')) {
+            pendingId = line.slice(3).replace(/^\s*/, '').trim()
             continue
           }
-          if (line.startsWith('data: ')) {
-            const json = line.slice(6)
+          if (line.startsWith('data:')) {
+            const json = line.slice(5).replace(/^\s*/, '')
             try {
               const parsed = JSON.parse(json) as Record<string, unknown>
               if (isLocalEvent(parsed)) {
                 this.processLocalEvent(parsed)
+                // Advance only after a frame we actually examined. An
+                // unparseable frame must stay at the cursor so reconnect
+                // re-offers it from the replay buffer — advancing past it
+                // marked it consumed forever. Deliberate DROPPED non-local
+                // events still advance: they were examined and rejected.
+                if (pendingId) this.lastEventId = pendingId
               } else {
                 this.log(`DROPPED: non-local event ignored: ${json.slice(0, 120)}`)
+                if (pendingId) this.lastEventId = pendingId
               }
             } catch {
               this.log(`SSE parse error: ${json}`)
+              // Do NOT advance lastEventId — the frame was never dispatched.
             }
-            // Advance the cursor after dispatching. `processLocalEvent` is
-            // fire-and-forget (the handler runs async and its errors are
-            // logged, not awaited) so this is dispatch-not-handling: on the
-            // next reconnect we will not re-read an event we already dispatched
-            // even if its async handler had not yet finished.
-            if (pendingId) this.lastEventId = pendingId
             pendingId = undefined
           }
         }
       })
 
       res.on('end', () => {
-        this.connected = false
         this.log('SSE connection ended')
         this.scheduleReconnect()
       })
 
-      res.on('error', (err) => {
-        this.connected = false
-        this.log(`SSE response error: ${err.message}`)
+      // The backstop for every teardown that emits neither 'end' nor 'error' —
+      // and there are several. Safe to add: `reconnectPending` swallows the
+      // duplicate when 'end' or 'error' already fired for the same socket.
+      res.on('close', () => {
+        this.log('SSE connection closed')
         this.scheduleReconnect()
       })
     })
 
     req.on('error', (err) => {
-      this.connected = false
       this.log(`SSE request error: ${err.message}`)
       this.scheduleReconnect()
     })
@@ -198,7 +254,36 @@ export class BrokerEventListener {
     this.currentRequest = req
   }
 
+  /** (Re)start the silence watchdog. `.unref()`: a listener waiting for the
+   *  broker to say something must never be the reason a process cannot exit. */
+  private armReadDeadline(): void {
+    this.clearReadDeadline()
+    this.readDeadline = setTimeout(() => {
+      this.log(`SSE read deadline: no data for ${this.readDeadlineMs}ms, treating the stream as dead`)
+      // Set here rather than left to the teardown below: the moment we decide
+      // the stream is dead, `whoami` must stop claiming otherwise — not one
+      // socket round-trip later. Destroying then fires 'close', which routes
+      // through scheduleReconnect() and resumes from the cursor.
+      this.connected = false
+      this.currentRequest?.destroy()
+    }, this.readDeadlineMs)
+    this.readDeadline.unref()
+  }
+
+  private clearReadDeadline(): void {
+    if (!this.readDeadline) return
+    clearTimeout(this.readDeadline)
+    this.readDeadline = null
+  }
+
   private scheduleReconnect(): void {
+    // Every teardown funnels through here, so this is the one honest place to
+    // say "we are not connected" and to disarm the watchdog. Before the early
+    // returns on purpose: a future teardown path gets both for free instead of
+    // leaving `whoami` reporting connected:true on a dead socket, or leaving a
+    // stale deadline armed to shoot down the NEXT connection.
+    this.connected = false
+    this.clearReadDeadline()
     if (this.stopped) return
     if (this.reconnectPending) return
     this.reconnectPending = true
@@ -224,10 +309,11 @@ export class BrokerEventListener {
     appendFileSync(LOG_FILE, line)
   }
 
-  // Both gates are qualified with LOCAL_LOCATION: this listener only ever
+  // Channel gates are qualified with LOCAL_LOCATION: this listener only ever
   // handles local broker events, and an unqualified lookup matches a
   // same-named channel at ANY location — a cross-org leak once remote watch
-  // lands (KAI-413).
+  // lands (KAI-413). `isTopicJoined` takes no location (topics are keyed by
+  // threadTs alone today); only the channel half is location-qualified.
   private channelSubscribed(channel: string | undefined): boolean {
     if (!channel) return false
     return this.context.isChannelSubscribed(channel, LOCAL_LOCATION)
@@ -262,14 +348,18 @@ export class BrokerEventListener {
         // to; whoami still reports mayHaveMissedMessages, so no info is lost.
         this.missedEvents = true
         this.log(`STREAM GAP: ${event.reason ?? 'unknown reason'}`)
-        const localChannels = this.context.getSubscribedChannels().filter((c) => c.location === 'local')
+        // LOCAL_LOCATION, not the bare literal — the one proactive alarm path
+        // must not drift from every other local gate in this file.
+        const localChannels = this.context.getSubscribedChannels().filter((c) => c.location === LOCAL_LOCATION)
         for (const channel of localChannels) {
           await this.bus.push({
             sender: 'cccollab',
             text:
               `WARNING: the event stream reconnected with a gap (${event.reason ?? 'reason unknown'}). ` +
-              `Messages published while it was down were NOT delivered. ` +
-              `Use read_topic_messages / read_channel_messages to backfill.`,
+              `Messages published while it was down were NOT delivered to this session. ` +
+              `Local channel broadcasts cannot be reconstructed after a gap — re-read any ` +
+              `topics you care about with read_topic_messages (joined topics only). ` +
+              `whoami.eventStream.mayHaveMissedMessages stays true for this session.`,
             ts: new Date().toISOString(),
             channel: channel.name,
             channelName: channel.name,
@@ -292,13 +382,16 @@ export class BrokerEventListener {
           this.log(`DROPPED: self topic_created from ${event.topic.creator}`)
           return
         }
+        // Carries the topic id so a channel watcher can act on the
+        // notification (join, read, archive) without guessing from the title.
         const msg: ParsedMessage = {
           sender: event.topic.creator,
           text: `New topic in "${channel}": "${event.topic.topic}"`,
           ts: event.topic.createdAt ?? new Date().toISOString(),
           channel,
           channelName: channel,
-          threadTs: undefined,
+          threadTs: event.topic.id,
+          topicName: event.topic.topic,
         }
         this.log(`PUSHING topic_created to Claude: "${event.topic.topic}"`)
         await this.bus.push(msg)
@@ -405,6 +498,13 @@ export class BrokerEventListener {
         }
         this.log(`PUSHING broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
+        return
+      }
+      default: {
+        // Without this arm an unknown type is swallowed with no log line —
+        // and isLocalEvent already accepted it because it only checks source.
+        const unknownType = (event as { type?: string }).type ?? 'undefined'
+        this.log(`DROPPED: unknown local event type "${unknownType}"`)
         return
       }
     }

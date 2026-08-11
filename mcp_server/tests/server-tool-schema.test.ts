@@ -32,6 +32,10 @@ function createDeps(): ToolDeps {
   session.setName('orchestrator')
   const context = new ActiveContext()
   return {
+    // No plugin spawns this fixture, so "standalone" is the honest handshake
+    // result: there is no skill that could be out of step with the binary.
+    // These tests assert the zod argument boundary, not drift reporting.
+    versionState: { serverVersion: '0.0.0', status: 'standalone' },
     session,
     context,
     router: new TransportRouter([new LocalTransport(7850)]),

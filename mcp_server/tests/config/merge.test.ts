@@ -7,7 +7,7 @@ describe('stripProjectCredentials', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const input: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://x.convex.cloud',
           channels: { dev: { active: true } },
         },
@@ -23,11 +23,11 @@ describe('stripProjectCredentials', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const input: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://x.convex.cloud',
           accessToken: 'jwt-abc',
           refreshToken: 'refresh-xyz',
-          userEmail: 'stefan@flatout.solutions',
+          userEmail: 'stefan@cccollab.dev',
           userId: 'abc123',
           updatedAt: 1_700_000_000_000,
           channels: { dev: { active: true } },
@@ -35,14 +35,14 @@ describe('stripProjectCredentials', () => {
       },
     }
     const { stripped, warnings } = stripProjectCredentials(input, '/tmp/x/.cccollab.json')
-    expect(stripped.locations?.flatout?.accessToken).toBeUndefined()
-    expect(stripped.locations?.flatout?.refreshToken).toBeUndefined()
-    expect(stripped.locations?.flatout?.userEmail).toBeUndefined()
-    expect(stripped.locations?.flatout?.userId).toBeUndefined()
-    expect(stripped.locations?.flatout?.updatedAt).toBeUndefined()
+    expect(stripped.locations?.acme?.accessToken).toBeUndefined()
+    expect(stripped.locations?.acme?.refreshToken).toBeUndefined()
+    expect(stripped.locations?.acme?.userEmail).toBeUndefined()
+    expect(stripped.locations?.acme?.userId).toBeUndefined()
+    expect(stripped.locations?.acme?.updatedAt).toBeUndefined()
     // URL / channels untouched.
-    expect(stripped.locations?.flatout?.url).toBe('https://x.convex.cloud')
-    expect(stripped.locations?.flatout?.channels?.dev?.active).toBe(true)
+    expect(stripped.locations?.acme?.url).toBe('https://x.convex.cloud')
+    expect(stripped.locations?.acme?.channels?.dev?.active).toBe(true)
     // One warning per location containing credentials (not per field).
     expect(warnings).toBe(1)
     expect(warn).toHaveBeenCalledTimes(1)
@@ -54,7 +54,7 @@ describe('stripProjectCredentials', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const input: CccollabConfig = {
       locations: {
-        flatout: { url: 'https://a.convex.cloud', accessToken: 'a' },
+        acme: { url: 'https://a.convex.cloud', accessToken: 'a' },
         other: { url: 'https://b.convex.cloud', refreshToken: 'b' },
       },
     }
@@ -67,7 +67,7 @@ describe('stripProjectCredentials', () => {
   it('does not modify the input object', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const input: CccollabConfig = {
-      locations: { flatout: { url: 'https://x.convex.cloud', accessToken: 'a' } },
+      locations: { acme: { url: 'https://x.convex.cloud', accessToken: 'a' } },
     }
     const snapshot = JSON.parse(JSON.stringify(input)) as CccollabConfig
     stripProjectCredentials(input, '/tmp/x/.cccollab.json')
@@ -133,7 +133,7 @@ describe('mergeConfigs', () => {
   it('unions locations by key', () => {
     const user: CccollabConfig = {
       locations: {
-        flatout: { url: 'https://a.convex.cloud', accessToken: 'a', refreshToken: 'b' },
+        acme: { url: 'https://a.convex.cloud', accessToken: 'a', refreshToken: 'b' },
       },
     }
     const project: CccollabConfig = {
@@ -142,19 +142,19 @@ describe('mergeConfigs', () => {
       },
     }
     const merged = mergeConfigs(user, project)
-    expect(merged.locations?.flatout?.url).toBe('https://a.convex.cloud')
-    expect(merged.locations?.flatout?.accessToken).toBe('a')
+    expect(merged.locations?.acme?.url).toBe('https://a.convex.cloud')
+    expect(merged.locations?.acme?.accessToken).toBe('a')
     expect(merged.locations?.local?.active).toBe(true)
   })
 
   it('project wins on nested scalar fields but preserves unmentioned user fields', () => {
     const user: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://user.convex.cloud',
           accessToken: 'user-token',
           refreshToken: 'user-refresh',
-          userEmail: 'stefan@flatout.solutions',
+          userEmail: 'stefan@cccollab.dev',
           userId: 'u-1',
           updatedAt: 1,
         },
@@ -162,38 +162,38 @@ describe('mergeConfigs', () => {
     }
     const project: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://project.convex.cloud',
           channels: { dev: { active: true } },
         },
       },
     }
     const merged = mergeConfigs(user, project)
-    expect(merged.locations?.flatout?.url).toBe('https://project.convex.cloud')
-    expect(merged.locations?.flatout?.accessToken).toBe('user-token')
-    expect(merged.locations?.flatout?.channels?.dev?.active).toBe(true)
+    expect(merged.locations?.acme?.url).toBe('https://project.convex.cloud')
+    expect(merged.locations?.acme?.accessToken).toBe('user-token')
+    expect(merged.locations?.acme?.channels?.dev?.active).toBe(true)
   })
 
   it('unions channels across user and project for the same location', () => {
     const user: CccollabConfig = {
       locations: {
-        flatout: { url: 'https://a.convex.cloud', channels: { userOnly: { active: true } } },
+        acme: { url: 'https://a.convex.cloud', channels: { userOnly: { active: true } } },
       },
     }
     const project: CccollabConfig = {
       locations: {
-        flatout: { channels: { projectOnly: { active: true } } },
+        acme: { channels: { projectOnly: { active: true } } },
       },
     }
     const merged = mergeConfigs(user, project)
-    expect(merged.locations?.flatout?.channels?.userOnly?.active).toBe(true)
-    expect(merged.locations?.flatout?.channels?.projectOnly?.active).toBe(true)
+    expect(merged.locations?.acme?.channels?.userOnly?.active).toBe(true)
+    expect(merged.locations?.acme?.channels?.projectOnly?.active).toBe(true)
   })
 
   it('unions topics across user and project for the same channel', () => {
     const user: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           url: 'https://a.convex.cloud',
           channels: { dev: { topics: { userTopic: { active: true } } } },
         },
@@ -201,13 +201,13 @@ describe('mergeConfigs', () => {
     }
     const project: CccollabConfig = {
       locations: {
-        flatout: {
+        acme: {
           channels: { dev: { topics: { projectTopic: { active: true } } } },
         },
       },
     }
     const merged = mergeConfigs(user, project)
-    expect(merged.locations?.flatout?.channels?.dev?.topics?.userTopic?.active).toBe(true)
-    expect(merged.locations?.flatout?.channels?.dev?.topics?.projectTopic?.active).toBe(true)
+    expect(merged.locations?.acme?.channels?.dev?.topics?.userTopic?.active).toBe(true)
+    expect(merged.locations?.acme?.channels?.dev?.topics?.projectTopic?.active).toBe(true)
   })
 })

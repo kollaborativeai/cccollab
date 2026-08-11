@@ -127,6 +127,11 @@ interface ChannelRow {
    *  `whoami` because this is the other place a session looks to answer
    *  "am I actually seeing this channel?". */
   watching: boolean
+  /** Set when the transport could not be reached for a live count. The row is
+   *  still shown (a subscribed channel must not vanish) but must not look
+   *  identical to a healthy one. */
+  degraded?: boolean
+  degradedReason?: string
 }
 
 async function handleListChannels(deps: ChannelToolDeps, locationFilter?: ChannelLocation): Promise<string> {
@@ -147,11 +152,14 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
       sessionCount?: number
       messageCount?: number
     }> = []
+    let transportUnreachable = false
     try {
       rows = await transport.listChannels({})
     } catch {
-      // Transport unreachable: skip; we still surface its subscribed
-      // channels below so the caller doesn't "lose" a channel.
+      // Transport unreachable: still surface its subscribed channels below so
+      // the caller doesn't "lose" a channel — but mark them degraded so
+      // list_channels cannot look identical to a healthy row.
+      transportUnreachable = true
     }
     for (const c of rows) {
       const key = `${transport.source}::${c.name}`
@@ -167,7 +175,32 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
         subscribed: sub !== undefined,
         isActive: active?.name === c.name && active?.location === transport.source,
         watching: sub?.watching === true,
+        ...(transportUnreachable ? { degraded: true, degradedReason: 'transport unreachable' } : {}),
       })
+    }
+    // When listChannels threw we have no rows from the transport — still mark
+    // the subscribed fallbacks below (handled in the next loop via a set).
+    if (transportUnreachable) {
+      for (const sub of subscribed) {
+        if (sub.location !== transport.source) continue
+        if (locationFilter && sub.location !== locationFilter) continue
+        const key = `${sub.location}::${sub.name}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        channels.push({
+          name: sub.name,
+          location: sub.location,
+          source: sub.source,
+          subscriberCount: 1,
+          sessionCount: 1,
+          messageCount: undefined,
+          subscribed: true,
+          isActive: active?.name === sub.name && active?.location === sub.location,
+          watching: sub.watching,
+          degraded: true,
+          degradedReason: 'transport unreachable',
+        })
+      }
     }
   }
 
@@ -201,9 +234,13 @@ async function handleListChannels(deps: ChannelToolDeps, locationFilter?: Channe
 
 /** Non-local locations the session could plausibly have meant. Read from the
  *  CONFIG, not the router: the router only holds locations that have attached,
- *  and a fresh orchestrator's remotes are still dormant. */
+ *  and a fresh orchestrator's remotes are still dormant.
+ *
+ *  Derived from the location *name*, not the forgeable `isLocal` flag. A
+ *  `{name:'flatout', isLocal:true}` entry would otherwise disarm the
+ *  ambiguous-watch guard entirely. */
 function remoteLocationNames(deps: ChannelToolDeps): string[] {
-  return deps.locations.filter((l) => !l.isLocal).map((l) => l.name)
+  return deps.locations.filter((l) => l.name !== LOCAL_LOCATION).map((l) => l.name)
 }
 
 async function handleJoinChannel(

@@ -176,18 +176,18 @@ describe('ActiveContext', () => {
 
   describe('getChannelLocation', () => {
     it('returns the location for a subscription at an arbitrary (non-local, non-remote) name', () => {
-      ctx.joinChannel('dev', 'cccollab.json', 'flatout')
-      expect(ctx.getChannelLocation('dev')).toBe('flatout')
+      ctx.joinChannel('dev', 'cccollab.json', 'acme')
+      expect(ctx.getChannelLocation('dev')).toBe('acme')
     })
 
     it('prefers local on a tie with another location', () => {
-      ctx.joinChannel('dev', 'manual', 'flatout')
+      ctx.joinChannel('dev', 'manual', 'acme')
       ctx.joinChannel('dev', 'manual', 'local')
       expect(ctx.getChannelLocation('dev')).toBe('local')
     })
 
     it('returns undefined when the channel is not subscribed anywhere', () => {
-      ctx.joinChannel('dev', 'manual', 'flatout')
+      ctx.joinChannel('dev', 'manual', 'acme')
       expect(ctx.getChannelLocation('other')).toBeUndefined()
     })
   })
@@ -258,13 +258,16 @@ describe('ActiveContext', () => {
     // true for a remote "default"). `location` is now required; the
     // per-location behavior is covered by 'watching is per channel+location'.
 
-    // The "watch is local-only" rule is a real invariant, not a tool-layer
-    // policy: a watched remote subscription would report watching:true while
-    // silently receiving nothing. Enforce it at the state layer so no future
-    // caller of joinChannel can bypass the tool's guard.
-    it('a non-local channel can still be joined normally', () => {
-      expect(() => ctx.joinChannel('kai', 'manual', 'flatout')).not.toThrow()
-      expect(ctx.isChannelWatched('kai', 'flatout')).toBe(false)
+    // The tool layer refuses `watch: true` on a remote (and on an unstated
+    // location when remotes exist). The state layer itself does NOT enforce
+    // that — `joinChannel('kai','manual','flatout', true)` succeeds and
+    // reports watching:true. That is intentional for KAI-413 (remote watch);
+    // this test pins the state-layer fact so nobody re-claims it is enforced
+    // here after reading the older comment.
+    it('state layer allows watch on a non-local channel (tool layer refuses it)', () => {
+      expect(() => ctx.joinChannel('kai', 'manual', 'flatout', true)).not.toThrow()
+      expect(ctx.isChannelWatched('kai', 'flatout')).toBe(true)
+      expect(ctx.getSubscribedChannels().find((c) => c.name === 'kai' && c.location === 'flatout')?.watching).toBe(true)
     })
   })
 })

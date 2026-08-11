@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kollaborativeai/cccollab/security/advisories/new
+    about: Do not open a public issue. Report privately here — see SECURITY.md for scope.
+  - name: Claude Code itself
+    url: https://github.com/anthropics/claude-code/issues
+    about: Bugs in Claude Code, the channel protocol, or the plugin system belong to Anthropic.

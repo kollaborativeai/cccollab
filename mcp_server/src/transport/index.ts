@@ -4,7 +4,7 @@
  * The local stdio MCP server always spawns a local broker transport at
  * the reserved location name `"local"`. CCC-3 adds an arbitrary number
  * of named non-local locations, each wrapping its own Convex deployment
- * (e.g. `"flatout"`, `"kollaborative"`). Channels and the topics they
+ * (e.g. `"acme"`, `"staging"`). Channels and the topics they
  * contain are namespaced by their location: a "dev" channel at one
  * location and a "dev" channel at another location are two distinct
  * channels. Each channel-addressed or topic-addressed tool call routes
@@ -29,11 +29,21 @@ export const LOCAL_LOCATION: ChannelLocation = 'local'
 
 /** Subset of session attributes that crosses transport boundaries. */
 export interface TransportSession {
+  /** Stable per-registration id, when the transport's backend issues one
+   *  (remote transports do; the local broker does not). Used to tell two
+   *  registrations with the same display name apart, and to dedupe a
+   *  session's rows across transports without collapsing distinct
+   *  registrations into one. */
+  id?: string
   name: string
   objective?: string
   machine?: string
   channels: string[]
   registeredAt?: string
+  /** ISO timestamp of the last liveness signal received for this
+   *  registration (e.g. a heartbeat). Absent when the backend doesn't
+   *  report it yet, in which case liveness is unknown rather than false. */
+  lastSeen?: string
 }
 
 /** Channel summary as surfaced by `list_channels`. */

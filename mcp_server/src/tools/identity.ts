@@ -9,8 +9,12 @@ import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
+import { driftWarning, type VersionState } from '../plugin-version.js'
 
 export interface IdentityToolDeps {
+  /** Result of the plugin/binary version handshake, computed once at startup.
+   *  Optional so unit tests that do not exercise it can omit it. */
+  versionState?: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -40,10 +44,14 @@ export interface IdentityToolDeps {
    *  traffic. `connected` answers "is a watch in effect RIGHT NOW";
    *  `mayHaveMissedMessages` answers the question a socket cannot: "is there a
    *  hole in what I heard?". Both are needed: an open socket says nothing about
-   *  what was published while it was closed. Optional: absent means unknown,
-   *  which reports as not-active (under-claiming is recoverable; over-claiming
-   *  is the bug). */
-  localEventStream?: () => { connected: boolean; mayHaveMissedMessages: boolean }
+   *  what was published while it was closed.
+   *
+   *  Required (not optional): a missing dep used to fall back to
+   *  `{connected:false, mayHaveMissedMessages:false}`, which positively asserts
+   *  "your history is complete" when the code has no idea. Production always
+   *  supplies this (`server.ts`); tests must too. The full sum-type with an
+   *  `unknown` member is a product decision (whoami JSON contract). */
+  localEventStream: () => { connected: boolean; mayHaveMissedMessages: boolean }
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -123,7 +131,18 @@ export async function handleIdentityTool(
         }
       }
 
-      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
+      // Drift is reported on `introduce` because it is the one tool every
+      // session must call before any other, which makes it the only reliable
+      // place to tell the model that the instructions it is following may not
+      // describe this server. Attached to the result rather than logged: the
+      // model reads results, and stderr goes to a file nobody opens mid-session.
+      const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+
+      return JSON.stringify({
+        name: displayName,
+        ...(objective ? { objective } : {}),
+        ...(versionWarning ? { warning: versionWarning } : {}),
+      })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
@@ -140,7 +159,7 @@ export async function handleIdentityTool(
       // `watching: true` that ignores that is exactly the confidently-blind
       // report KAI-414 exists to eliminate. Unknown liveness reads as NOT
       // active: under-claiming is recoverable, over-claiming is the bug.
-      const stream = deps.localEventStream?.() ?? { connected: false, mayHaveMissedMessages: false }
+      const stream = deps.localEventStream()
       const localEventsLive = stream.connected
       const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
         name: c.name,
@@ -178,6 +197,15 @@ export async function handleIdentityTool(
         // oracle — see KAI-414.
         eventStream: { connected: stream.connected, mayHaveMissedMessages: stream.mayHaveMissedMessages },
         locations: locationStates,
+        ...(deps.versionState
+          ? {
+              versions: {
+                server: deps.versionState.serverVersion,
+                ...(deps.versionState.pluginVersion ? { skill: deps.versionState.pluginVersion } : {}),
+                status: deps.versionState.status,
+              },
+            }
+          : {}),
       })
     }
     case 'authenticate': {

@@ -408,7 +408,7 @@ describe('Channel Tools', () => {
           Promise.resolve({
             channels: [
               { name: 'cccollab', subscriberCount: 1 },
-              { name: 'flatoutsolutions-ai', subscriberCount: 3 },
+              { name: 'acme-ai', subscriberCount: 3 },
             ],
           }),
       })
@@ -428,7 +428,7 @@ describe('Channel Tools', () => {
             watching: false,
           },
           {
-            name: 'flatoutsolutions-ai',
+            name: 'acme-ai',
             location: 'local',
             source: null,
             subscriberCount: 3,
@@ -599,6 +599,8 @@ describe('Channel Tools', () => {
       deps.context.joinChannel('default', 'fallback', 'local')
       deps.context.joinChannel('project_x', 'manual', 'local')
       const result = JSON.parse(await handleChannelTool('list_channels', {}, deps))
+      // Still surfaces subscribed channels so they do not vanish — but marks
+      // them degraded so an unreachable transport is not identical to healthy.
       expect(result).toEqual({
         activeChannel: { name: 'default', location: 'local' },
         channels: [
@@ -611,6 +613,8 @@ describe('Channel Tools', () => {
             subscribed: true,
             isActive: true,
             watching: false,
+            degraded: true,
+            degradedReason: 'transport unreachable',
           },
           {
             name: 'project_x',
@@ -621,6 +625,8 @@ describe('Channel Tools', () => {
             subscribed: true,
             isActive: false,
             watching: false,
+            degraded: true,
+            degradedReason: 'transport unreachable',
           },
         ],
       })

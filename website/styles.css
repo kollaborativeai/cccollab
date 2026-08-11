@@ -1,0 +1,714 @@
+/*
+ * cccollab.dev
+ *
+ * Hand-written CSS, no build step and no dependencies. The site is two static
+ * pages; a bundler would add dependency surface for no gain, and keeping
+ * `website/` out of the root lockfile means website work can never trigger an
+ * npm release of the MCP server (see the note on the release filter in
+ * .github/workflows/ci.yml).
+ */
+
+:root {
+  --bg: #0e0f11;
+  --bg-panel: #141517;
+  --fg: #ededea;
+  --fg-dim: rgba(237, 237, 234, 0.54);
+  --fg-faint: rgba(237, 237, 234, 0.32);
+  --line: rgba(255, 255, 255, 0.09);
+  --green: oklch(0.78 0.14 165);
+  --violet: oklch(0.78 0.14 300);
+  --amber: oklch(0.82 0.13 75);
+  --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  --sans: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--fg);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--green);
+}
+
+/* Every clickable element gets a pointer cursor. Declared once, centrally,
+   rather than per element. */
+a[href],
+button:not(:disabled),
+summary,
+label[for],
+[role='button']:not([aria-disabled='true']) {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+
+/* ---- layout primitives ------------------------------------------------- */
+
+.fx {
+  display: flex;
+}
+
+.col {
+  flex-direction: column;
+}
+
+.ac {
+  align-items: center;
+}
+
+.jb {
+  justify-content: space-between;
+}
+
+.gap8 {
+  gap: 8px;
+}
+.gap10 {
+  gap: 10px;
+}
+.gap12 {
+  gap: 12px;
+}
+.gap16 {
+  gap: 16px;
+}
+.gap18 {
+  gap: 18px;
+}
+.gap20 {
+  gap: 20px;
+}
+.gap22 {
+  gap: 22px;
+}
+.gap24 {
+  gap: 24px;
+}
+.gap26 {
+  gap: 26px;
+}
+.gap28 {
+  gap: 28px;
+}
+
+.page {
+  min-height: 100vh;
+  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.055) 1px, transparent 0);
+  background-size: 34px 34px;
+}
+
+.shell {
+  max-width: 1000px;
+  margin: 0 auto;
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  background: linear-gradient(to bottom, rgba(14, 15, 17, 0.72), rgba(14, 15, 17, 0.94));
+}
+
+.pad {
+  padding-left: 56px;
+  padding-right: 56px;
+}
+
+.rule {
+  border-top: 1px solid var(--line);
+}
+
+/* ---- type -------------------------------------------------------------- */
+
+.mono {
+  font-family: var(--mono);
+}
+
+.label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.step {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+.group {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--green);
+  padding-top: 4px;
+}
+
+.h1 {
+  font-size: 58px;
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  font-weight: 700;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.h2 {
+  font-size: 26px;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+  font-weight: 700;
+  margin: 0;
+}
+
+.lead {
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  margin: 0;
+  max-width: 56ch;
+  text-wrap: pretty;
+}
+
+.body {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--fg-dim);
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.dim {
+  color: var(--fg-faint);
+}
+
+.g {
+  color: var(--green);
+}
+
+.in {
+  color: var(--violet);
+}
+
+/* ---- nav --------------------------------------------------------------- */
+
+.nav {
+  padding-top: 22px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+/* ---- commands ---------------------------------------------------------- */
+
+.cmd {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  max-width: 720px;
+}
+
+.cmd:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cmd-text {
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.prompt {
+  color: var(--green);
+  user-select: none;
+}
+
+.note {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.75;
+  color: var(--fg-faint);
+  max-width: 68ch;
+}
+
+.alt {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 2;
+  color: var(--fg-faint);
+}
+
+.alt .prompt {
+  color: rgba(255, 255, 255, 0.22);
+}
+
+.say {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-dim);
+  border-left: 2px solid var(--line);
+  padding: 3px 0 3px 14px;
+}
+
+/* ---- terminal demo ----------------------------------------------------- */
+
+.demo4 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.term {
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.95;
+}
+
+.term-bar {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 13px;
+  font-size: 9.5px;
+  /* 0.12em, not the 0.28em used elsewhere: these bars now carry the joined
+     topics, and the longest runs ~55 characters. Wider tracking overflows
+     the half-width panel. */
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.term-body {
+  padding: 13px 15px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* No `white-space: pre-wrap` here, deliberately. These divs hold hand-written
+   terminal lines, and prettier rewraps any long one across several source lines.
+   Under pre-wrap that source indentation renders as literal leading whitespace,
+   which visibly shunted one line halfway across its panel. Indent with &nbsp;
+   instead, so formatting and rendering stay independent. */
+.ln {
+  opacity: 0;
+  animation: rise 0.4s ease-out forwards;
+}
+
+.a1 {
+  animation-delay: 0.15s;
+}
+.a2 {
+  animation-delay: 0.45s;
+}
+.a3 {
+  animation-delay: 0.8s;
+}
+.a4 {
+  animation-delay: 1.15s;
+}
+.a5 {
+  animation-delay: 1.5s;
+}
+.a6 {
+  animation-delay: 1.9s;
+}
+.a7 {
+  animation-delay: 2.25s;
+}
+.a8 {
+  animation-delay: 2.6s;
+}
+.a9 {
+  animation-delay: 2.9s;
+}
+.a10 {
+  animation-delay: 3.3s;
+}
+.a11 {
+  animation-delay: 3.6s;
+}
+.a12 {
+  animation-delay: 4s;
+}
+.a13 {
+  animation-delay: 4.3s;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ln {
+    opacity: 1;
+    animation: none;
+  }
+}
+
+/* ---- three-up cells ---------------------------------------------------- */
+
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.cell {
+  padding: 34px 30px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cell:last-child {
+  border-right: none;
+}
+
+.num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--green);
+  letter-spacing: 0.1em;
+}
+
+/* ---- who it's for ------------------------------------------------------ */
+
+.fortwo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.forcell {
+  background: var(--bg);
+  padding: 28px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.forhead {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+}
+
+.yes {
+  color: var(--green);
+}
+
+.no {
+  color: var(--fg-faint);
+}
+
+.li {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+  padding-left: 16px;
+  position: relative;
+}
+
+.li::before {
+  content: '\2014';
+  position: absolute;
+  left: 0;
+  color: var(--fg-faint);
+}
+
+/* ---- comparison table -------------------------------------------------- */
+
+.cmp {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.cmp th {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  text-align: left;
+  font-weight: 400;
+  padding: 0 16px 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.cmp th:last-child {
+  color: var(--green);
+  padding-right: 0;
+}
+
+.cmp td {
+  padding: 14px 16px 14px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+
+.cmp td:last-child {
+  color: var(--fg);
+  padding-right: 0;
+}
+
+.cmp td:first-child {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint);
+  width: 17%;
+  text-transform: uppercase;
+}
+
+.cmp tr:last-child td {
+  border-bottom: none;
+}
+
+/* ---- docs -------------------------------------------------------------- */
+
+.toc {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.toc a {
+  background: var(--bg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toc a:hover {
+  background: var(--bg-panel);
+}
+
+.toc-t {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.toc-d {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  line-height: 1.4;
+}
+
+.tools {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.tools td {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.tools tr:last-child td {
+  border-bottom: none;
+}
+
+.tools td:first-child {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--fg);
+  width: 34%;
+  padding-right: 24px;
+}
+
+.tools td:last-child {
+  color: var(--fg-dim);
+  line-height: 1.55;
+}
+
+.flow {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.flow td {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  color: var(--fg-dim);
+  line-height: 1.55;
+}
+
+.flow tr:last-child td {
+  border-bottom: none;
+}
+
+.flow td:first-child {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--green);
+  width: 26%;
+  padding-right: 22px;
+}
+
+.warn {
+  border-left: 2px solid var(--amber);
+  padding: 2px 0 2px 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  max-width: 66ch;
+}
+
+.good {
+  border-left: 2px solid var(--green);
+  padding: 2px 0 2px 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  max-width: 66ch;
+}
+
+.fix {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.fix:last-child {
+  border-bottom: none;
+}
+
+.sym {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.cause {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  max-width: 68ch;
+}
+
+.cta {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 3px;
+  align-self: flex-start;
+}
+
+.cta:hover {
+  border-bottom-color: var(--green);
+}
+
+/* ---- responsive -------------------------------------------------------- */
+
+@media (max-width: 820px) {
+  .pad {
+    padding-left: 26px;
+    padding-right: 26px;
+  }
+
+  .h1 {
+    font-size: 36px;
+  }
+
+  .cmd {
+    font-size: 12px;
+  }
+
+  .grid3 {
+    grid-template-columns: 1fr;
+  }
+
+  .cell {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .demo4 {
+    grid-template-columns: 1fr;
+  }
+
+  .fortwo {
+    grid-template-columns: 1fr;
+  }
+
+  .cmp {
+    font-size: 12px;
+  }
+
+  .cmp td:first-child {
+    width: 22%;
+  }
+
+  .toc {
+    grid-template-columns: 1fr;
+  }
+
+  .tools td:first-child {
+    width: 42%;
+  }
+
+  .flow td:first-child {
+    width: 34%;
+  }
+}

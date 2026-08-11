@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
+import { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import * as z from 'zod'
 
-import { CCCOLLAB_RUN_DIR } from './constants.js'
+import { CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager } from './session.js'
@@ -23,6 +23,8 @@ import { AttachDiagnostics } from './transport/diagnostics.js'
 import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
+import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
+import { ownVersion } from './own-version.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
 import { handleListOrganizations } from './tools/organizations.js'
@@ -91,6 +93,23 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   )
 
   const messageBus = new MessageBus(mcp.server)
+  // The stream_gap WARNING (and every other push) rides MessageBus.push →
+  // mcp.notification. Failure emits `notify:error`. Without a production
+  // subscriber that event is pure void — the one mechanism that tells a user
+  // they have a hole can fail without a trace. Log it.
+  messageBus.on('notify:error', (payload: { err?: unknown; source?: string }) => {
+    const err = payload?.err
+    const detail = err instanceof Error ? err.message : String(err ?? 'unknown')
+    try {
+      mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
+      appendFileSync(
+        join(CCCOLLAB_LOGS_DIR, 'debug.log'),
+        `[${new Date().toISOString()}] message-bus notify:error source=${payload?.source ?? '?'} ${detail}\n`,
+      )
+    } catch {
+      /* never let a log failure take down the bus */
+    }
+  })
   const listener = new BrokerEventListener({
     brokerUrl: `http://127.0.0.1:${brokerPort}`,
     messageBus,
@@ -288,7 +307,28 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     )
   }
 
+  // The plugin that spawned us ships the skill telling the model how to call
+  // these tools. Read once here rather than per call: CLAUDE_PLUGIN_ROOT is
+  // fixed for the life of the process, and a drifted skill is a property of
+  // this session, not of any one request.
+  const versionState = inspectVersions({
+    serverVersion: ownVersion(),
+    env,
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf-8')
+      } catch {
+        return undefined
+      }
+    },
+  })
+  const startupWarning = driftWarning(versionState)
+  if (startupWarning) {
+    for (const line of startupWarning.split('\n')) console.error(`[cccollab] ${line}`)
+  }
+
   registerTools(mcp, {
+    versionState,
     session,
     context,
     router,
@@ -386,6 +426,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
 }
 
 export interface ToolDeps {
+  /** Plugin/binary version handshake, computed once at startup. */
+  versionState: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -534,7 +576,7 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source, watching, watchingActive}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). On each subscribed channel, `watching` is the channel-wide watch you REQUESTED; `watchingActive` is whether it is in effect right now - false when the local event stream is disconnected, i.e. you are subscribed but currently deaf. `eventStream` reports the stream itself: `connected` (hearing traffic now) and `mayHaveMissedMessages` (a gap the broker could not replay - your history has a hole; backfill with read_topic_messages).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source, watching, watchingActive}], eventStream: {connected, mayHaveMissedMessages}, locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). On each subscribed channel, `watching` is the channel-wide watch you REQUESTED; `watchingActive` is whether it is in effect right now - false when the local event stream is disconnected, i.e. you are subscribed but currently deaf. `eventStream` reports the stream itself: `connected` (hearing traffic now) and `mayHaveMissedMessages` (a gap the broker could not replay - your history has a hole; backfill with read_topic_messages on joined topics).',
       inputSchema: {},
     },
     async () => {
@@ -642,7 +684,12 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
         // Deliberately NOT `.default('local')`: zod would fill it in before the
         // handler runs, and the handler must be able to tell "the caller chose
         // local" from "the caller said nothing" to refuse an ambiguous watch.
-        location: z.string().optional().describe('Location name. Defaults to "local" (the in-process broker).'),
+        location: z
+          .string()
+          .optional()
+          .describe(
+            'Location name. Omit to default to local for ordinary joins. For `watch: true`, location is REQUIRED whenever any remote is configured — an unstated location is refused (not defaulted) so an orchestrator cannot silently watch a brand-new empty local channel.',
+          ),
         watch: z
           .boolean()
           .optional()
@@ -876,7 +923,7 @@ export function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_sessions',
     {
       description:
-        'Return visible sessions as JSON array: [{name, objective?, channels: [{name, location}], registeredAt}]. Unions across every enabled transport, tagging each channel by the transport that reported it.',
+        'Return visible sessions as JSON array: [{id?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide). Registrations with a known-stale `lastSeen` are dropped.',
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
         location: z

@@ -152,8 +152,8 @@ function makeRemoteDeps(): {
   const session = new SessionManager({ username: 'tester', cwd: '/tmp/p' })
   session.setName('architect')
   const context = new ActiveContext()
-  context.joinChannel('dev', 'cccollab.json', 'flatout')
-  const transport = new FakeRemoteTransport('flatout')
+  context.joinChannel('dev', 'cccollab.json', 'acme')
+  const transport = new FakeRemoteTransport('acme')
   const router = new TransportRouter([new LocalTransport(0), transport])
   const bus = {
     push: vi.fn(async () => {}),
@@ -173,19 +173,19 @@ describe('tool-layer remote topic subscriptions', () => {
   it('start_topic wires a topic-message subscription on the remote transport', async () => {
     const { deps, transport, unsubscribes } = makeRemoteDeps()
     const res = JSON.parse(
-      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
+      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'acme' }, deps),
     )
     expect(res.id).toBeDefined()
     expect(transport.subscribedTopics.has(res.id)).toBe(true)
     const sub = transport.subscribedTopics.get(res.id)!
     expect(sub.channelName).toBe('dev')
-    expect(unsubscribes.has(`flatout::${res.id}`)).toBe(true)
+    expect(unsubscribes.has(`acme::${res.id}`)).toBe(true)
   })
 
   it('archive_topic keeps the archiver joined and subscribed (KAI-373)', async () => {
     const { deps, transport, unsubscribes } = makeRemoteDeps()
     const startRes = JSON.parse(
-      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
+      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'acme' }, deps),
     )
     const topicId = startRes.id as string
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(false)
@@ -197,7 +197,7 @@ describe('tool-layer remote topic subscriptions', () => {
     // receiving the topic's own unarchive event (KAI-373).
     expect(deps.context.isTopicJoined(topicId)).toBe(true)
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(false)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
+    expect(unsubscribes.has(`acme::${topicId}`)).toBe(true)
   })
 
   it('unarchive_topic re-establishes membership and subscription on the remote transport (KAI-373)', async () => {
@@ -218,13 +218,13 @@ describe('tool-layer remote topic subscriptions', () => {
     // The unarchiver is joined again and re-subscribed to live updates.
     expect(deps.context.isTopicJoined(topicId)).toBe(true)
     expect(transport.subscribedTopics.has(topicId)).toBe(true)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
+    expect(unsubscribes.has(`acme::${topicId}`)).toBe(true)
   })
 
   it('leave_topic tears down the topic subscription on the remote transport', async () => {
     const { deps, transport, unsubscribes } = makeRemoteDeps()
     const startRes = JSON.parse(
-      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'flatout' }, deps),
+      await handleTopicTool('start_topic', { topic: 'cross-machine', channel: 'dev', location: 'acme' }, deps),
     )
     const topicId = startRes.id as string
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(false)
@@ -232,7 +232,7 @@ describe('tool-layer remote topic subscriptions', () => {
     const leaveRes = JSON.parse(await handleTopicTool('leave_topic', {}, deps))
     expect(leaveRes.id).toBe(topicId)
     expect(transport.subscribedTopics.get(topicId)!.unsubscribeCalled).toBe(true)
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(false)
+    expect(unsubscribes.has(`acme::${topicId}`)).toBe(false)
   })
 
   it('join_topic wires a subscription and primes the cursor past the returned history', async () => {
@@ -262,7 +262,7 @@ describe('tool-layer remote topic subscriptions', () => {
     expect(transport.subscribedTopics.has(topicId)).toBe(true)
     const sub = transport.subscribedTopics.get(topicId)!
     expect(sub.sinceTs).toBe(Date.parse('2026-04-20T00:00:01.000Z'))
-    expect(unsubscribes.has(`flatout::${topicId}`)).toBe(true)
+    expect(unsubscribes.has(`acme::${topicId}`)).toBe(true)
   })
 })
 
@@ -294,7 +294,7 @@ describe('tool-layer remote list_topics (bug A)', () => {
       id: 'abcdefghij0123456789',
       name: 'planning',
       channel: 'dev',
-      location: 'flatout',
+      location: 'acme',
     })
   })
 })
@@ -308,7 +308,7 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
     const session = new SessionManager({ username: 'tester', cwd: '/tmp/p' })
     session.setName('architect')
     const context = new ActiveContext()
-    const transport = new FakeRemoteTransport('flatout')
+    const transport = new FakeRemoteTransport('acme')
     const router = new TransportRouter([new LocalTransport(0), transport])
     const channelUnsubs = new Map<string, () => void>()
     const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
@@ -328,21 +328,21 @@ describe('tool-layer remote channel subscriptions (bug B)', () => {
 
   it('join_channel wires a channel-broadcast subscription on the remote transport', async () => {
     const { deps, transport, channelUnsubs } = makeChannelDeps()
-    const res = JSON.parse(await handleChannelTool('join_channel', { name: 'dev', location: 'flatout' }, deps))
+    const res = JSON.parse(await handleChannelTool('join_channel', { name: 'dev', location: 'acme' }, deps))
     expect(res.channel).toBe('dev')
     expect(transport.subscribedChannels.has('dev')).toBe(true)
-    expect(channelUnsubs.has('flatout::dev')).toBe(true)
+    expect(channelUnsubs.has('acme::dev')).toBe(true)
   })
 
   it('leave_channel tears down the channel-broadcast subscription', async () => {
     const { deps, transport, channelUnsubs } = makeChannelDeps()
-    await handleChannelTool('join_channel', { name: 'dev', location: 'flatout' }, deps)
+    await handleChannelTool('join_channel', { name: 'dev', location: 'acme' }, deps)
     const sub = transport.subscribedChannels.get('dev')!
     expect(sub.unsubscribeCalled).toBe(false)
 
-    const res = JSON.parse(await handleChannelTool('leave_channel', { name: 'dev', location: 'flatout' }, deps))
+    const res = JSON.parse(await handleChannelTool('leave_channel', { name: 'dev', location: 'acme' }, deps))
     expect(res.removed).toBe(true)
     expect(sub.unsubscribeCalled).toBe(true)
-    expect(channelUnsubs.has('flatout::dev')).toBe(false)
+    expect(channelUnsubs.has('acme::dev')).toBe(false)
   })
 })

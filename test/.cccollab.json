@@ -8,8 +8,8 @@
         }
       }
     },
-    "flatout-dev": {
-      "url": "https://wonderful-narwhal-409.convex.cloud",
+    "acme-dev": {
+      "url": "https://example-deployment-123.convex.cloud",
       "channels": {
         "test-remote": {}
       }
