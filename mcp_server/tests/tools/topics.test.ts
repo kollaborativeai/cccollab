@@ -556,6 +556,7 @@ describe('Topic Tools', () => {
         channels?: string[]
         registeredAt?: string
         lastSeen?: string
+        self?: boolean
       }>,
     ) {
       return {
@@ -626,6 +627,89 @@ describe('Topic Tools', () => {
         const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
         expect(result).toHaveLength(1)
         expect(result[0]).toMatchObject({ id: 'session_fresh', name: 'active' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // C1 (KAI-516 review): `self` is the only merge key that spans
+    // transports, so the caller's local and remote rows become ONE entry
+    // carrying ONE lastSeen — the newest across them. The local broker
+    // never reports lastSeen at all, so that single value is whatever the
+    // remote said, and a stale remote verdict then evicts the whole entry,
+    // the caller's local memberships included. Trigger in the field: laptop
+    // asleep for an hour, reopen, ask who's online, and you are in nothing.
+    it("C1: keeps the caller's own entry (and its local channels) when a stale remote heartbeat merges into it", async () => {
+      const now = Date.parse('2026-07-24T12:00:00Z')
+      vi.useFakeTimers()
+      vi.setSystemTime(now)
+      try {
+        const localTransport = makeRemoteTransportWithSessions([
+          // The local broker emits no `lastSeen` — grep it: the field
+          // never appears in src/transport/local.ts.
+          { name: 'me', channels: ['kai'], registeredAt: '2026-07-01T00:00:00Z', self: true },
+        ])
+        ;(localTransport as { source: string }).source = 'local'
+        const remoteTransport = makeRemoteTransportWithSessions([
+          {
+            id: 'session_own',
+            name: 'me',
+            channels: ['product'],
+            registeredAt: '2026-07-01T00:00:00Z',
+            lastSeen: new Date(now - 10 * 60_000).toISOString(), // past SESSION_STALE_MS
+            self: true,
+          },
+        ])
+        const context = new ActiveContext()
+        context.joinChannel('kai', 'manual', 'local')
+        context.joinChannel('product', 'manual', 'remote')
+        const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+        session.setName('me')
+        const deps: TopicToolDeps = {
+          session,
+          context,
+          router: new TransportRouter([localTransport, remoteTransport]),
+        }
+
+        const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+
+        expect(result).toHaveLength(1)
+        expect(result[0].channels).toEqual([
+          { name: 'kai', location: 'local' },
+          { name: 'product', location: 'remote' },
+        ])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // C1's boundary: the exemption is for the caller only. A peer whose
+    // heartbeat went stale must still be dropped, or KAI-515's whole
+    // filter is dead.
+    it('C1: still drops a stale PEER — the liveness exemption covers the caller only', async () => {
+      const now = Date.parse('2026-07-24T12:00:00Z')
+      vi.useFakeTimers()
+      vi.setSystemTime(now)
+      try {
+        const remoteTransport = makeRemoteTransportWithSessions([
+          {
+            id: 'session_own',
+            name: 'me',
+            channels: ['product'],
+            registeredAt: '2026-07-01T00:00:00Z',
+            lastSeen: new Date(now - 10 * 60_000).toISOString(),
+            self: true,
+          },
+          {
+            id: 'session_ghost',
+            name: 'ghost',
+            channels: ['product'],
+            registeredAt: '2026-07-01T00:00:00Z',
+            lastSeen: new Date(now - 10 * 60_000).toISOString(),
+          },
+        ])
+        const result = JSON.parse(await handleTopicTool('list_sessions', {}, makeRemoteDeps(remoteTransport)))
+        expect(result.map((s: { name: string }) => s.name)).toEqual(['me'])
       } finally {
         vi.useRealTimers()
       }

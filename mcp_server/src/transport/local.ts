@@ -31,7 +31,23 @@ export class LocalTransport implements Transport {
    *  `listSessions`. */
   private ownSessionName: string | null = null
 
+  /** Why the last `introduce` failed, or null when the last one succeeded
+   *  (or none has run). Read by `whoami` via the same duck-typed
+   *  `degradation` surface the remote transport exposes: `server.ts`
+   *  swallows the startup introduce, and since KAI-516 this transport's
+   *  `self` flag — and therefore whether `list_sessions` reports one
+   *  session or two — depends on it. A swallowed failure with no surface
+   *  is a silent wrong answer. */
+  private introduceFailureReason: string | null = null
+
   constructor(private readonly brokerPort: number) {}
+
+  /** Human-readable reason this transport is impaired, or null when
+   *  healthy. Mirrors `RemoteTransport.degradation` so `whoami`'s
+   *  per-location status needs no special case for the local broker. */
+  get degradation(): string | null {
+    return this.introduceFailureReason
+  }
 
   /** Local broker emits topic ids as RFC 4122 UUIDs. */
   hasTopic(topicId: string): boolean {
@@ -40,13 +56,36 @@ export class LocalTransport implements Transport {
 
   // ─── Identity ─────────────────────────────────────────────────────────
   async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
-    // The local broker is single-tenant; organizationId is intentionally ignored.
-    await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
+    // Claim the identity BEFORE the round-trip, not after it. The broker is
+    // single-tenant and keys sessions by name, so the name is ours the
+    // moment we choose it — the POST only publishes it. Assigning after the
+    // await made a failed introduce permanent: both call sites swallow the
+    // throw (`server.ts`'s startup introduce, `tools/identity.ts`'s fan-out),
+    // nothing else ever assigns this field, and the broker creates the row
+    // implicitly on the next join anyway — leaving a row that IS ours which
+    // we would never flag, i.e. the phantom duplicate `mergeSessions` is
+    // built to prevent, for the life of the process.
     this.ownSessionName = args.sessionName
+    // The local broker is single-tenant; organizationId is intentionally ignored.
+    try {
+      await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
+      this.introduceFailureReason = null
+    } catch (err) {
+      this.introduceFailureReason = `Local introduce failed: ${err instanceof Error ? err.message : String(err)}`
+      throw err
+    }
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────
   async joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }> {
+    // A join registers us with the broker just as surely as an introduce
+    // does (`ensureSession` runs on the broker's join path), and every
+    // caller passes its own `session.displayName`. `server.ts` only
+    // introduces when `session.hasName()`, while `displayName` falls back
+    // to the username — so an un-named session that auto-joins a configured
+    // channel gets a broker row with no introduce anywhere in the sequence.
+    // Record the identity here too, or that row lists as a stranger.
+    this.ownSessionName = args.sessionName
     const body = await this.brokerPost<{ subscriberCount?: number }>('/channels/join', {
       sessionId: args.sessionName,
       channel: args.channel,

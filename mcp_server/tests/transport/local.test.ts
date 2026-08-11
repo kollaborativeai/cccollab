@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -151,6 +151,70 @@ describe('LocalTransport: message history reads', () => {
       const rows = await new LocalTransport(port).listSessions({ channel: 'lt-ch-anon' })
       expect(rows).not.toHaveLength(0)
       expect(rows.some((s) => s.self === true)).toBe(false)
+    })
+
+    // C2 (KAI-516 review): the only assignment to `ownSessionName` used to
+    // sit AFTER the awaited POST, and both `introduce` call sites swallow
+    // the throw (server.ts's startup introduce, tools/identity.ts's fan-out).
+    // The broker meanwhile creates the row implicitly on join, so it holds a
+    // row that IS ours which this transport would never flag — a phantom
+    // second peer for one process, for the life of that process.
+    it('C2: flags its own row after a FAILED introduce, once a later join creates the row', async () => {
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      const transport = new LocalTransport(port)
+      await expect(transport.introduce({ sessionName: 'lt-sess-c2' })).rejects.toThrow(/broker unreachable/)
+      vi.unstubAllGlobals()
+
+      // What server.ts does next regardless: auto-join. The broker's
+      // ensureSession() materialises the row here.
+      await transport.joinChannel({ sessionName: 'lt-sess-c2', channel: 'lt-ch-c2' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2' })
+      expect(rows.map((s) => s.name)).toContain('lt-sess-c2')
+      expect(rows.find((s) => s.name === 'lt-sess-c2')?.self).toBe(true)
+    })
+
+    // The same hole reached the other way: `session.displayName` falls back
+    // to the username, and server.ts only introduces when `hasName()`. An
+    // un-named session that auto-joins a configured channel therefore
+    // registers with the broker without any introduce at all.
+    it('C2: adopts the name a channel join registers when introduce never ran', async () => {
+      const transport = new LocalTransport(port)
+      await transport.joinChannel({ sessionName: 'lt-sess-c2-nointro', channel: 'lt-ch-c2-nointro' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2-nointro' })
+      expect(rows.find((s) => s.name === 'lt-sess-c2-nointro')?.self).toBe(true)
+    })
+  })
+
+  // I3 (KAI-516 review): server.ts swallows the startup introduce, and this
+  // PR made `self` depend on it. A failure there must be visible somewhere —
+  // `whoami` reads this getter off every transport in the router.
+  describe('degradation', () => {
+    it('I3: reports a failed introduce, and clears it once one succeeds', async () => {
+      const transport = new LocalTransport(port)
+      expect(transport.degradation).toBeNull()
+
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      await expect(transport.introduce({ sessionName: 'lt-sess-i3' })).rejects.toThrow()
+      vi.unstubAllGlobals()
+
+      expect(transport.degradation).toMatch(/introduce failed/i)
+
+      await transport.introduce({ sessionName: 'lt-sess-i3' })
+      expect(transport.degradation).toBeNull()
     })
   })
 })

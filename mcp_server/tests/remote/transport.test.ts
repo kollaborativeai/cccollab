@@ -854,6 +854,164 @@ describe('RemoteTransport.listSessions', () => {
     expect(transport.enabled).toBe(true)
     expect(transport.degradation).toBeNull()
   })
+
+  // C3 (KAI-516 review): the catch in `listOwnChannelNames` was bare —
+  // no log, no counter, no marker. This diff is the ONLY consumer of
+  // `channels.listForUser`, so if the backend renames or drops it, every
+  // `list_sessions` reports the caller in zero channels forever while
+  // `whoami` shows the location healthy and nothing reaches stderr. Worse
+  // on the scoped path: `[...new Set([...ownChannels, scopedChannel])]`
+  // makes the broken own row byte-identical to a healthy row for someone
+  // genuinely in only that channel, so there is no observable difference
+  // left anywhere.
+  it('C3: logs and records a partial degradation when channels.listForUser is missing from the deployment', async () => {
+    const log: string[] = []
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        throw new SchemaDriftError('Could not find function channels:listForUser on deployment')
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    // The wrong answer this produces is indistinguishable from a right
+    // one, so the log line is the only evidence the operator ever gets.
+    expect(log.filter((l) => /listForUser/i.test(l))).not.toHaveLength(0)
+    // Sticky, and surfaced by whoami: a structural failure does not
+    // resolve itself between calls the way a network blip does.
+    expect(transport.partialDegradation).toMatch(/channel memberships/i)
+    // Still isolated: an enrichment failure must not disable the location.
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+    expect(sessions.map((s) => s.name)).toEqual(['laptop'])
+  })
+
+  it('C3: logs a transient channels.listForUser failure without marking the location degraded', async () => {
+    const log: string[] = []
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') throw new Error('socket hang up')
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    await transport.listSessions({ channel: 'dev' })
+
+    expect(log.filter((l) => /listForUser/i.test(l))).not.toHaveLength(0)
+    // A blip is not a standing capability loss — the next call may well
+    // succeed, so it must not stick to the location's status.
+    expect(transport.partialDegradation).toBeNull()
+    expect(transport.enabled).toBe(true)
+  })
+
+  // I1 (KAI-516 review): `rows.map((r) => r.name)` takes the DISPLAY name
+  // while `scopedChannel` arrives already lowercased by
+  // `normalizeChannelName`, so `new Set([...])` cannot dedupe them and
+  // `mergeSessions`' `${location}::${name}` key keeps both spellings all
+  // the way to the tool output.
+  it('I1: lists a mixed-case channel once on the own row, using the backend normalizedName', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        // What the backend actually returns: `listForUserImpl` maps to
+        // `{_id, name, normalizedName}` — the display name keeps its
+        // original casing, the normalized one is what every other layer
+        // compares against.
+        return [{ _id: 'chan_1', name: 'Backend-Team', normalizedName: 'backend-team' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'backend-team' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels }))).toEqual([
+      { name: 'laptop', channels: ['backend-team'] },
+      { name: 'peer', channels: ['backend-team'] },
+    ])
+  })
+
+  // S1 (KAI-516 review): pinned, not changed. The caller's own row lists
+  // every channel it holds at this location, including ones outside the
+  // requested scope, while peer rows are confined to the scope. That
+  // asymmetry is deliberate (it is the caller's own data, and it is the
+  // only place those memberships are knowable), but it was not stated
+  // anywhere the caller could read it — the `list_sessions` description
+  // promised a plain union. The description now says so; this pins the
+  // behaviour it describes.
+  it('S1: reports the own row unscoped and peer rows scoped on a channel-scoped call', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        return [
+          { _id: 'chan_1', name: 'dev', normalizedName: 'dev' },
+          { _id: 'chan_2', name: 'secret-ops', normalizedName: 'secret-ops' },
+        ]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels }))).toEqual([
+      { name: 'laptop', channels: ['dev', 'secret-ops'] },
+      { name: 'peer', channels: ['dev'] },
+    ])
+  })
 })
 
 describe('RemoteTransport.listTopics', () => {
@@ -1139,6 +1297,67 @@ describe('RemoteTransport heartbeat', () => {
 
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  // I4 (KAI-516 review): the generic branch pushed nothing onto
+  // `recentFailures`, and it never could have mattered if it did —
+  // heartbeats are a minute apart and the failure window is 60s, so a
+  // rolling count can hold at most one. A deployment 5xx, an OCC conflict
+  // on the session doc or a network partition therefore left `enabled:
+  // true` and `degradation: null` forever while liveness silently stopped
+  // being reported: the caller goes stale to every peer, and one stderr
+  // line per tick was the only trace. Counting CONSECUTIVE failures is
+  // what makes a sustained freeze nameable.
+  //
+  // Deliberately NOT a self-disable: the spec above ("does not trip the
+  // degradation circuit when a heartbeat call fails transiently") is
+  // right that a blip must not kill a working transport, and it still
+  // passes. This adds a name for the state, not a kill switch.
+  it('I4: names a sustained heartbeat stall in partialDegradation while leaving the transport enabled', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        throw new Error('deployment returned 502')
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    // Four consecutive misses is still a blip.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 4)
+    expect(transport.partialDegradation).toBeNull()
+
+    // The fifth means our last reported liveness is now SESSION_STALE_MS
+    // old — the point at which `list_sessions` drops a registration.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    expect(transport.partialDegradation).toMatch(/liveness|heartbeat/i)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  it('I4: clears the stall note once a heartbeat succeeds again', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        // Calls 2..6 are five consecutive failed heartbeats; call 7 lands.
+        if (mutationCount <= 6) throw new Error('deployment returned 502')
+        return undefined
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 5)
+    expect(transport.partialDegradation).not.toBeNull()
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    expect(transport.partialDegradation).toBeNull()
   })
 
   it('trips the degradation circuit when a heartbeat call hits an auth error', async () => {

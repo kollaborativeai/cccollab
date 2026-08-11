@@ -117,8 +117,16 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   if (session.hasName()) {
     try {
       await localTransport.introduce({ sessionName: session.displayName, objective: session.getObjective() })
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      // Best-effort, but not silent: since KAI-516 this call is what tells
+      // `list_sessions` which local row is ours, so a swallowed failure
+      // here shows up as the caller listed twice rather than as an error.
+      // The auto-join loop below logs its own failures the same way, and
+      // `whoami` reports the location as degraded via
+      // `LocalTransport.degradation`.
+      console.error(
+        `[cccollab] Local introduce for "${session.displayName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
   }
 
@@ -859,7 +867,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_sessions',
     {
       description:
-        "Return visible sessions as JSON array: [{id?, location?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide); ids are issued per location, so an `id` is only meaningful at its sibling `location` — even when the entry's channels span several. Registrations with a known-stale `lastSeen` are dropped.",
+        "Return visible sessions as JSON array: [{id?, location?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. When `channel` is set, peer rows are limited to that channel; the caller's own row still lists every channel this session holds at each location (own memberships are never a secret from the caller). `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide); ids are issued per location, so an `id` is only meaningful at its sibling `location` — even when the entry's channels span several. Registrations with a known-stale `lastSeen` are dropped (the caller's own entry is never dropped for staleness — this process is alive by definition).",
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
         location: z

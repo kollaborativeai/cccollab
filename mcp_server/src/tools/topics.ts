@@ -1,3 +1,4 @@
+import { SESSION_STALE_MS } from '../constants.js'
 import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
@@ -587,15 +588,6 @@ async function handleUnarchiveTopic(deps: TopicToolDeps, topic: string): Promise
   return JSON.stringify({ id: match.id, name: match.topic, channel: match.channel, location: match.location })
 }
 
-/**
- * A remote session with no fresher liveness signal than this is dropped
- * from `list_sessions` (KAI-515) — a registration that hasn't reported
- * `lastSeen` within 5 heartbeat-ish intervals is presumed dead. Sessions
- * whose transport doesn't report `lastSeen` at all are unaffected: absence
- * means "unknown", not "stale", so they're kept (see the `visible` filter).
- */
-const SESSION_STALE_MS = 5 * 60_000
-
 async function handleListSessions(
   deps: TopicToolDeps,
   channelArg?: string,
@@ -663,6 +655,20 @@ async function handleListSessions(
   // `lastSeen` means the transport hasn't reported liveness yet, which is
   // "unknown", not "dead" — those are kept unfiltered.
   const alive = visible.filter((s) => {
+    // Never our own entry: this process is executing the call, so it is
+    // alive by definition and no backend's opinion outranks that.
+    //
+    // The exemption is load-bearing, not a nicety. `OWN_SESSION_KEY` is
+    // the one key that merges across transports, so our entry carries a
+    // single `lastSeen` — the newest any location reported — while the
+    // local broker reports none at all. One stalled remote heartbeat (a
+    // sleeping laptop, a flaky deployment) would therefore evict the whole
+    // entry, the memberships we hold at every OTHER location included, and
+    // report the caller as being in no channel anywhere. That is exactly
+    // the question KAI-516 exists to answer, failing exactly when the
+    // remote is unreliable. Peers keep the filter: their liveness is
+    // genuinely unknown to us.
+    if (s.self) return true
     if (s.lastSeen === undefined) return true
     const seenAt = Date.parse(s.lastSeen)
     // An unparseable timestamp is "unknown", not "definitely dead" —
@@ -709,6 +715,11 @@ type MergedSession = {
   registeredAt?: string
   lastSeen?: string
   scopedLocations: Set<ChannelLocation>
+  /** True when at least one transport vouched that a contributing row is
+   *  this process's own registration. Derived from the same `self` flag
+   *  the merge key uses, but kept on the entry because the key is gone by
+   *  the time the liveness filter runs. */
+  self: boolean
 }
 
 function mergeSessions(
@@ -781,6 +792,7 @@ function mergeSessions(
       if (r.lastSeen && (!existing.lastSeen || Date.parse(r.lastSeen) > Date.parse(existing.lastSeen))) {
         existing.lastSeen = r.lastSeen
       }
+      if (r.self) existing.self = true
       if (serverScoped) existing.scopedLocations.add(location)
     } else {
       merged.set(key, {
@@ -791,6 +803,7 @@ function mergeSessions(
         registeredAt: r.registeredAt,
         lastSeen: r.lastSeen,
         scopedLocations: serverScoped ? new Set([location]) : new Set(),
+        self: r.self === true,
       })
     }
   }

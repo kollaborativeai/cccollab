@@ -55,7 +55,11 @@ function createMockDeps(): IdentityToolDeps {
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganizationName: () => Promise<string | null>
+    degradation: string | null
+    partialDegradation: string | null
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -222,6 +226,60 @@ describe('Identity Tools', () => {
           enabled: false,
           degradation: 'introduce() failed for "personal": Server Error',
         })
+      })
+
+      // I3 (KAI-516 review): `server.ts` swallows the startup introduce on
+      // the local transport, and this PR made `self` — and therefore
+      // whether `list_sessions` reports one session or two — depend on it.
+      // The router keeps the local transport regardless, so the failure
+      // never reaches the AttachDiagnostics path the test above covers.
+      it('I3: surfaces a failed local introduce as a degradation on the local location', async () => {
+        const mockFetch = vi.fn().mockRejectedValue(new Error('broker unreachable'))
+        vi.stubGlobal('fetch', mockFetch)
+
+        // The tool swallows the transport's throw, exactly as server.ts does.
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local.enabled).toBe(true)
+        expect(result.locations.local.degradation).toMatch(/introduce failed/i)
+      })
+
+      // C3 (KAI-516 review): a transport can be impaired without being
+      // disabled — `channels.listForUser` missing leaves `list_sessions`
+      // reporting the caller in zero channels forever while every other
+      // operation works. `whoami` is where a user checks when an answer
+      // looks wrong, so a reduced capability has to reach it.
+      it('C3: reports a partial degradation on a location that is still enabled', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote(undefined, {
+          getBoundOrganizationName: async () => 'Acme',
+          partialDegradation: 'Own channel memberships unavailable: channels.listForUser not found on deployment',
+        })
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_1' }, remoteDeps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+        expect(result.locations.remote).toEqual({
+          enabled: true,
+          degradation: 'Own channel memberships unavailable: channels.listForUser not found on deployment',
+          organization: 'Acme',
+        })
+      })
+
+      // A full self-disable outranks a partial note: the location is not
+      // "working but quiet", it is off, and that is the actionable fact.
+      it('C3: a full degradation wins over a partial one on the same location', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote(undefined, {
+          degradation: 'Remote sync disabled: authentication failed',
+          partialDegradation: 'Own channel memberships unavailable',
+        })
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_1' }, remoteDeps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+        expect(result.locations.remote.degradation).toBe('Remote sync disabled: authentication failed')
       })
     })
 
