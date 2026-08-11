@@ -11,6 +11,7 @@ import {
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
+import { CLERK_FETCH_TIMEOUT_MS } from '../remote/auth-clerk.js'
 import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
 export interface ClerkLocationAuth {
@@ -65,8 +66,17 @@ export type LocationAuth = ClerkLocationAuth
  *     since the lock only protects same-machine contention anyway.
  *   - We poll on EEXIST with short backoff up to `LOCK_TIMEOUT_MS`. In
  *     the common case (no contention) the loop runs once.
+ *
+ * LOCK_TIMEOUT_MS must EXCEED the longest work held under the lock
+ * (Clerk token refresh, {@link CLERK_FETCH_TIMEOUT_MS}). A 5 s lock with a
+ * 10 s fetch made every healthy-but-slow refresh time out every peer and
+ * told them to delete a live lock — exactly the concurrent double-refresh
+ * this module exists to prevent (cc#33 / KAI-417). Derived in code so the
+ * two constants cannot drift apart again.
  */
-const LOCK_TIMEOUT_MS = 5_000
+/** Headroom after the in-lock Clerk fetch so a peer waits out a full refresh. */
+const LOCK_HEADROOM_MS = 5_000
+export const LOCK_TIMEOUT_MS = CLERK_FETCH_TIMEOUT_MS + LOCK_HEADROOM_MS
 const STALE_LOCK_MS = 30_000
 const LOCK_POLL_MS = 50
 
@@ -83,20 +93,55 @@ function syncSleep(ms: number): void {
   Atomics.wait(SLEEP_BUF, 0, 0, ms)
 }
 
+/**
+ * One contention retry: honour the acquire deadline and sleep before the
+ * next `wx` attempt. Bare `continue` in the acquire loop used to skip both
+ * the deadline check and `syncSleep`, so a persistent lock-read failure
+ * (EISDIR, EACCES on a stale path) spun the event loop at 100 % forever
+ * (cc#33 C1). Keep the fail-closed reaper logic; never skip loop liveness.
+ */
+function waitForLockRetry(lock: string, deadline: number, cause?: unknown): void {
+  if (Date.now() >= deadline) {
+    throw new Error(
+      `cccollab: timed out after ${LOCK_TIMEOUT_MS}ms waiting for ${lock}. ` +
+        `Another cccollab process may still be refreshing tokens — wait and retry. ` +
+        `Only delete the lock file if you are certain no cccollab process is running ` +
+        `(deleting a live lock can burn the single-use Clerk refresh token).`,
+      { cause },
+    )
+  }
+  syncSleep(LOCK_POLL_MS)
+}
+
 function lockFilePath(): string {
   return `${CCCOLLAB_CONFIG_FILE}.lock`
 }
 
-/** True if `pid` is unset, unparseable, or no longer a live process on
- *  this machine. `process.kill(pid, 0)` is the standard liveness probe:
- *  signal 0 performs the existence/permission check without delivering
- *  anything. ESRCH (no such process) means dead; EPERM means alive but
- *  owned by another user (still alive — don't reap). Any other thrown
- *  error is treated conservatively as "still alive" so we never reap a
- *  lock we can't prove is dead. */
+/** True only when `pid` is PROVABLY a dead process on this machine.
+ *  `process.kill(pid, 0)` is the standard liveness probe: signal 0
+ *  performs the existence/permission check without delivering anything.
+ *  ESRCH (no such process) means dead; EPERM means alive but owned by
+ *  another user (still alive — don't reap). Any other thrown error is
+ *  treated conservatively as "still alive" so we never reap a lock we
+ *  can't prove is dead.
+ *
+ *  FAIL-CLOSED on an empty / unparseable body (KAI-417): this used to
+ *  return `true`, i.e. it treated "I could not read a PID" as proof of
+ *  death. Combined with the caller's unlink-by-path, that let a waiter
+ *  delete a LIVE holder's lock — e.g. a torn read landing in the gap
+ *  between a peer's reap-unlink and its `wx` re-create — putting two
+ *  processes in the critical section, both burning the same single-use
+ *  Clerk refresh token. Absence of evidence is not evidence of death.
+ *
+ *  Tradeoff (accepted): a process crashing between the lock file's
+ *  `open()` and its `write()` leaves a 0-byte lock that is now never
+ *  auto-reaped and needs one manual `rm`. That is a LOUD, recoverable
+ *  failure — the acquire timeout already tells the user to delete the
+ *  lock file — and is strictly preferable to a silent double-refresh
+ *  that forces a re-authentication. */
 function isPidDead(raw: string): boolean {
   const pid = Number.parseInt(raw.trim(), 10)
-  if (!Number.isFinite(pid) || pid <= 0) return true
+  if (!Number.isFinite(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
     return false
@@ -121,11 +166,19 @@ function acquireLock(): void {
       try {
         const age = Date.now() - statSync(lock).mtimeMs
         if (age > STALE_LOCK_MS) {
-          let holderPid = ''
+          let holderPid: string
           try {
             holderPid = readFileSync(lock, 'utf-8')
           } catch {
-            /* lock vanished; retry */
+            // The lock vanished between `stat` and this read — a peer
+            // reaped it. Retry the `wx` create rather than falling
+            // through: everything below reasons about a holder we just
+            // failed to identify, and acting on that was the KAI-417
+            // reaper bug (the empty `holderPid` was read as "dead").
+            // MUST still sleep + honour the deadline (cc#33): bare
+            // `continue` spun forever when the path is permanently unreadable.
+            waitForLockRetry(lock, deadline, err)
+            continue
           }
           if (isPidDead(holderPid)) {
             try {
@@ -133,28 +186,50 @@ function acquireLock(): void {
             } catch {
               /* another waiter unlinked it first; fall through to retry */
             }
+            waitForLockRetry(lock, deadline, err)
             continue
           }
         }
       } catch {
-        // Lock vanished between EEXIST and stat: retry immediately.
+        // Lock vanished between EEXIST and stat: retry with sleep + deadline.
+        waitForLockRetry(lock, deadline, err)
         continue
       }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `cccollab: timed out after ${LOCK_TIMEOUT_MS}ms waiting for ${lock}. ` +
-            `If you are sure no other cccollab process is running, delete the lock file and try again.`,
-          { cause: err },
-        )
-      }
-      // Sleep briefly before retrying. `saveLocationAuth` is synchronous,
-      // so we can't await `setTimeout`; `Atomics.wait` is the standard
-      // Node sync-sleep primitive that does not burn CPU. Under
-      // contention by multiple MCP processes this keeps the waiter at
-      // ~0% CPU instead of pegging a core.
-      syncSleep(LOCK_POLL_MS)
+      // Live holder still holding (or age under STALE_LOCK_MS): wait and retry.
+      waitForLockRetry(lock, deadline, err)
     }
   }
+}
+
+/**
+ * In-process async gate in front of the on-disk lock.
+ *
+ * `acquireLock` is a synchronous spin (Atomics.wait) that blocks the whole
+ * event loop, and `withConfigLock` holds the file lock across an `await`
+ * (the network token refresh). With two remote locations, refresh A takes
+ * the lock and yields on its await; refresh B — in the SAME process — then
+ * calls `acquireLock`, sees a lock file owned by its own live PID (so never
+ * reapable), and spins the event loop so A can never resume to release it.
+ * Guaranteed self-deadlock at LOCK_TIMEOUT_MS.
+ *
+ * Fix: same-process users queue on a promise chain and never spin on a lock
+ * their own process holds. The on-disk lock file keeps doing only its real
+ * job — cross-process mutual exclusion — and is now only ever contended by
+ * genuinely foreign processes. Every entry point (`withConfigLock`,
+ * `saveLocationAuth`) must go through this gate, otherwise a sync writer can
+ * still deadlock against an in-flight async lock holder.
+ */
+let configLockChain: Promise<unknown> = Promise.resolve()
+
+function withInProcessConfigLock<T>(run: () => Promise<T>): Promise<T> {
+  const next = configLockChain.then(run, run)
+  // Swallow rejections on the chain itself so one failing critical section
+  // doesn't reject every subsequent waiter.
+  configLockChain = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  return next
 }
 
 function releaseLock(): void {
@@ -187,14 +262,10 @@ function releaseLock(): void {
  * the same `~/.cccollab/config.json` cannot lose updates. See the
  * `acquireLock` / `releaseLock` block above for the lock protocol.
  */
-export function saveLocationAuth(locationName: string, auth: LocationAuth): void {
-  ensureHomeDir()
-  acquireLock()
-  try {
-    writeLocationAuthInLock(locationName, auth)
-  } finally {
-    releaseLock()
-  }
+export async function saveLocationAuth(locationName: string, auth: LocationAuth): Promise<void> {
+  await withConfigLock(async (persist) => {
+    persist(locationName, auth)
+  })
 }
 
 /**
@@ -255,13 +326,15 @@ function writeLocationAuthInLock(locationName: string, auth: LocationAuth): void
 export async function withConfigLock<T>(
   callback: (persist: (locationName: string, auth: LocationAuth) => void) => Promise<T>,
 ): Promise<T> {
-  ensureHomeDir()
-  acquireLock()
-  try {
-    return await callback(writeLocationAuthInLock)
-  } finally {
-    releaseLock()
-  }
+  return await withInProcessConfigLock(async () => {
+    ensureHomeDir()
+    acquireLock()
+    try {
+      return await callback(writeLocationAuthInLock)
+    } finally {
+      releaseLock()
+    }
+  })
 }
 
 /**

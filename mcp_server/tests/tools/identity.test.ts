@@ -255,6 +255,57 @@ describe('Identity Tools', () => {
       })
     })
 
+    describe('introduce — transport failures are reported', () => {
+      beforeEach(() => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+      })
+
+      afterEach(() => {
+        vi.unstubAllGlobals()
+      })
+
+      it('surfaces a rejecting remote introduce (e.g. invalid organization) as an error entry', async () => {
+        const deps = makeDepsWithRemote(() => {
+          throw new Error('Organization not found: org_bogus')
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_bogus' }, deps),
+        )
+        expect(result.errors).toEqual([{ location: 'remote', message: 'Organization not found: org_bogus' }])
+      })
+
+      it('still registers the healthy transport while reporting the failing one', async () => {
+        const deps = makeDepsWithRemote(() => {
+          throw new Error('Organization not found: org_bogus')
+        })
+        const okIntroduce = vi.fn(async () => {})
+        const okRemote = {
+          source: 'remote2' as const,
+          enabled: true,
+          introduce: okIntroduce,
+        } as unknown as Transport
+        deps.router = new TransportRouter([...deps.router.all(), okRemote])
+
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_bogus' }, deps),
+        )
+
+        expect(okIntroduce).toHaveBeenCalledTimes(1)
+        expect(result.name).toBe('reviewer')
+        expect(result.errors).toEqual([{ location: 'remote', message: 'Organization not found: org_bogus' }])
+      })
+
+      it('omits the errors field entirely when every transport introduces successfully', async () => {
+        const deps = makeDepsWithRemote()
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps),
+        )
+        expect(result.errors).toBeUndefined()
+        expect(result.name).toBe('reviewer')
+      })
+    })
+
     describe('whoami — organization', () => {
       beforeEach(() => {
         const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
