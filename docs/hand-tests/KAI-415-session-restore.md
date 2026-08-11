@@ -5,7 +5,7 @@ Manual verification that a restarted session gets its channels and topics back.
 **Every command and every output below was executed on `e2183a8`. Nothing here is
 predicted.** Where a check has a trap that makes it prove less than it appears to,
 the trap is called out rather than left for the reader to fall into. Where something
-is *not* covered, it says so — see [What this does not cover](#what-this-does-not-cover).
+is _not_ covered, it says so — see [What this does not cover](#what-this-does-not-cover).
 
 ## Setup
 
@@ -62,12 +62,16 @@ cat "$HT/.cccollab/sessions/$SID.json"
   "version": 1,
   "sessionId": "11111111-2222-3333-4444-555555555555",
   "channels": [
-    { "name": "cccollab",     "location": "local", "source": "cccollab.json" },
+    { "name": "cccollab", "location": "local", "source": "cccollab.json" },
     { "name": "handtest-415", "location": "local", "source": "manual" }
   ],
   "topics": [
-    { "id": "6367b060-2309-492e-b1b5-9e59a2ca1582", "name": "Restore me",
-      "channel": "handtest-415", "location": "local" }
+    {
+      "id": "6367b060-2309-492e-b1b5-9e59a2ca1582",
+      "name": "Restore me",
+      "channel": "handtest-415",
+      "location": "local"
+    }
   ],
   "activeChannel": { "name": "cccollab", "location": "local" },
   "activeTopic": "6367b060-2309-492e-b1b5-9e59a2ca1582",
@@ -136,7 +140,7 @@ ls "$HT/.cccollab/sessions/"   # -> only well-formed uuid .json files
 ```
 
 **PASS** when every id prints `MCP initialize: OK` (the server answered — it did not
-die), the rejection is *reported* rather than swallowed, and `find` returns nothing.
+die), the rejection is _reported_ rather than swallowed, and `find` returns nothing.
 A `Fatal error` line, or no `initialize` line at all, is the regression.
 
 Note the blank id `'   '` prints no warning: no id means nothing to persist, which is
@@ -179,7 +183,7 @@ has **no `activeTopic` key at all**. Both topics came back; neither was focused.
 > **The trap.** `whoami` does not expose a `joinedTopics` field — only `activeTopic`,
 > and only when one is active. Do not read "topics are missing" into its absence; that
 > misreading says the restore failed when it succeeded. The stderr `Restored N
-> topic(s)` line is the evidence that topics were rejoined. This bit me while writing
+topic(s)` line is the evidence that topics were rejoined. This bit me while writing
 > this doc.
 
 ## Check 4 — file hygiene and isolation
