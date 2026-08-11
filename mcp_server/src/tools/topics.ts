@@ -203,7 +203,7 @@ export async function handleTopicTool(
       }
       const transport = deps.router.get(LOCAL_LOCATION)
       // Paged like read_topic_messages: newest page first, `before` walks
-      // back. A 1:1 thread outlives any one exchange and is never trimmed.
+      // back. The broker retains a bounded ring buffer per pair (cc#43 I4).
       const page = await transport.readSessionMessages({
         sessionName: deps.session.displayName,
         withSessionId: sessionId,

@@ -49,10 +49,15 @@ export interface TransportSession {
   lastSeen?: string
 }
 
-/** Result of a 1:1 send. `delivered` is only true when the message was
- *  committed to the recipient's inbox AND the recipient was attached
- *  (had a live connection) at commit time - never a promise about
- *  whether it was later read. */
+/**
+ * Result of a 1:1 send.
+ *
+ * `delivered: true` means the local broker wrote the event to at least one
+ * tagged SSE connection for the recipient (AC3 / cc#43 I5). It is **not** a
+ * promise that the MCP host accepted a notification or that Claude surfaced
+ * the message — MessageBus notify failures are local to the recipient process
+ * and do not NACK the broker.
+ */
 export interface TransportDmResult {
   delivered: boolean
   reason?: string

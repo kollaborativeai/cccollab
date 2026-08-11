@@ -858,7 +858,7 @@ describe('RemoteTransport heartbeat', () => {
  * `local` today, so nothing else would catch a stub that lies.
  */
 describe('RemoteTransport direct-message stubs (KAI-517 pending)', () => {
-  it('never reports a DM as delivered and returns an empty thread page', async () => {
+  it('never reports a DM as delivered and refuses read with an explicit unsupported error', async () => {
     const { client, queryMock, mutationMock } = makeStubClient(async () => [])
     const transport = new RemoteTransport({ client, log: () => {} })
 
@@ -866,8 +866,12 @@ describe('RemoteTransport direct-message stubs (KAI-517 pending)', () => {
     expect(sent.delivered).toBe(false)
     expect(sent.reason).toMatch(/not supported/i)
 
-    const page = await transport.readSessionMessages({ sessionName: 'me', withSessionId: 'some-id' })
-    expect(page).toEqual({ messages: [], hasMore: false })
+    // cc#43 I6: empty {messages:[], hasMore:false} looked like a real empty
+    // local thread. Refuse the same way send does.
+    // RED: restore `return { messages: [], hasMore: false }` → this rejects.
+    await expect(transport.readSessionMessages({ sessionName: 'me', withSessionId: 'some-id' })).rejects.toThrow(
+      /not supported/i,
+    )
 
     // A stub that quietly called the backend would be worse than one that
     // refuses: the Convex functions don't exist yet.

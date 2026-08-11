@@ -266,7 +266,7 @@ describe('BrokerEventListener (channel-aware)', () => {
     })
   })
 
-  it('drops a dm event whose fromName is our own name (defense in depth)', async () => {
+  it('drops a dm event whose fromId is our own registration id (self-send)', async () => {
     const event: BrokerLocalEvent = {
       source: 'local',
       type: 'dm',
@@ -278,5 +278,29 @@ describe('BrokerEventListener (channel-aware)', () => {
     listener.processLocalEvent(event)
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  /**
+   * cc#43 I3: twin sessions may share a display name (AC2). Self-drop must
+   * use registration id, not name — otherwise two "reviewer" sessions never
+   * surface each other's DMs.
+   *
+   * RED: restore `isExactSelf(event.fromName)` as the DM drop → this fails.
+   */
+  it('surfaces a dm from a twin session that shares our display name', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-twin-other',
+      fromName: 'architect', // same display name as this listener
+      toId: 'id-us',
+      text: 'hello twin',
+    }
+    listener.processLocalEvent(event)
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'architect', text: 'hello twin', kind: 'dm' }),
+      )
+    })
   })
 })

@@ -843,7 +843,9 @@ export class RemoteTransport implements Transport {
     before?: number
   }): Promise<TransportDmPage> {
     void args
-    return { messages: [], hasMore: false }
+    // cc#43 I6: must not look like an empty local thread. Same honesty as
+    // sendSessionMessage — empty success hid "unsupported" as "no messages".
+    throw new Error('Direct messages are not supported on this location yet.')
   }
 
   // ─── Message history ──────────────────────────────────────────────────

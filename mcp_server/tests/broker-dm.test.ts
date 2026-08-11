@@ -655,4 +655,32 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     const listed = await listSessions(port)
     expect(listed.some((s) => s.id === bobId)).toBe(true)
   })
+
+  /**
+   * cc#43 I4: each pair retains at most 500 messages (ring buffer).
+   * RED: remove the splice after thread.push → length stays 501.
+   */
+  it('I4: dm thread is ring-buffered at 500 messages per pair', async () => {
+    const bobId = await registerSession(port, 'i4-bob')
+    await registerSession(port, 'i4-alice')
+    const CAP = 500
+    for (let i = 0; i < CAP + 1; i++) {
+      const res = await sendDm(port, bobId, 'i4-alice', `msg-${i}`)
+      expect(res.status).toBe(200)
+    }
+    // Read with a high limit so we see the full retained buffer (page defaults
+    // may be smaller; walk pages).
+    const all: Array<{ text: string }> = []
+    let before: number | undefined
+    for (;;) {
+      const page = await readDmPage(port, bobId, 'i4-alice', { limit: 200, before })
+      all.push(...page.messages)
+      if (!page.hasMore || page.messages.length === 0) break
+      before = page.messages[0]!.ts
+    }
+    expect(all.length).toBe(CAP)
+    // Oldest dropped was msg-0; newest is msg-500.
+    expect(all.some((m) => m.text === 'msg-0')).toBe(false)
+    expect(all.some((m) => m.text === `msg-${CAP}`)).toBe(true)
+  })
 })

@@ -65,15 +65,18 @@ export class MessageBus extends EventEmitter {
    *
    * Errors while sending the MCP notification are logged via an event
    * and swallowed on purpose - a transient MCP SDK hiccup must not
-   * crash the server or break the inbound subscription.
+   * crash the server or break the inbound subscription. For DMs this
+   * means broker `delivered:true` (SSE write) can still leave the model
+   * unwoken; history remains on the broker for `read_session_messages`
+   * (cc#43 I5 — AC3 is SSE-level, not model-level).
    */
   async push(msg: ParsedMessage, source: MessageSource = 'local'): Promise<void> {
     const now = Date.now()
     // DMs are exempt: dedup exists for one message arriving over BOTH
     // transports, and a DM has only one delivery path (the local broker's
     // private lane). Deduping it would drop a genuine second send that the
-    // broker already answered `delivered: true` for - a wake the caller was
-    // told happened and didn't (KAI-514 AC3).
+    // broker already answered `delivered: true` for - an SSE wake the
+    // caller was told happened (KAI-514 AC3 / cc#43 I5).
     if (msg.kind !== 'dm') {
       const key = dedupKey(msg)
       this.vacuum(now)

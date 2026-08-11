@@ -135,8 +135,19 @@ const sseBySession = new Map<string, Set<SSEResponse>>()
 /** Private 1:1 message threads, keyed by the two participants' sorted
  *  stable ids joined with `|`. Deliberately separate from `topics` /
  *  channel broadcasts (KAI-514 AC6): a DM must never surface in channel
- *  or topic history. */
+ *  or topic history.
+ *
+ *  Bound (cc#43 I4): each pair keeps at most MAX_DM_MESSAGES_PER_THREAD
+ *  messages (ring buffer). Unbounded growth was a heap OOM under long
+ *  orchestration pairs or flood. History pagination still walks what remains.
+ */
 const dmThreads = new Map<string, DmMessage[]>()
+
+/** Cap messages retained per pair. Oldest are dropped when exceeded. */
+const MAX_DM_MESSAGES_PER_THREAD = 500
+
+/** Cap on a single DM text body (well under MAX_BODY_SIZE). */
+const MAX_DM_TEXT_CHARS = 64 * 1024
 
 function dmPairKey(idA: string, idB: string): string {
   return [idA, idB].sort().join('|')
@@ -835,12 +846,22 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'Cannot send a message to yourself.' })
           return
         }
+        if (body.text.length > MAX_DM_TEXT_CHARS) {
+          jsonResponse(res, 400, {
+            error: `text exceeds ${MAX_DM_TEXT_CHARS} characters`,
+          })
+          return
+        }
 
         const ts = new Date().toISOString()
         const msg: DmMessage = { fromId: sender.id, fromName: sender.name, toId: recipient.id, text: body.text, ts }
         const pairKey = dmPairKey(sender.id, recipient.id)
         const thread = dmThreads.get(pairKey) ?? []
         thread.push(msg)
+        // cc#43 I4: ring-buffer trim — drop oldest when over cap.
+        if (thread.length > MAX_DM_MESSAGES_PER_THREAD) {
+          thread.splice(0, thread.length - MAX_DM_MESSAGES_PER_THREAD)
+        }
         dmThreads.set(pairKey, thread)
 
         const delivered = sendToSessionConnections(recipient.id, {
