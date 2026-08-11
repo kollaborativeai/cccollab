@@ -71,8 +71,9 @@ export interface IdentityToolDeps {
    *  connecting session's subscriptions (KAI-446) and the listener connects
    *  before `introduce` may have run, so without this a session that names
    *  itself at runtime stays anonymous on the broker and receives nothing.
-   *  Optional so legacy unit tests keep compiling. */
-  onIdentityChanged?: () => void
+   *  Required (KAI-446 I9): production correctness hangs off this wiring;
+   *  tests pass `() => {}` when they do not care. */
+  onIdentityChanged: () => void
 }
 
 export async function handleIdentityTool(
@@ -114,7 +115,7 @@ export async function handleIdentityTool(
       // transports register it. The stream is subscription-scoped (KAI-446),
       // so a session that was anonymous when the listener connected would
       // otherwise never receive another channel-tagged event.
-      deps.onIdentityChanged?.()
+      deps.onIdentityChanged()
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Each

@@ -764,18 +764,16 @@ describe('Topic Tools', () => {
 
     it('read_topic_messages passes the resolved id, not the name, to the transport (KAI-446 I3)', async () => {
       const readTopicMessages = vi.fn().mockResolvedValue({ messages: [{ text: 'hi' }], hasMore: false })
-      const listTopics = vi
-        .fn()
-        .mockResolvedValue([
-          {
-            id: 'k5701resolvedid01',
-            topic: 'sprint planning',
-            channel: 'dev',
-            creator: 'a',
-            state: 'active',
-            createdAt: '',
-          },
-        ])
+      const listTopics = vi.fn().mockResolvedValue([
+        {
+          id: 'k5701resolvedid01',
+          topic: 'sprint planning',
+          channel: 'dev',
+          creator: 'a',
+          state: 'active',
+          createdAt: '',
+        },
+      ])
       const stubTransport = {
         source: 'local',
         enabled: true,
