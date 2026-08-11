@@ -1,6 +1,8 @@
 import type { ActiveContext } from './context.js'
+import type { MessageBus } from './message-bus.js'
 import { SESSION_STATE_VERSION, type SessionState } from './session-state.js'
-import type { Transport } from './transport/index.js'
+import type { Transport, TransportTopicMessage } from './transport/index.js'
+import { ensureChannelSubscription, ensureTopicSubscription } from './transport/attach.js'
 
 /**
  * Capture the live context as the state to persist (KAI-415).
@@ -63,6 +65,15 @@ export interface RestoreDeps {
   /** Resolve a location name to its live transport, or undefined when that
    *  location no longer exists / never attached. */
   transportFor: (location: string) => Transport | undefined
+  /** C1: bus + maps so remote restore opens the same Convex reactive feeds
+   *  every other remote join path installs. Optional so unit tests that
+   *  only exercise local recording transports keep compiling. */
+  messageBus?: MessageBus
+  remoteChannelUnsubscribes?: Map<string, () => void>
+  remoteTopicUnsubscribes?: Map<string, () => void>
+  /** C2: called when a saved membership names a location with no live
+   *  transport. Startup uses this to avoid garbage-collecting those rows. */
+  onPendingLocation?: (location: string) => void
 }
 
 export interface RestoreResult {
@@ -72,14 +83,27 @@ export interface RestoreResult {
    *  unreachable. Reported so a restore that silently recovers nothing is
    *  distinguishable in the log from one that had nothing to recover. */
   skippedTopics: number
+  /** Locations with saved memberships but no attached transport (C2). */
+  pendingLocations: string[]
 }
 
 export async function restoreSubscriptions(state: SessionState, deps: RestoreDeps): Promise<RestoreResult> {
-  const result: RestoreResult = { channels: 0, topics: 0, skippedTopics: 0 }
+  const result: RestoreResult = { channels: 0, topics: 0, skippedTopics: 0, pendingLocations: [] }
+  const pending = new Set<string>()
+
+  const markPending = (location: string) => {
+    if (location === 'local') return
+    if (pending.has(location)) return
+    pending.add(location)
+    deps.onPendingLocation?.(location)
+  }
 
   for (const channel of state.channels) {
     const transport = deps.transportFor(channel.location)
-    if (!transport || !transport.enabled) continue
+    if (!transport || !transport.enabled) {
+      markPending(channel.location)
+      continue
+    }
     try {
       await transport.joinChannel({ sessionName: deps.sessionName, channel: channel.name })
     } catch (err) {
@@ -91,11 +115,22 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
     }
     deps.context.joinChannel(channel.name, 'restored', channel.location)
     result.channels++
+    // C1: open the live feed the same way tools/attach do after a join.
+    if (deps.messageBus && deps.remoteChannelUnsubscribes) {
+      ensureChannelSubscription({
+        transport,
+        locationName: channel.location,
+        channelName: channel.name,
+        messageBus: deps.messageBus,
+        map: deps.remoteChannelUnsubscribes,
+      })
+    }
   }
 
   for (const topic of state.topics) {
     const transport = deps.transportFor(topic.location)
     if (!transport || !transport.enabled) {
+      markPending(topic.location)
       result.skippedTopics++
       continue
     }
@@ -106,11 +141,22 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
         result.skippedTopics++
         continue
       }
-      await transport.joinTopic({ sessionName: deps.sessionName, topicId: topic.id })
+      const joined = await transport.joinTopic({ sessionName: deps.sessionName, topicId: topic.id })
       // Throws if the topic's channel didn't restore above; caught below
       // and counted as skipped rather than taking the startup down.
       deps.context.joinTopic(topic.id, live.topic, topic.channel, topic.location)
       result.topics++
+      if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+        ensureTopicSubscription({
+          transport,
+          locationName: topic.location,
+          topicId: topic.id,
+          channelName: topic.channel,
+          sinceTs: highestHistoryTs(joined.history),
+          messageBus: deps.messageBus,
+          map: deps.remoteTopicUnsubscribes,
+        })
+      }
     } catch (err) {
       warn(`topic "${topic.name}" (${topic.id}) at "${topic.location}"`, err)
       result.skippedTopics++
@@ -141,11 +187,69 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
     // topic leaves the session with no active topic rather than a
     // dangling pointer to a room it isn't in.
     if (active && deps.context.isTopicJoined(active.id)) {
+      // Prefer live title when we still have the row; fall back to saved name.
       deps.context.joinTopic(active.id, active.name, active.channel, active.location)
     }
   }
 
+  result.pendingLocations = [...pending]
   return result
+}
+
+/**
+ * Locations named in a saved snapshot that may still need attach (C2).
+ * Excludes the reserved local broker name.
+ */
+export function locationsNeedingAttach(state: SessionState): string[] {
+  const names = new Set<string>()
+  for (const c of state.channels) {
+    if (c.location && c.location !== 'local') names.add(c.location)
+  }
+  for (const t of state.topics) {
+    if (t.location && t.location !== 'local') names.add(t.location)
+  }
+  return [...names]
+}
+
+/**
+ * Merge pending (not-yet-restorable) memberships into a snapshot so the
+ * end-of-startup write does not permanently erase them (C2).
+ */
+export function mergePendingIntoSnapshot(
+  live: SessionState,
+  prior: SessionState,
+  pendingLocations: ReadonlySet<string>,
+): SessionState {
+  if (pendingLocations.size === 0) return live
+  const channelKeys = new Set(live.channels.map((c) => `${c.location}::${c.name}`))
+  const topicKeys = new Set(live.topics.map((t) => t.id))
+  const channels = [...live.channels]
+  const topics = [...live.topics]
+  for (const c of prior.channels) {
+    if (!pendingLocations.has(c.location)) continue
+    const key = `${c.location}::${c.name}`
+    if (channelKeys.has(key)) continue
+    channels.push(c)
+    channelKeys.add(key)
+  }
+  for (const t of prior.topics) {
+    if (!pendingLocations.has(t.location)) continue
+    if (topicKeys.has(t.id)) continue
+    topics.push(t)
+    topicKeys.add(t.id)
+  }
+  return { ...live, channels, topics }
+}
+
+function highestHistoryTs(history: TransportTopicMessage[] | undefined): number | undefined {
+  if (!history || history.length === 0) return undefined
+  let max: number | undefined
+  for (const row of history) {
+    const parsed = Date.parse(row.ts)
+    if (Number.isNaN(parsed)) continue
+    if (max === undefined || parsed > max) max = parsed
+  }
+  return max
 }
 
 function warn(what: string, err: unknown): void {

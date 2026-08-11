@@ -12,7 +12,12 @@ import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager, identityFromEnv, sessionKey } from './session.js'
 import { loadSessionState, pruneStaleSessionStates, saveSessionState } from './session-state.js'
-import { restoreSubscriptions, snapshotSessionState } from './session-persistence.js'
+import {
+  locationsNeedingAttach,
+  mergePendingIntoSnapshot,
+  restoreSubscriptions,
+  snapshotSessionState,
+} from './session-persistence.js'
 import { MessageBus } from './message-bus.js'
 import { BrokerEventListener } from './broker-event-listener.js'
 import { ActiveContext } from './context.js'
@@ -195,7 +200,19 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
       )
     }
   }
-  for (const location of plan.attach) {
+  // C2 (KAI-415): also attach locations named in the saved snapshot even if
+  // planStartupAttachments would leave them dormant. Without this, a manually
+  // joined remote is skipped at restore and then erased by the final snapshot.
+  const restoreLocations = new Set(plan.attach.map((l) => l.name))
+  if (savedState) {
+    for (const name of locationsNeedingAttach(savedState)) {
+      restoreLocations.add(name)
+    }
+  }
+  for (const location of resolved.locations) {
+    if (location.isLocal) continue
+    if (!restoreLocations.has(location.name)) continue
+    // Already planned, or added solely for restore.
     const result = await attachLocation(location.name, {
       session,
       context,
@@ -317,16 +334,26 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     }
     // `savedState` was read at the top of startup, before the context (and
     // therefore its hook) existed at all.
+    const pendingLocations = new Set<string>()
     if (savedState) {
       try {
         const result = await restoreSubscriptions(savedState, {
           sessionName: session.displayName,
           context,
           transportFor: (location) => router.all().find((t) => t.source === location),
+          // C1: open remote Convex feeds after each successful restore join.
+          messageBus,
+          remoteChannelUnsubscribes,
+          remoteTopicUnsubscribes,
+          onPendingLocation: (location) => pendingLocations.add(location),
         })
+        for (const loc of result.pendingLocations) pendingLocations.add(loc)
         console.error(
           `[cccollab] Restored ${result.channels} channel(s) and ${result.topics} topic(s) from previous session` +
-            (result.skippedTopics > 0 ? ` (${result.skippedTopics} topic(s) no longer available)` : ''),
+            (result.skippedTopics > 0 ? ` (${result.skippedTopics} topic(s) no longer available)` : '') +
+            (pendingLocations.size > 0
+              ? ` (${pendingLocations.size} location(s) still pending attach — not garbage-collected)`
+              : ''),
         )
       } catch (err) {
         console.error(`[cccollab] Session restore failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -337,12 +364,15 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     // the one snapshot that startup owes. Unconditional (not just when
     // something was restored) so a brand-new session writes its starting
     // state too — otherwise its first restart would have nothing to read.
-    // This write is also what garbage-collects topics that no longer
-    // exist: they aren't in the context we just rebuilt, so they never get
-    // written back.
+    // C2: memberships for locations that could not attach yet are MERGED
+    // back into the snapshot so this write does not permanently erase them.
     persistArmed = true
     try {
-      saveSessionState(snapshotSessionState(persistKey, context))
+      let snap = snapshotSessionState(persistKey, context)
+      if (savedState && pendingLocations.size > 0) {
+        snap = mergePendingIntoSnapshot(snap, savedState, pendingLocations)
+      }
+      saveSessionState(snap)
     } catch (err) {
       console.error(`[cccollab] Could not persist session state: ${err instanceof Error ? err.message : String(err)}`)
     }

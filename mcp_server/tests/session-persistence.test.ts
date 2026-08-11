@@ -343,7 +343,183 @@ describe('restoreSubscriptions (KAI-415)', () => {
 
       const result = await restoreSubscriptions(state, deps())
 
-      expect(result).toEqual({ channels: 1, topics: 1, skippedTopics: 1 })
+      expect(result).toEqual({ channels: 1, topics: 1, skippedTopics: 1, pendingLocations: [] })
+    })
+  })
+
+  describe('C2 — pending locations (no transport)', () => {
+    it('reports pendingLocations when a remote seat cannot be restored', async () => {
+      const state = stateOf({
+        channels: [
+          { name: 'dev', location: 'local', source: 'manual' },
+          { name: 'ops', location: 'remote', source: 'manual' },
+        ],
+      })
+      const result = await restoreSubscriptions(state, deps())
+      expect(result.pendingLocations).toEqual(['remote'])
+      expect(context.isChannelSubscribed('ops', 'remote')).toBe(false)
+    })
+
+    it('mergePendingIntoSnapshot keeps pending remote rows across the startup write', async () => {
+      const { mergePendingIntoSnapshot } = await import('../src/session-persistence.js')
+      const prior = stateOf({
+        channels: [
+          { name: 'dev', location: 'local', source: 'manual' },
+          { name: 'ops', location: 'remote', source: 'manual' },
+        ],
+        topics: [{ id: 't1', name: 'Auth', channel: 'ops', location: 'remote' }],
+      })
+      const live = stateOf({
+        channels: [{ name: 'dev', location: 'local', source: 'restored' }],
+        topics: [],
+      })
+      const merged = mergePendingIntoSnapshot(live, prior, new Set(['remote']))
+      expect(merged.channels.some((c) => c.name === 'ops' && c.location === 'remote')).toBe(true)
+      expect(merged.topics.some((t) => t.id === 't1')).toBe(true)
+    })
+  })
+
+  describe('C3 — soft-no-op remote joins invent no seats', () => {
+    it('remote-shaped transport that throws on null session leaves context empty', async () => {
+      const soft = {
+        source: 'remote',
+        enabled: true,
+        async introduce() {},
+        async joinChannel() {
+          throw new Error('Cannot join channel: remote session is not introduced')
+        },
+        async leaveChannel() {},
+        async listChannels() {
+          return []
+        },
+        async broadcast() {},
+        async createTopic() {
+          throw new Error('no')
+        },
+        async listTopics() {
+          return []
+        },
+        async getTopicById() {
+          return null
+        },
+        async joinTopic() {
+          throw new Error('Cannot join topic: remote session is not introduced')
+        },
+        async leaveTopic() {},
+        async archiveTopic() {},
+        async unarchiveTopic() {},
+        async sendTopicMessage() {},
+        async listSessions() {
+          return []
+        },
+        async readChannelMessages() {
+          return { messages: [], hasMore: false }
+        },
+        async readTopicMessages() {
+          return { messages: [], hasMore: false }
+        },
+        async deregisterSession() {},
+        hasTopic() {
+          return false
+        },
+      }
+      const state = stateOf({
+        channels: [{ name: 'ops', location: 'remote', source: 'manual' }],
+        topics: [{ id: 't1', name: 'Auth', channel: 'ops', location: 'remote' }],
+      })
+      await restoreSubscriptions(state, {
+        sessionName: 'my-session',
+        context,
+        transportFor: () => soft as unknown as Transport,
+      })
+      expect(context.isChannelSubscribed('ops', 'remote')).toBe(false)
+      expect(context.isTopicJoined('t1')).toBe(false)
+    })
+  })
+
+  describe('C1 — remote restore wires subscription maps', () => {
+    it('registers channel and topic feeds after a successful remote restore', async () => {
+      const channelMap = new Map<string, () => void>()
+      const topicMap = new Map<string, () => void>()
+      const unsub = () => {}
+      const remote = {
+        source: 'remote',
+        enabled: true,
+        async introduce() {},
+        async joinChannel(_args: { channel: string }) {
+          return { subscriberCount: 1 }
+        },
+        async leaveChannel() {},
+        async listChannels() {
+          return []
+        },
+        async broadcast() {},
+        async createTopic() {
+          throw new Error('no')
+        },
+        async listTopics() {
+          return []
+        },
+        async getTopicById(args: { topicId: string }) {
+          if (args.topicId === 't1') {
+            return {
+              id: 't1',
+              topic: 'Auth',
+              channel: 'ops',
+              creator: 'x',
+              state: 'active' as const,
+              createdAt: 'now',
+            }
+          }
+          return null
+        },
+        async joinTopic() {
+          return { history: [] }
+        },
+        async leaveTopic() {},
+        async archiveTopic() {},
+        async unarchiveTopic() {},
+        async sendTopicMessage() {},
+        async listSessions() {
+          return []
+        },
+        async readChannelMessages() {
+          return { messages: [], hasMore: false }
+        },
+        async readTopicMessages() {
+          return { messages: [], hasMore: false }
+        },
+        async deregisterSession() {},
+        hasTopic() {
+          return false
+        },
+        // Required by ensure* type guards
+        subscribeChannelMessages(_args: unknown, _cb: unknown) {
+          return unsub
+        },
+        subscribeTopicMessages(_args: unknown, _cb: unknown) {
+          return unsub
+        },
+        primeTopicCursor() {},
+      }
+      // MessageBus is a real class; give ensure* a minimal stub.
+      const messageBus = { push: async () => {} } as unknown as import('../src/message-bus.js').MessageBus
+      const state = stateOf({
+        channels: [{ name: 'ops', location: 'remote', source: 'manual' }],
+        topics: [{ id: 't1', name: 'Auth', channel: 'ops', location: 'remote' }],
+      })
+      await restoreSubscriptions(state, {
+        sessionName: 'my-session',
+        context,
+        transportFor: () => remote as unknown as Transport,
+        messageBus,
+        remoteChannelUnsubscribes: channelMap,
+        remoteTopicUnsubscribes: topicMap,
+      })
+      expect(context.isChannelSubscribed('ops', 'remote')).toBe(true)
+      expect(context.isTopicJoined('t1')).toBe(true)
+      expect(channelMap.has('remote::ops')).toBe(true)
+      expect(topicMap.has('remote::t1')).toBe(true)
     })
   })
 

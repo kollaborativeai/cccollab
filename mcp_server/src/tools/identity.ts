@@ -6,7 +6,12 @@ import { LOCAL_LOCATION, type SessionIdentity, type Transport } from '../transpo
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
-import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import {
+  attachLocation,
+  ensureChannelSubscription,
+  ensureTopicSubscription,
+  type AttachCtx,
+} from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -121,12 +126,47 @@ export async function handleIdentityTool(
 
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name.
+      // I1 (KAI-415): also re-join topics under the new name and open remote
+      // feeds — restore may have seated them under the pre-introduce display
+      // name (often the OS username).
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
           const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
-        } catch {
-          // Non-fatal.
+          if (deps.messageBus && deps.remoteChannelUnsubscribes) {
+            ensureChannelSubscription({
+              transport,
+              locationName: ch.location,
+              channelName: ch.name,
+              messageBus: deps.messageBus,
+              map: deps.remoteChannelUnsubscribes,
+            })
+          }
+        } catch (err) {
+          // I4: log re-join failures after restore rather than silent success.
+          console.error(
+            `[cccollab] introduce re-join channel "${ch.name}" at "${ch.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+      }
+      for (const topic of deps.context.getJoinedTopics()) {
+        try {
+          const transport = deps.router.get(topic.location)
+          await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
+          if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+            ensureTopicSubscription({
+              transport,
+              locationName: topic.location,
+              topicId: topic.threadTs,
+              channelName: topic.channel,
+              messageBus: deps.messageBus,
+              map: deps.remoteTopicUnsubscribes,
+            })
+          }
+        } catch (err) {
+          console.error(
+            `[cccollab] introduce re-join topic "${topic.topicName}" (${topic.threadTs}) at "${topic.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
       }
 

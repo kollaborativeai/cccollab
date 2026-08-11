@@ -431,7 +431,12 @@ export class RemoteTransport implements Transport {
   // ─── Channels ─────────────────────────────────────────────────────────
   async joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
+    if (!this.enabled) return { subscriberCount: 0 }
+    // C3 (KAI-415): never soft-succeed a pre-introduce join. Restore treated
+    // the old soft no-op as success and invented seats the backend never granted.
+    if (this.sessionId === null) {
+      throw new Error('Cannot join channel: remote session is not introduced')
+    }
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
@@ -451,7 +456,7 @@ export class RemoteTransport implements Transport {
       return { subscriberCount: 0 }
     } catch (err) {
       this.registerFailure('joinChannel', err)
-      return { subscriberCount: 0 }
+      throw err
     }
   }
 
@@ -682,7 +687,11 @@ export class RemoteTransport implements Transport {
     topicId: string
   }): Promise<{ channel?: string; history: TransportTopicMessage[] }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null) return { history: [] }
+    if (!this.enabled) return { history: [] }
+    // C3 (KAI-415): same as joinChannel — soft no-op was treated as restore success.
+    if (this.sessionId === null) {
+      throw new Error('Cannot join topic: remote session is not introduced')
+    }
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.join), {
         sessionId: this.sessionId,
@@ -702,7 +711,7 @@ export class RemoteTransport implements Transport {
       }
     } catch (err) {
       this.registerFailure('joinTopic', err)
-      return { history: [] }
+      throw err
     }
   }
 
