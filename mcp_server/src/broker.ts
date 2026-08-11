@@ -364,6 +364,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // KAI-446 I11 / I7: outside the `/topics` prefix and deliberately NOT
+  // subscription-gated. Ticket AC covered topic routes; this remains an
+  // unauthenticated inject-into-any-channel path. No production caller in
+  // the repo (tests only). Product decision for Samuel: gate on a subscribed
+  // sender, or delete the route — do not "fix" unilaterally here.
   if (pathname === '/local-event' && method === 'POST') {
     void (async () => {
       try {
@@ -435,6 +440,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // KAI-446 I11: not under `/topics`, yet `leaveChannel` clears
+  // `t.joinedSessions` for every topic on the channel. The route-sweep only
+  // covers `/topics/*`. Availability for shared names is handled by
+  // `channelHolds` refcounts + `channel_unsubscribed` (C1), not by
+  // `requireSubscribed` here — body carries only the subject, so "self vs
+  // sibling" is indistinguishable (see broker tests + product decisions).
   if (pathname === '/channels/leave' && method === 'POST') {
     void (async () => {
       try {
@@ -791,6 +802,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // KAI-446 I11: outside `/topics`, yet `removeSessionFromAllChannels` mutates
+  // every topic's `joinedSessions` for this name. Same ceiling as leave —
+  // the sweep cannot see it. Holder refcounts + `session_unregistered` (C1)
+  // keep sibling streams alive; the path still carries no caller identity.
   const sessionNameMatch = SESSION_NAME_ROUTE.exec(pathname)
   if (sessionNameMatch && method === 'DELETE') {
     const name = decodeURIComponent(sessionNameMatch[1]!)

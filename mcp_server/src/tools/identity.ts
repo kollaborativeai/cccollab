@@ -175,11 +175,6 @@ export async function handleIdentityTool(
       const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
       const activeTopicLocation = deps.context.getTopicLocation()
-      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
-        name: c.name,
-        location: c.location,
-        source: c.source,
-      }))
 
       // Expose every transport's runtime state so the user sees
       // degradation on any location (not just "the first non-local")
@@ -188,6 +183,25 @@ export async function handleIdentityTool(
       // enabled rather than missing.
       await deps.ensureAttached?.()
       const locationStates = await buildLocationStates(deps.router, deps.diagnostics)
+
+      // Reconcile local context against the broker's live membership
+      // (KAI-446 I6). ActiveContext can claim channels the stream is no
+      // longer entitled to (failed re-join, shared-name leave residue, or
+      // a join that only updated local state). Remote already surfaces
+      // degradation via buildLocationStates; the local broker is the one
+      // transport we used to take on faith.
+      const brokerLocalChannels = await confirmLocalBrokerChannels(deps)
+
+      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => {
+        const base = { name: c.name, location: c.location, source: c.source }
+        if (c.location !== LOCAL_LOCATION || brokerLocalChannels === null) return base
+        const confirmed = brokerLocalChannels.has(c.name)
+        return {
+          ...base,
+          confirmed,
+          ...(!confirmed ? { hint: 'Not confirmed by the local broker. Call join_channel to re-subscribe.' } : {}),
+        }
+      })
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -221,6 +235,24 @@ export async function handleIdentityTool(
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)
+  }
+}
+
+/**
+ * Ask the local transport which channels the named session is actually
+ * subscribed to on the broker. Returns `null` when the local transport is
+ * missing or the listing fails (network / 5xx) so callers do not invent a
+ * false "unconfirmed" diagnosis from a transport outage.
+ */
+async function confirmLocalBrokerChannels(deps: IdentityToolDeps): Promise<Set<string> | null> {
+  const local = deps.router.enabled().find((t) => t.source === LOCAL_LOCATION)
+  if (!local) return null
+  try {
+    const listed = await local.listChannels({ sessionName: deps.session.displayName })
+    if (!Array.isArray(listed)) return null
+    return new Set(listed.map((c) => c.name))
+  } catch {
+    return null
   }
 }
 

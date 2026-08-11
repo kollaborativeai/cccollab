@@ -248,6 +248,101 @@ describe('Identity Tools', () => {
           degradation: 'introduce() failed for "personal": Server Error',
         })
       })
+
+      /**
+       * KAI-446 I6: whoami used to print ActiveContext subscriptions as a
+       * clean bill of health even when the broker no longer entitled the
+       * stream. Mark local channels the broker does not confirm so silence
+       * is diagnosable (hint → join_channel).
+       */
+      it('marks local context channels the broker does not confirm (KAI-446 I6)', async () => {
+        const listChannels = vi.fn(async (args: { sessionName?: string }) => {
+          expect(args.sessionName).toBe('architect')
+          // Broker only knows `default` — `ghost` is context-only residue.
+          return [{ name: 'default', subscriberCount: 1, sessionCount: 1 }]
+        })
+        const fakeLocal = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+          joinChannel: vi.fn(async () => {}),
+          listChannels,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't1', topic: 'x', channel: 'default' })),
+          joinTopic: vi.fn(async () => ({ history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+          broadcast: vi.fn(async () => {}),
+          getTopicById: vi.fn(async () => null),
+          readTopicMessages: vi.fn(async () => ({ messages: [], hasMore: false })),
+        }
+        const localDeps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([fakeLocal as unknown as Transport]),
+          onIdentityChanged: () => {},
+        }
+        localDeps.context.joinChannel('default', 'manual', 'local')
+        localDeps.context.joinChannel('ghost', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'architect' }, localDeps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, localDeps))
+        expect(listChannels).toHaveBeenCalledWith({ sessionName: 'architect' })
+        expect(result.subscribedChannels).toEqual([
+          { name: 'default', location: 'local', source: 'manual', confirmed: true },
+          {
+            name: 'ghost',
+            location: 'local',
+            source: 'manual',
+            confirmed: false,
+            hint: 'Not confirmed by the local broker. Call join_channel to re-subscribe.',
+          },
+        ])
+      })
+
+      it('omits confirmed when the local broker listing fails (KAI-446 I6)', async () => {
+        const listChannels = vi.fn(async () => {
+          throw new Error('ECONNREFUSED')
+        })
+        const fakeLocal = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+          joinChannel: vi.fn(async () => {}),
+          listChannels,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't1', topic: 'x', channel: 'default' })),
+          joinTopic: vi.fn(async () => ({ history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+          broadcast: vi.fn(async () => {}),
+          getTopicById: vi.fn(async () => null),
+          readTopicMessages: vi.fn(async () => ({ messages: [], hasMore: false })),
+        }
+        const localDeps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([fakeLocal as unknown as Transport]),
+          onIdentityChanged: () => {},
+        }
+        localDeps.context.joinChannel('default', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'architect' }, localDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, localDeps))
+        // Network failure must not invent "unconfirmed" — leave the field off.
+        expect(result.subscribedChannels).toEqual([{ name: 'default', location: 'local', source: 'manual' }])
+      })
     })
 
     describe('introduce — organization argument', () => {

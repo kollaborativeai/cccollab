@@ -263,6 +263,9 @@ describe('BrokerEventListener: identifying the stream (KAI-446)', () => {
     url: string
     paths: string[]
     liveConnections: () => number
+    /** End every held SSE response so the client sees a genuine broker drop
+     *  (fires scheduleReconnect) without going through reconnectForIdentity. */
+    dropConnections: () => void
     close: () => Promise<void>
   }> {
     const paths: string[] = []
@@ -280,6 +283,9 @@ describe('BrokerEventListener: identifying the stream (KAI-446)', () => {
       url: `http://127.0.0.1:${port}`,
       paths,
       liveConnections: () => open.size,
+      dropConnections: () => {
+        for (const res of [...open]) res.end()
+      },
       close: () =>
         new Promise<void>((r) => {
           for (const res of open) res.end()
@@ -385,6 +391,48 @@ describe('BrokerEventListener: identifying the stream (KAI-446)', () => {
       await broker.close()
     }
   }, 10_000)
+
+  /**
+   * KAI-446 I13: the *outer* `currentRequest !== from` check is covered by the
+   * test above (reconnectForIdentity nulls currentRequest before destroy, so
+   * the orphan never schedules). The *inner* check (inside the setTimeout)
+   * guards a different race: broker drops the connection → reconnect is
+   * scheduled → during the 2s window introduce opens a new stream → the stale
+   * timer must not open a second live connection. Deleting only the inner
+   * guard used to leave the suite green.
+   */
+  it('does not open a second stream when reconnectForIdentity races a pending reconnect timer (KAI-446 I13)', async () => {
+    const broker = await stubBroker()
+    const { listener, session } = build(broker, 'architect')
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(1))
+      expect(broker.paths[0]).toBe('/events?sessionId=architect')
+      expect(broker.liveConnections()).toBe(1)
+
+      // Genuine broker drop: schedules reconnect for the live request.
+      broker.dropConnections()
+      await vi.waitFor(() => expect(broker.liveConnections()).toBe(0))
+
+      // Mid-window: introduce-driven re-identify opens the replacement stream
+      // while the original timer is still pending.
+      await new Promise<void>((r) => setTimeout(r, 400))
+      listener.reconnectForIdentity()
+      await vi.waitFor(() => expect(broker.paths.length).toBe(2))
+      expect(broker.liveConnections()).toBe(1)
+
+      // Past the original 2s delay from the drop: the stale timer must not
+      // have called connect() again.
+      await new Promise<void>((r) => setTimeout(r, 2200))
+      expect(broker.paths).toEqual(['/events?sessionId=architect', '/events?sessionId=architect'])
+      expect(broker.liveConnections()).toBe(1)
+      // session is named so reconnectForIdentity was a real connect, not a no-op
+      expect(session.hasName()).toBe(true)
+    } finally {
+      listener.stop()
+      await broker.close()
+    }
+  }, 12_000)
 
   it('stays put when reconnectForIdentity is called with no name yet', async () => {
     const broker = await stubBroker()
