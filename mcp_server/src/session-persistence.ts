@@ -144,6 +144,8 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
       const joined = await transport.joinTopic({ sessionName: deps.sessionName, topicId: topic.id })
       // Throws if the topic's channel didn't restore above; caught below
       // and counted as skipped rather than taking the startup down.
+      // S9: prefer the live title from getTopicById over the persisted name
+      // so a backend rename is visible after restore.
       deps.context.joinTopic(topic.id, live.topic, topic.channel, topic.location)
       result.topics++
       if (deps.messageBus && deps.remoteTopicUnsubscribes) {
@@ -174,9 +176,10 @@ export async function restoreSubscriptions(state: SessionState, deps: RestoreDep
     }
   }
   // Clear BEFORE re-pointing, never merely re-point: `joinTopic` focuses
-  // as a side effect, so the loop above always leaves SOME topic active.
-  // Re-pointing alone would leave the last-restored one active for a
-  // session that had no active topic, or whose active topic was archived —
+  // as a side effect, so when ≥1 topic restored the loop leaves SOME
+  // topic active. Re-pointing alone would leave the last-restored one
+  // active for a session that had no active topic, or whose active topic
+  // was archived —
   // inventing focus the session never had. A restore that recovers nothing
   // is a no-op; a restore that invents state is a bug.
   deps.context.clearActiveTopic()

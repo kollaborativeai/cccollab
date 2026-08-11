@@ -176,4 +176,39 @@ describe('KAI-415 end-to-end: subscriptions survive a restart (real broker)', ()
     expect(loadSessionState(`${SESSION_ID}-other`)).toBeNull()
     expect(fresh.context.getSubscribedChannels()).toEqual([])
   })
+
+  /**
+   * I2 (KAI-415): production order is restore under displayName (often the
+   * OS username) BEFORE any tool introduce, then introduce re-binds. The
+   * older e2e introduced first and restored under the fixed name — the
+   * inverse of boot — so C1–C3/I1 could ship green. This path matches
+   * server.ts: restore first, introduce second.
+   */
+  it('restores under the pre-introduce displayName then introduce re-binds (production order, KAI-415 I2)', async () => {
+    const life1 = makeSession(brokerPort, `${SESSION_ID}-prod-order`)
+    await handleIdentityTool('introduce', { name: 'e2e-architect' }, life1.deps)
+    await handleChannelTool('join_channel', { name: 'e2e-prod' }, life1.deps)
+    await handleTopicTool('start_topic', { topic: 'ProdOrderTopic' }, life1.deps)
+    const topicId = life1.context.findJoinedTopic('ProdOrderTopic')!.threadTs
+    expect(loadSessionState(`${SESSION_ID}-prod-order`)?.topics.map((t) => t.name)).toEqual(['ProdOrderTopic'])
+
+    // Life 2: no introduce yet — sessionName is the OS username (displayName).
+    const life2 = makeSession(brokerPort, `${SESSION_ID}-prod-order`)
+    const preIntroduceName = life2.session.displayName
+    expect(life2.session.hasName()).toBe(false)
+    const saved = loadSessionState(`${SESSION_ID}-prod-order`)
+    expect(saved).not.toBeNull()
+    const restored = await restoreSubscriptions(saved!, {
+      sessionName: preIntroduceName,
+      context: life2.context,
+      transportFor: () => life2.transport,
+    })
+    expect(restored.channels).toBeGreaterThanOrEqual(1)
+    expect(life2.context.isTopicJoined(topicId)).toBe(true)
+
+    // Introduce under a new name re-joins channels+topics (I1).
+    await handleIdentityTool('introduce', { name: 'e2e-architect' }, life2.deps)
+    expect(life2.context.isChannelSubscribed('e2e-prod', 'local')).toBe(true)
+    expect(life2.context.isTopicJoined(topicId)).toBe(true)
+  }, 30_000)
 })

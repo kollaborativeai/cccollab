@@ -1,4 +1,16 @@
-import { chmodSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 
 /**
  * Cross-process lock + atomic write for files under `~/.cccollab`.
@@ -161,17 +173,51 @@ export async function withFileLock<T>(targetPath: string, callback: () => Promis
  * the whole previous file or the whole new one. Windows' NTFS rename is
  * less strict but avoids the chmod path; callers there get best-effort.
  *
+ * KAI-415 I7: open the tmp with O_CREAT|O_EXCL|O_NOFOLLOW so a same-UID
+ * attacker cannot plant a symlink at the predictable pid-tmp path and
+ * redirect the write (session JSON or config tokens via the same helper).
+ * If a stale tmp from a previous crash is present, unlink and retry once.
+ *
  * Does NOT take the lock: callers that need read-modify-write coherence
  * must already hold it via `withFileLockSync` / `withFileLock`.
  */
 export function writeFileAtomic(targetPath: string, contents: string, mode: number): void {
   const tmp = `${targetPath}.${process.pid}.tmp`
-  writeFileSync(tmp, contents, { mode })
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
+  let fd: number | undefined
   try {
-    chmodSync(tmp, mode)
-  } catch {
-    // chmod failed (probably Windows); tolerated - the mode arg above
-    // already covers POSIX.
+    fd = openSync(tmp, flags, mode)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') {
+      // Stale tmp from a prior crash — remove and retry once.
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* ignore */
+      }
+      fd = openSync(tmp, flags, mode)
+    } else {
+      // Platforms without O_NOFOLLOW / O_EXCL fall back to plain write.
+      writeFileSync(tmp, contents, { mode })
+      try {
+        chmodSync(tmp, mode)
+      } catch {
+        /* Windows */
+      }
+      renameSync(tmp, targetPath)
+      return
+    }
+  }
+  try {
+    writeSync(fd, contents)
+    try {
+      fchmodSync(fd, mode)
+    } catch {
+      /* Windows */
+    }
+  } finally {
+    closeSync(fd)
   }
   renameSync(tmp, targetPath)
 }

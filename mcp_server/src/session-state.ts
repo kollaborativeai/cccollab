@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import * as z from 'zod'
 
@@ -45,30 +45,56 @@ const STALE_SESSION_MS = 30 * 24 * 60 * 60 * 1000
  * and `..` (and any `..`-prefixed traversal) without a separate special
  * case, and also rules out the empty string.
  */
+/** Must stay aligned with `isSafeSessionId` in `session.ts` (KAI-415 I3/I10). */
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-const SessionStateSchema = z.object({
-  version: z.literal(SESSION_STATE_VERSION),
-  sessionId: z.string(),
-  channels: z.array(
-    z.object({
-      name: z.string(),
-      location: z.string(),
-      source: z.string(),
-    }),
-  ),
-  topics: z.array(
-    z.object({
-      id: z.string(),
-      name: z.string(),
-      channel: z.string(),
-      location: z.string(),
-    }),
-  ),
-  activeChannel: z.object({ name: z.string(), location: z.string() }).optional(),
-  activeTopic: z.string().optional(),
-  updatedAt: z.number(),
-})
+/** ChannelSource values ActiveContext accepts (KAI-415 I10). */
+const CHANNEL_SOURCES = ['manual', 'fallback', 'env', 'cccollab.json', 'restored'] as const
+
+const SessionStateSchema = z
+  .object({
+    version: z.literal(SESSION_STATE_VERSION),
+    sessionId: z.string().regex(SAFE_SESSION_ID),
+    channels: z.array(
+      z.object({
+        name: z.string().min(1),
+        location: z.string().min(1),
+        source: z.enum(CHANNEL_SOURCES),
+      }),
+    ),
+    topics: z.array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string().min(1),
+        channel: z.string().min(1),
+        location: z.string().min(1),
+      }),
+    ),
+    activeChannel: z.object({ name: z.string().min(1), location: z.string().min(1) }).optional(),
+    activeTopic: z.string().min(1).optional(),
+    updatedAt: z.number(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.activeTopic !== undefined && !data.topics.some((t) => t.id === data.activeTopic)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'activeTopic must be one of topics[].id',
+        path: ['activeTopic'],
+      })
+    }
+    if (data.activeChannel !== undefined) {
+      const ok = data.channels.some(
+        (c) => c.name === data.activeChannel!.name && c.location === data.activeChannel!.location,
+      )
+      if (!ok) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'activeChannel must match a channels[] entry',
+          path: ['activeChannel'],
+        })
+      }
+    }
+  })
 
 export type SessionState = z.infer<typeof SessionStateSchema>
 export type PersistedChannel = SessionState['channels'][number]
@@ -101,18 +127,23 @@ export function sessionStateFile(sessionId: string): string {
  * read-modify-write (merge one location's auth into a doc holding all of
  * them), so a concurrent writer can lose an update. This one is a whole
  * snapshot serialised from memory: it reads nothing, so there is no
- * update to lose, and last-write-wins is the correct outcome — the last
- * writer is the one whose in-memory context is current. `writeFileAtomic`
- * already rules out the only other hazard (a reader seeing a half-written
- * file) via rename. A lock here would be pure ceremony.
- *
- * ponytail: two writers means two processes on ONE session id — a
- * restarting server briefly overlapping its predecessor. Both write
- * complete snapshots, so the loser of that race costs nothing.
+ * update to lose. Last-write-wins is intentional (KAI-415 I11): two
+ * processes on ONE session id (restart overlapping predecessor) both
+ * write complete snapshots via `writeFileAtomic` (rename), so the reader
+ * never sees a torn file — but the older process can still win the race
+ * and leave a stale membership list. Accepting that is a product call;
+ * do not invent a lock here without Samuel.
  */
 export function saveSessionState(state: SessionState): void {
   const file = sessionStateFile(state.sessionId)
-  mkdirSync(CCCOLLAB_SESSIONS_DIR, { recursive: true })
+  // S1: dir mode 0700 so session filenames are not world-listable under a
+  // typical 755 home; files themselves stay 0600.
+  mkdirSync(CCCOLLAB_SESSIONS_DIR, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(CCCOLLAB_SESSIONS_DIR, 0o700)
+  } catch {
+    /* filesystems that reject chmod — leave the mode from mkdir */
+  }
   writeFileAtomic(file, JSON.stringify(state, null, 2) + '\n', 0o600)
 }
 
@@ -136,15 +167,42 @@ export function loadSessionState(sessionId: string): SessionState | null {
   let file: string
   try {
     file = sessionStateFile(sessionId)
-  } catch {
-    // An id that cannot address a file has no file to load.
+  } catch (err) {
+    // An id that cannot address a file has no file to load (I5: log once).
+    console.error(
+      `[cccollab] Ignoring unusable session state for ${JSON.stringify(sessionId)}: ${err instanceof Error ? err.message : String(err)}`,
+    )
     return null
   }
   if (!existsSync(file)) return null
   try {
-    const parsed = SessionStateSchema.safeParse(JSON.parse(readFileSync(file, 'utf-8')))
-    return parsed.success ? parsed.data : null
-  } catch {
+    // I8: refuse FIFO/symlink/dir so a same-UID mkfifo cannot hang startup
+    // forever on readFileSync, and a symlink cannot redirect the read.
+    const st = lstatSync(file)
+    if (!st.isFile()) {
+      console.error(`[cccollab] Ignoring unusable session state for ${sessionId}: not a regular file (${file})`)
+      return null
+    }
+    const raw = JSON.parse(readFileSync(file, 'utf-8')) as unknown
+    const parsed = SessionStateSchema.safeParse(raw)
+    if (!parsed.success) {
+      console.error(
+        `[cccollab] Ignoring unusable session state for ${sessionId}: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
+      )
+      return null
+    }
+    // I10: body sessionId must match the path key (copied/hand-edited files).
+    if (parsed.data.sessionId !== sessionId) {
+      console.error(
+        `[cccollab] Ignoring unusable session state for ${sessionId}: body sessionId ${JSON.stringify(parsed.data.sessionId)} does not match path key`,
+      )
+      return null
+    }
+    return parsed.data
+  } catch (err) {
+    console.error(
+      `[cccollab] Ignoring unusable session state for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+    )
     return null
   }
 }
@@ -171,9 +229,11 @@ export function pruneStaleSessionStates(opts: { now: number; keepSessionId?: str
     return
   }
   for (const entry of entries) {
-    // Only ever consider files we wrote. A stray `notes.txt` or a peer's
-    // `.lock` is not ours to delete.
+    // S2: only reap session-shaped names we would ever write
+    // (`<SAFE_SESSION_ID>.json`). A stray `notes.json` in this dir is not ours.
     if (!entry.endsWith('.json')) continue
+    const base = entry.slice(0, -'.json'.length)
+    if (!SAFE_SESSION_ID.test(base)) continue
     if (opts.keepSessionId !== undefined && entry === `${opts.keepSessionId}.json`) continue
     const file = join(CCCOLLAB_SESSIONS_DIR, entry)
     try {

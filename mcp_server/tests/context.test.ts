@@ -234,6 +234,28 @@ describe('ActiveContext', () => {
       })
     })
 
+    /**
+     * I6 (KAI-415): server.ts keeps the disk writer disarmed until startup
+     * finishes so config auto-sub cannot clobber the previous life's file.
+     * This is the flag contract in isolation — if someone arms at
+     * construction, this test still passes but the boot-order e2e would
+     * fail; together they pin the design.
+     */
+    it('supports a disarmed outer flag so mid-boot mutations write nothing (KAI-415 I6)', () => {
+      let armed = false
+      let writes = 0
+      const ctx = new ActiveContext(() => {
+        if (!armed) return
+        writes++
+      })
+      ctx.joinChannel('dev', 'manual')
+      ctx.joinTopic('t1', 'Auth', 'dev')
+      expect(writes).toBe(0)
+      armed = true
+      ctx.joinChannel('ops', 'manual')
+      expect(writes).toBe(1)
+    })
+
     it('fires on joinChannel', () => {
       ctx2.joinChannel('dev', 'manual')
       expect(fired).toBe(1)

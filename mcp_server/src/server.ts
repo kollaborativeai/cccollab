@@ -107,10 +107,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // snapshot straight over the file the restore has not read yet —
   // destroying the previous session's topics with the session's own
   // startup. Arming last means startup reads the file and writes it
-  // exactly once, at the end, when the context is whole. This is a
-  // structural guarantee rather than a rule about statement order: nothing
-  // added to startup later can clobber the file by being written in the
-  // wrong place.
+  // exactly once, at the end, when the context is whole. (This is
+  // statement order + a flag, not a type-level gate — I6 tests the flag.)
   let persistArmed = false
   const context = new ActiveContext(
     persistKey === null
@@ -246,12 +244,16 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     const transport = router.all().find((t) => t.source === location.name)
     if (!transport || !transport.enabled) continue
     for (const channel of location.channels) {
+      // I9 (KAI-415): only claim a local seat after the wire join succeeds —
+      // same invariant as restore. A failed auto-join must not be persisted
+      // by the end-of-startup snapshot as if the seat were held.
       try {
         await transport.joinChannel({ sessionName: session.displayName, channel: channel.name })
       } catch (err) {
         console.error(
           `[cccollab] Auto-join channel "${channel.name}" at "${location.name}" failed: ${err instanceof Error ? err.message : String(err)}`,
         )
+        continue
       }
       context.joinChannel(channel.name, 'cccollab.json', location.name)
 

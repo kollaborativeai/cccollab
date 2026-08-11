@@ -9,8 +9,8 @@ const SESSION_PREFIX_PATTERN = /^\*\[(.+?)\]\*:\s*([\s\S]*)$/
  * `introduce` rather than derived from the human-typed `name` — so a
  * session that renames itself still resolves to the same key across a
  * restart. Returns `null` when no usable id was declared: callers fall
- * back to today's name-keyed behavior (no persistence), which is the
- * pre-existing floor, not a regression.
+ * back to no persistence at all (there is no name-keyed disk path), which
+ * is the pre-existing floor, not a regression.
  *
  * A blank id counts as "none declared". `?? ` alone would treat `''` as
  * a real key, and `sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? ''`
@@ -30,17 +30,27 @@ const SESSION_PREFIX_PATTERN = /^\*\[(.+?)\]\*:\s*([\s\S]*)$/
  * has no business round-tripping a 10 000-character "id".
  */
 const MAX_SESSION_ID_LENGTH = 200
-// eslint-disable-next-line no-control-regex -- control chars are exactly what this rejects
-const UNSAFE_SESSION_ID = /[/\\]|[\u0000-\u001f\u007f]/
+/**
+ * Same allowlist as `session-state.ts` `SAFE_SESSION_ID` (KAI-415 I3).
+ * Shared by construction: whatever can become a file name must pass here
+ * first so a hostile env id never arms the persistence hook only to throw
+ * on every later save. Keep these two regexes in lock-step.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** Path-safe session id: alphanumeric start, then alnum / `.` / `_` / `-`. */
+export function isSafeSessionId(id: string): boolean {
+  return id.length > 0 && id.length <= MAX_SESSION_ID_LENGTH && SAFE_SESSION_ID.test(id)
+}
 
 export function sessionKey(identity: SessionIdentity | undefined): string | null {
   const id = identity?.sessionId
   if (typeof id !== 'string') return null
   const trimmed = id.trim()
-  if (trimmed === '' || trimmed === '.' || trimmed === '..') return null
-  if (trimmed.length > MAX_SESSION_ID_LENGTH) return null
-  if (UNSAFE_SESSION_ID.test(trimmed)) return null
-  return id
+  // I3: refuse anything that cannot be a sessions-dir filename so the
+  // writer is never armed for a key load returns null on and save throws on.
+  if (!isSafeSessionId(trimmed)) return null
+  return trimmed
 }
 
 /**
@@ -62,7 +72,10 @@ const SESSION_ID_ENV_VAR = 'CLAUDE_CODE_SESSION_ID'
  * and cross-contaminate them.
  */
 export function identityFromEnv(env: NodeJS.ProcessEnv, cwd: string, pid: number): SessionIdentity | undefined {
-  const sessionId = env[SESSION_ID_ENV_VAR]?.trim()
+  const raw = env[SESSION_ID_ENV_VAR]?.trim()
+  // I3: drop unsafe ids at the env boundary so sessionId never holds a
+  // value that sessionKey would reject and save would throw on.
+  const sessionId = raw && isSafeSessionId(raw) ? raw : undefined
   return compactIdentity({
     ...(sessionId ? { sessionId } : {}),
     cwd,

@@ -159,6 +159,16 @@ describe('SessionManager', () => {
       const uuid = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
       expect(sessionKey({ sessionId: uuid })).toBe(uuid)
     })
+
+    // I3 (KAI-415): path-separator refuse alone is not enough — ids that
+    // pass the old blocklist but fail SAFE_SESSION_ID used to arm the
+    // writer, then throw on every save. Align with the filename allowlist.
+    it('refuses a sessionId that is not a safe filename (KAI-415 I3)', () => {
+      expect(sessionKey({ sessionId: 'foo bar' })).toBeNull()
+      expect(sessionKey({ sessionId: 'foo@bar' })).toBeNull()
+      expect(sessionKey({ sessionId: 'a:b' })).toBeNull()
+      expect(sessionKey({ sessionId: 'uuid%2ejson' })).toBeNull()
+    })
   })
 
   /**
@@ -226,6 +236,13 @@ describe('SessionManager', () => {
 
     it('trims surrounding whitespace off an otherwise valid UUID', () => {
       expect(identityFromEnv({ CLAUDE_CODE_SESSION_ID: ' uuid-abc \n' }, '/x', 1)?.sessionId).toBe('uuid-abc')
+    })
+
+    it('omits sessionId for an unsafe CLAUDE_CODE_SESSION_ID so the writer never arms (KAI-415 I3)', () => {
+      const identity = identityFromEnv({ CLAUDE_CODE_SESSION_ID: 'foo bar' }, '/projects/x', 1)
+      expect(identity?.sessionId).toBeUndefined()
+      expect(sessionKey(identity)).toBeNull()
+      expect(identityFromEnv({ CLAUDE_CODE_SESSION_ID: '../../pwned' }, '/x', 1)?.sessionId).toBeUndefined()
     })
   })
 

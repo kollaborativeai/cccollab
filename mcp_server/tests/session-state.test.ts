@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -9,6 +10,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -116,6 +118,48 @@ describe('session-state store (KAI-415)', () => {
       expect(loadSessionState('a/b')).toBeNull()
     })
 
+    it('returns null when body sessionId does not match the path key (KAI-415 I10)', () => {
+      saveSessionState(stateFor('uuid-a'))
+      // Hand-edit: same file, foreign body key.
+      const file = sessionStateFile('uuid-a')
+      const raw = JSON.parse(readFileSync(file, 'utf-8')) as SessionState
+      raw.sessionId = 'uuid-b'
+      writeFileSync(file, JSON.stringify(raw))
+      expect(loadSessionState('uuid-a')).toBeNull()
+    })
+
+    it('returns null for corrupt JSON and does not throw (KAI-415 I5)', () => {
+      const file = sessionStateFile('uuid-corrupt')
+      // ensure dir exists
+      saveSessionState(stateFor('uuid-seed'))
+      writeFileSync(file, '{not-json')
+      expect(loadSessionState('uuid-corrupt')).toBeNull()
+    })
+
+    it('returns null when the path is not a regular file (KAI-415 I8)', () => {
+      saveSessionState(stateFor('uuid-fifo-seed'))
+      const file = sessionStateFile('uuid-fifo')
+      // Directory at the path is not a regular file. (A FIFO would hang
+      // readFileSync forever without the isFile guard — dirs throw EISDIR,
+      // so this asserts the explicit regular-file gate, not the throw path.)
+      mkdirSync(file, { recursive: true })
+      expect(loadSessionState('uuid-fifo')).toBeNull()
+    })
+
+    it('returns null for a FIFO without hanging (KAI-415 I8)', () => {
+      saveSessionState(stateFor('uuid-fifo-seed2'))
+      const file = sessionStateFile('uuid-mkfifo')
+      const r = spawnSync('mkfifo', [file], { encoding: 'utf-8' })
+      if (r.status !== 0) {
+        // Skip on platforms without mkfifo
+        return
+      }
+      // Must return promptly — without isFile, readFileSync blocks forever.
+      const t0 = Date.now()
+      expect(loadSessionState('uuid-mkfifo')).toBeNull()
+      expect(Date.now() - t0).toBeLessThan(2000)
+    })
+
     it('accepts a real Claude Code session UUID', () => {
       const uuid = '3f1a2b4c-5d6e-7f80-9a1b-2c3d4e5f6071'
       expect(sessionStateFile(uuid)).toBe(join(CCCOLLAB_SESSIONS_DIR, `${uuid}.json`))
@@ -203,10 +247,38 @@ describe('session-state store (KAI-415)', () => {
       expect(existsSync(strayPath)).toBe(true)
     })
 
+    it('does not reap a non-session-shaped *.json even when aged (KAI-415 S2)', () => {
+      // SAFE_SESSION_ID requires an alphanumeric first character — so a
+      // leading underscore (or a space in the base name) is not a session file.
+      const now = Date.now()
+      mkdirSync(CCCOLLAB_SESSIONS_DIR, { recursive: true })
+      const stray = join(CCCOLLAB_SESSIONS_DIR, '_not-a-session.json')
+      writeFileSync(stray, '{"keep":true}')
+      const ancient = (now - 400 * DAY_MS) / 1000
+      utimesSync(stray, ancient, ancient)
+      pruneStaleSessionStates({ now })
+      expect(existsSync(stray)).toBe(true)
+    })
+
     it('does not leave lock or temp files behind after a save', () => {
       saveSessionState(stateFor('uuid-a'))
       const leftovers = readdirSync(CCCOLLAB_SESSIONS_DIR).filter((f) => f.endsWith('.lock') || f.endsWith('.tmp'))
       expect(leftovers).toEqual([])
+    })
+
+    it('concurrent saves leave non-torn JSON (KAI-415 I11)', () => {
+      // LWW is intentional; this only asserts neither writer leaves half a file.
+      const writers = Array.from({ length: 8 }, (_, i) =>
+        stateFor('uuid-race', {
+          channels: [{ name: `ch-${i}`, location: 'local', source: 'manual' }],
+          updatedAt: 1_700_000_000_000 + i,
+        }),
+      )
+      for (const w of writers) saveSessionState(w)
+      const loaded = loadSessionState('uuid-race')
+      expect(loaded).not.toBeNull()
+      expect(loaded!.channels).toHaveLength(1)
+      expect(loaded!.channels[0]!.name).toMatch(/^ch-\d$/)
     })
   })
 })
