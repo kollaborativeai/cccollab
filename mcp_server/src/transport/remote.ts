@@ -1148,6 +1148,24 @@ export class RemoteTransport implements Transport {
   }
 
   /**
+   * Drop every name→id and delivery-cursor entry this transport holds.
+   *
+   * Required on an organization rebind (cc#32 C1 / I8): `channelIdsByName` is
+   * only written by a successful `joinChannel`, so after an org change the map
+   * still holds the OLD org's channel document ids. A failed re-join then leaves
+   * the stale id in place, and `subscribeChannelMessages` takes the sync
+   * cache-hit path against it — `ORG_MISMATCH` on every batch until the
+   * transport self-disables. Cursor entries keyed by those ids would also
+   * replay the excursion window as live notifications on return (I8).
+   *
+   * Call before the org-change re-join loop; safe no-op when empty.
+   */
+  invalidateChannelCaches(): void {
+    this.channelIdsByName.clear()
+    this.channelMaxTs.clear()
+  }
+
+  /**
    * Tear down the transport: invoke every outstanding subscribe-returned
    * unsubscribe (DMs, topics, anything else future code adds via
    * `trackUnsubscribe`), then close the underlying ConvexClient so its

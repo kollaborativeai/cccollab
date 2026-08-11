@@ -75,6 +75,65 @@ export interface IdentityToolDeps {
   diagnostics?: AttachDiagnostics
 }
 
+/** One org as returned by listOrganizations (slug optional until KAI-407 lands). */
+export type OrgListEntry = { id: string; name: string; slug?: string }
+
+/**
+ * Map a user-supplied org handle (Convex id, slug, or exact name) to the
+ * canonical organization **id**.
+ *
+ * cc#31 steers agents to pass slugs and returns them from whoami; cc#32 stores
+ * and compares the raw introduce argument. Without this, introduce-by-id then
+ * re-introduce-by-same-org-slug is a false org-change: full teardown +
+ * droppedTopics for topics that never left the org (cc#31 C3 / cc#32 S on
+ * raw equality). Prefer id when the handle already is one; otherwise resolve
+ * via the list. Unresolvable handles pass through unchanged so a genuine
+ * unknown value still looks different from a known binding.
+ */
+export function canonicalizeOrganizationId(
+  handle: string | undefined,
+  orgs: readonly OrgListEntry[],
+): string | undefined {
+  if (handle === undefined) return undefined
+  for (const o of orgs) {
+    if (o.id === handle) return o.id
+  }
+  for (const o of orgs) {
+    if (o.slug !== undefined && o.slug === handle) return o.id
+  }
+  const nameHits = orgs.filter((o) => o.name === handle)
+  if (nameHits.length === 1) return nameHits[0]!.id
+  return handle
+}
+
+/**
+ * Collect org lists from enabled remotes (best-effort). Used only to resolve
+ * id↔slug before org-change detection and after a successful introduce so the
+ * stored binding is always a canonical id when the list is available.
+ */
+async function listOrgsFromRemotes(router: TransportRouter): Promise<OrgListEntry[]> {
+  const seen = new Map<string, OrgListEntry>()
+  for (const transport of router.enabled()) {
+    if (transport.source === LOCAL_LOCATION) continue
+    const listFn = (transport as { listOrganizations?: () => Promise<OrgListEntry[]> }).listOrganizations
+    if (typeof listFn !== 'function') continue
+    try {
+      const rows = await listFn.call(transport)
+      for (const row of rows) {
+        if (row && typeof row.id === 'string' && !seen.has(row.id)) seen.set(row.id, row)
+      }
+    } catch {
+      /* best-effort: detection falls back to raw string compare */
+    }
+  }
+  return [...seen.values()]
+}
+
+function invalidateRemoteChannelCaches(transport: Transport): void {
+  const fn = (transport as { invalidateChannelCaches?: () => void }).invalidateChannelCaches
+  if (typeof fn === 'function') fn.call(transport)
+}
+
 export async function handleIdentityTool(
   name: string,
   args: Record<string, unknown>,
@@ -90,6 +149,11 @@ export async function handleIdentityTool(
         name: string
         objective?: string
         organization?: string
+      }
+
+      // I7: empty string is a valid zod string but a destructive migration key.
+      if (typeof displayName !== 'string' || displayName.trim() === '') {
+        return JSON.stringify({ error: 'name must be a non-empty string.' })
       }
 
       const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
@@ -128,12 +192,30 @@ export async function handleIdentityTool(
       // Snapshot this BEFORE the fan-out, which records the NEW bindings and
       // would otherwise make every location look unchanged by the time the
       // topic decisions below are taken.
+      // Canonicalize org handles BEFORE compare/store (cc#31 C3 merge critical).
+      // Raw string equality treated id and slug of the same org as a destructive
+      // org-change once agents are steered to pass slugs.
+      const orgCatalog = organization !== undefined ? await listOrgsFromRemotes(deps.router) : []
+      const canonicalOrganization =
+        organization !== undefined ? canonicalizeOrganizationId(organization, orgCatalog) : undefined
+
       const orgChangedLocations = new Set<string>()
       for (const location of membershipLocations(deps)) {
         if (location === LOCAL_LOCATION) continue
         const previousOrg = deps.session.getOrganizationFor(location)
-        if (previousOrg !== undefined && organization !== undefined && previousOrg !== organization) {
-          orgChangedLocations.add(location)
+        const previousCanonical =
+          previousOrg !== undefined ? canonicalizeOrganizationId(previousOrg, orgCatalog) : undefined
+        // C2: first explicit org at a location that already holds membership is a
+        // rebind. attachLocation introduces without organizationId and never
+        // records a binding, so previousOrg stays undefined while the backend
+        // row still rebinds on the next introduce that passes an org — without
+        // this, migration is skipped and feeds stay on the old org row.
+        if (canonicalOrganization !== undefined) {
+          if (previousCanonical === undefined) {
+            orgChangedLocations.add(location)
+          } else if (previousCanonical !== canonicalOrganization) {
+            orgChangedLocations.add(location)
+          }
         }
       }
       const rebinds = (location: ChannelLocation): boolean => renamed || orgChangedLocations.has(location)
@@ -162,6 +244,16 @@ export async function handleIdentityTool(
 
       // Teardown and the old-identity leave are gated on `migrating` ALONE: a
       // heal has nothing to tear down and no previous identity to leave.
+      // C3: capture before setName. When no config `name` was set, displayName
+      // falls back to the shared OS username that every sibling session of this
+      // user shares at the local broker. Leaving channels under that name
+      // evicts the siblings, not just this process.
+      const hadExplicitName = deps.session.hasName()
+      const leaveRebinds = (location: ChannelLocation): boolean => {
+        if (location === LOCAL_LOCATION && !hadExplicitName) return false
+        return rebinds(location)
+      }
+
       if (migrating) {
         // Drop the remote reactive subscriptions BEFORE the membership
         // rows they are gated on disappear. A live Convex `onUpdate` keeps
@@ -187,7 +279,20 @@ export async function handleIdentityTool(
         // sessions. Only locations that actually REBIND are torn down — a
         // location that neither renamed nor changed org keeps its memberships
         // and its live subscriptions.
-        await leaveUnderPreviousName(deps, previousName, rebinds)
+        //
+        // Local leave is gated by leaveRebinds (C3): skip when the previous
+        // name was only the shared username fallback.
+        await leaveUnderPreviousName(deps, previousName, leaveRebinds)
+
+        // C1/I8: drop stale org-A channel ids and cursors before re-join so a
+        // failed join cannot leave subscribe on the wrong tenant's document id.
+        for (const location of orgChangedLocations) {
+          try {
+            invalidateRemoteChannelCaches(deps.router.get(location))
+          } catch {
+            /* transport absent/degraded — nothing to invalidate */
+          }
+        }
       }
 
       deps.session.setName(displayName)
@@ -215,8 +320,10 @@ export async function handleIdentityTool(
           // would let an org switch mark LOCAL as changed and drop the user's
           // local topics. A location whose introduce threw keeps its previous
           // binding, so the next introduce still sees the change and migrates it.
-          if (organization !== undefined && transport.source !== LOCAL_LOCATION) {
-            deps.session.setOrganizationFor(transport.source, organization)
+          if (canonicalOrganization !== undefined && transport.source !== LOCAL_LOCATION) {
+            // Store the CANONICAL id, never the raw slug/id argument, so a later
+            // introduce with the other spelling of the same org is not a change.
+            deps.session.setOrganizationFor(transport.source, canonicalOrganization)
           }
         } catch {
           failed.push(transport.source)
@@ -238,14 +345,23 @@ export async function handleIdentityTool(
 
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name. Skip
-      // locations whose introduce did not rebind (see above).
+      // locations whose introduce did not rebind (see above). Track success
+      // so resubscribe does not bind a feed against a channel we failed to
+      // join (C1: stale id / no presence → ORG_MISMATCH or permanent deafness).
+      const reJoinedChannels = new Set<string>()
       for (const ch of deps.context.getSubscribedChannels()) {
         if (!introduced.has(ch.location)) continue
+        const key = `${ch.location}::${ch.name}`
         try {
           const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
-        } catch {
-          // Non-fatal.
+          reJoinedChannels.add(key)
+        } catch (err) {
+          // I1: re-join failure must reach degraded — the self-heal predicate
+          // only sees "membership without subscription", the opposite of a
+          // failed join that still has a live map key.
+          logMigrationWarning(`re-join channel "${ch.name}" (${ch.location})`, err)
+          if (!failed.includes(ch.location)) failed.push(ch.location)
         }
       }
 
@@ -283,8 +399,9 @@ export async function handleIdentityTool(
           try {
             const transport = deps.router.get(topic.location)
             await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
-          } catch {
-            // Non-fatal.
+          } catch (err) {
+            logMigrationWarning(`re-join topic "${topic.threadTs}" (${topic.location})`, err)
+            if (!failed.includes(topic.location)) failed.push(topic.location)
           }
         }
 
@@ -293,8 +410,9 @@ export async function handleIdentityTool(
         // after introduce() rebound it, and after the re-joins recreated
         // the membership rows those same queries are gated on. On an
         // org-changed location the channel subscription re-registers against
-        // the NEW channelId that the joinChannel above just cached.
-        if (subs) resubscribeRemote(deps, subs, introduced)
+        // the NEW channelId that the joinChannel above just cached — and only
+        // when that join actually succeeded (C1).
+        if (subs) resubscribeRemote(deps, subs, introduced, reJoinedChannels)
       }
 
       // Truthfulness: re-check the same invariant AFTER the restore attempt. A
@@ -489,12 +607,21 @@ function teardownRemoteSubscriptions(
  * named session has none, and a subscribe without an explicit `sinceTs`
  * would dump the channel's entire broadcast backlog into the agent.
  */
-function resubscribeRemote(deps: IdentityToolDeps, subs: RemoteSubscriptionDeps, introduced: Set<string>): void {
+function resubscribeRemote(
+  deps: IdentityToolDeps,
+  subs: RemoteSubscriptionDeps,
+  introduced: Set<string>,
+  reJoinedChannels: Set<string>,
+): void {
   for (const ch of deps.context.getSubscribedChannels()) {
     // A subscription binds the transport's CURRENT session id; a location
     // whose introduce did not rebind would subscribe under the stale id and
     // immediately fail its membership gate, so skip it (see the fan-out).
     if (!introduced.has(ch.location)) continue
+    // C1: never re-register a channel feed whose re-join failed — that would
+    // either hit a stale org-A channelId (transport kill) or an empty presence
+    // (permanent deafness) while introduce already reported success.
+    if (!reJoinedChannels.has(`${ch.location}::${ch.name}`)) continue
     try {
       ensureChannelSubscription({
         transport: deps.router.get(ch.location),
