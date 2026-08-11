@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
+import { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -23,6 +23,8 @@ import { AttachDiagnostics } from './transport/diagnostics.js'
 import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
+import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
+import { ownVersion } from './own-version.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
 import { handleListOrganizations } from './tools/organizations.js'
@@ -288,7 +290,28 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     )
   }
 
+  // The plugin that spawned us ships the skill telling the model how to call
+  // these tools. Read once here rather than per call: CLAUDE_PLUGIN_ROOT is
+  // fixed for the life of the process, and a drifted skill is a property of
+  // this session, not of any one request.
+  const versionState = inspectVersions({
+    serverVersion: ownVersion(),
+    env,
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf-8')
+      } catch {
+        return undefined
+      }
+    },
+  })
+  const startupWarning = driftWarning(versionState)
+  if (startupWarning) {
+    for (const line of startupWarning.split('\n')) console.error(`[cccollab] ${line}`)
+  }
+
   registerTools(mcp, {
+    versionState,
     session,
     context,
     router,
@@ -382,6 +405,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
 }
 
 interface ToolDeps {
+  /** Plugin/binary version handshake, computed once at startup. */
+  versionState: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter

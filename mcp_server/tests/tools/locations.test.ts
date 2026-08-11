@@ -94,8 +94,8 @@ describe('summarizeLocations', () => {
   })
 
   it('marks a logged-in remote missing its Clerk pointer as not constructable', () => {
-    const rows = summarize([remote({ name: 'tow123', clerkIssuer: undefined, clerkClientId: undefined })])
-    const r = byName(rows, 'tow123')
+    const rows = summarize([remote({ name: 'selfhosted', clerkIssuer: undefined, clerkClientId: undefined })])
+    const r = byName(rows, 'selfhosted')
     expect(r.loggedIn).toBe(true)
     expect(r.constructable).toBe(false)
   })
@@ -121,8 +121,8 @@ describe('summarizeLocations', () => {
   })
 
   it('preserves input order and covers every configured location', () => {
-    const rows = summarize([remote({ name: 'remote' }), remote({ name: 'tow123' }), local()])
-    expect(rows.map((r) => r.name)).toEqual(['remote', 'tow123', 'local'])
+    const rows = summarize([remote({ name: 'remote' }), remote({ name: 'selfhosted' }), local()])
+    expect(rows.map((r) => r.name)).toEqual(['remote', 'selfhosted', 'local'])
   })
 })
 

@@ -9,8 +9,12 @@ import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
+import { driftWarning, type VersionState } from '../plugin-version.js'
 
 export interface IdentityToolDeps {
+  /** Result of the plugin/binary version handshake, computed once at startup.
+   *  Optional so unit tests that do not exercise it can omit it. */
+  versionState?: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -137,6 +141,13 @@ export async function handleIdentityTool(
         }
       }
 
+      // Drift is reported on `introduce` because it is the one tool every
+      // session must call before any other, which makes it the only reliable
+      // place to tell the model that the instructions it is following may not
+      // describe this server. Attached to the result rather than logged: the
+      // model reads results, and stderr goes to a file nobody opens mid-session.
+      const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+
       const enabledCount = deps.router.enabled().length
       // No transport registered: do not report bare success. When zero
       // transports are enabled the name is still set locally (identity for
@@ -147,6 +158,7 @@ export async function handleIdentityTool(
           name: displayName,
           ...(objective ? { objective } : {}),
           locations: transportResults,
+          ...(versionWarning ? { warning: versionWarning } : {}),
         })
       }
 
@@ -154,6 +166,7 @@ export async function handleIdentityTool(
         name: displayName,
         ...(objective ? { objective } : {}),
         ...(enabledCount > 0 ? { locations: transportResults } : {}),
+        ...(versionWarning ? { warning: versionWarning } : {}),
       })
     }
     case 'whoami': {
@@ -196,6 +209,15 @@ export async function handleIdentityTool(
           : {}),
         subscribedChannels,
         locations: locationStates,
+        ...(deps.versionState
+          ? {
+              versions: {
+                server: deps.versionState.serverVersion,
+                ...(deps.versionState.pluginVersion ? { skill: deps.versionState.pluginVersion } : {}),
+                status: deps.versionState.status,
+              },
+            }
+          : {}),
       })
     }
     case 'authenticate': {

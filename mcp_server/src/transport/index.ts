@@ -4,7 +4,7 @@
  * The local stdio MCP server always spawns a local broker transport at
  * the reserved location name `"local"`. CCC-3 adds an arbitrary number
  * of named non-local locations, each wrapping its own Convex deployment
- * (e.g. `"flatout"`, `"kollaborative"`). Channels and the topics they
+ * (e.g. `"acme"`, `"staging"`). Channels and the topics they
  * contain are namespaced by their location: a "dev" channel at one
  * location and a "dev" channel at another location are two distinct
  * channels. Each channel-addressed or topic-addressed tool call routes

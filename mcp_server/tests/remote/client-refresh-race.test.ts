@@ -44,7 +44,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
   it('a peer write between in-memory load and refresh is observable inside the lock', async () => {
     // Initial state: tokens R0 / A0 persisted to disk. This represents
     // both processes' startup snapshot.
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A0',
@@ -52,13 +52,13 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       idToken: 'I0',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
-    const startupSnapshot = loadPersistedLocationAuth('flatout')
+    const startupSnapshot = loadPersistedLocationAuth('acme')
     expect(startupSnapshot?.refreshToken).toBe('R0')
 
     // Simulate: peer process A successfully refreshed and persisted
     // R1/A1. saveLocationAuth itself is cross-process safe via the
     // lock — this is the scenario the fix relies on.
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A1',
@@ -72,7 +72,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // refreshToken now differs from B's in-memory R0 — the fix
     // adopts the on-disk tokens and skips the refresh call entirely.
     const adopted = await withConfigLock(async (_persist) => {
-      const onDisk = loadPersistedLocationAuth('flatout')
+      const onDisk = loadPersistedLocationAuth('acme')
       // Simulate B's in-memory state.
       const inMemoryRefresh = 'R0'
       if (
@@ -96,10 +96,10 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     // and verify the file landed at the right path with the right
     // values. This is the path the refresh fetcher uses on a real
     // (non-stale) refresh.
-    expect(loadPersistedLocationAuth('flatout')).toBeNull()
+    expect(loadPersistedLocationAuth('acme')).toBeNull()
 
     await withConfigLock(async (persist) => {
-      persist('flatout', {
+      persist('acme', {
         authType: 'clerk',
         url: 'https://a.convex.cloud',
         accessToken: 'A2',
@@ -110,7 +110,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       })
     })
 
-    const after = loadPersistedLocationAuth('flatout')
+    const after = loadPersistedLocationAuth('acme')
     expect(after).toEqual(
       expect.objectContaining({
         url: 'https://a.convex.cloud',
@@ -120,8 +120,8 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
     )
     // And the file on disk is healthy JSON with the persisted tokens.
     const contents = JSON.parse(readFileSync(CCCOLLAB_CONFIG_FILE, 'utf-8'))
-    expect(contents.locations.flatout.accessToken).toBe('A2')
-    expect(contents.locations.flatout.refreshToken).toBe('R2')
+    expect(contents.locations.acme.accessToken).toBe('A2')
+    expect(contents.locations.acme.refreshToken).toBe('R2')
   })
 
   it('withConfigLock releases the lock even when the callback rejects', async () => {
@@ -137,7 +137,7 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
 
     // Lock must be released — saveLocationAuth grabs it again
     // synchronously.
-    saveLocationAuth('flatout', {
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A3',
@@ -145,12 +145,12 @@ describe('cross-process refresh-token coherence (C1 invariants)', () => {
       idToken: 'I3',
       accessTokenExpiresAt: 1_700_000_000_000,
     })
-    expect(loadPersistedLocationAuth('flatout')?.accessToken).toBe('A3')
+    expect(loadPersistedLocationAuth('acme')?.accessToken).toBe('A3')
   })
 
   it('loadPersistedLocationAuth returns null for unknown locations and missing files', async () => {
-    expect(loadPersistedLocationAuth('flatout')).toBeNull()
-    saveLocationAuth('flatout', {
+    expect(loadPersistedLocationAuth('acme')).toBeNull()
+    saveLocationAuth('acme', {
       authType: 'clerk',
       url: 'https://a.convex.cloud',
       accessToken: 'A4',
