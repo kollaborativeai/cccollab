@@ -1,20 +1,29 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
+import { getFunctionName } from 'convex/server'
 
-import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
+import { RemoteTransport, HEARTBEAT_INTERVAL_MS, DEGRADATION_WINDOW_MS } from '../../src/transport/remote.js'
 
 /**
- * Self-disable transition test.
+ * Self-disable / per-tool-skip transition tests.
  *
- * The `RemoteTransport` graceful-degradation policy trips `enabled = false`
- * on the first `FunctionNotFoundError` (schema drift) or after three
- * generic failures within a 60s window. Subsequent calls short-circuit and
- * return empty results without hitting the ConvexClient again, while local
- * tools keep working.
+ * The `RemoteTransport` graceful-degradation policy operates at two levels:
+ *
+ * - Transport-wide `enabled = false`: only on a structured auth failure, or
+ *   immediately on a `FunctionNotFoundError` from a long-lived subscription
+ *   (structural schema drift on a core reactive feed — genuinely a
+ *   transport-wide signal).
+ * - Per-tool skip: everything else — including 3+ failures of the SAME op
+ *   within the 60s window, or a single `FunctionNotFoundError` from a
+ *   one-shot op — is tracked per op name. Once a specific op crosses the
+ *   threshold, THAT op alone is skipped (short-circuited without reaching
+ *   the backend) while every other op on the same transport keeps working
+ *   normally (KAI-333: a specific dead/failing tool must be skipped, not
+ *   disable the shared connection for every other tool).
  *
  * We construct a minimal ConvexClient stub whose `query` method rejects
- * with the relevant error the first time it's called. That's enough to
- * exercise the transition inside `listChannels()`.
+ * with the relevant error. That's enough to exercise the transition inside
+ * `listChannels()` / `listOrganizations()`.
  */
 
 class SchemaDriftError extends Error {
@@ -51,7 +60,7 @@ function makeStubClient(
 }
 
 describe('RemoteTransport graceful degradation', () => {
-  it('flips enabled=false on the first schema-drift error and subsequent calls short-circuit', async () => {
+  it('does NOT disable on a single function-not-found from a one-shot op; only that op returns empty', async () => {
     const { client, queryMock } = makeStubClient(async () => {
       throw new SchemaDriftError('Could not find function channels:listAll on deployment')
     })
@@ -61,36 +70,96 @@ describe('RemoteTransport graceful degradation', () => {
     expect(transport.enabled).toBe(true)
     expect(transport.degradation).toBeNull()
 
-    // First call trips the switch - listChannels returns an empty array
-    // rather than propagating the error, because the transport's
-    // `registerFailure` swallows it.
+    // A single missing function fails just this op (empty result). The
+    // transport stays enabled so every other op keeps working — one stale
+    // tool bound to a removed backend function no longer bricks the whole
+    // remote transport (KAI-333).
     const first = await transport.listChannels({})
     expect(first).toEqual([])
-    expect(transport.enabled).toBe(false)
-    expect(transport.degradation).toMatch(/function not found/i)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
 
-    // Second call short-circuits - it never hits the stub's `query`.
-    const callsBeforeSecond = queryMock.mock.calls.length
-    const second = await transport.listChannels({})
-    expect(second).toEqual([])
-    expect(queryMock.mock.calls.length).toBe(callsBeforeSecond)
+    // Not short-circuited: a subsequent call still reaches the client.
+    const callsBefore = queryMock.mock.calls.length
+    await transport.listChannels({})
+    expect(queryMock.mock.calls.length).toBe(callsBefore + 1)
   })
 
-  it('trips after three generic failures within the rolling window', async () => {
+  it('after three function-not-found errors, ONLY that op is skipped — the transport stays enabled (KAI-333 finding #2)', async () => {
+    const { client, queryMock } = makeStubClient(async () => {
+      throw new SchemaDriftError('Could not find function channels:listAll on deployment')
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    await transport.listChannels({})
+    await transport.listChannels({})
+    await transport.listChannels({})
+    // Transport-wide switch is untouched: repeated failures of one tool
+    // must not brick every other tool sharing this transport.
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+
+    // The 4th call is short-circuited: `listChannels` is now skipped, so
+    // it never reaches the backend again.
+    const callsBeforeSkip = queryMock.mock.calls.length
+    const result = await transport.listChannels({})
+    expect(result).toEqual([])
+    expect(queryMock.mock.calls.length).toBe(callsBeforeSkip)
+  })
+
+  it('after three generic failures of the same op, ONLY that op is skipped — the transport stays enabled (KAI-333 finding #2)', async () => {
     let counter = 0
-    const { client } = makeStubClient(async () => {
+    const { client, queryMock } = makeStubClient(async () => {
       counter += 1
       throw new Error(`network blip ${counter}`)
     })
     const transport = new RemoteTransport({ client, log: () => {} })
 
     await transport.listChannels({})
-    expect(transport.enabled).toBe(true)
+    await transport.listChannels({})
     await transport.listChannels({})
     expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+
+    const callsBeforeSkip = queryMock.mock.calls.length
+    const result = await transport.listChannels({})
+    expect(result).toEqual([])
+    expect(queryMock.mock.calls.length).toBe(callsBeforeSkip)
+  })
+
+  it('a tool tripped into skip-state does not affect a DIFFERENT tool on the same transport (KAI-333 finding #2)', async () => {
+    // Samuel's exact framing: "it shouldn't get disabled it should be
+    // skipped" — a specific dead/failing tool (listChannels here) must be
+    // skipped on its own while every OTHER tool (listOrganizations) keeps
+    // working normally on the same transport.
+    let listChannelsCalls = 0
+    const { client } = makeStubClient(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/channels:listAll') {
+        listChannelsCalls += 1
+        throw new Error(`network blip ${listChannelsCalls}`)
+      }
+      if (name === 'cccollab/organizations:listForUser') {
+        return [{ id: 'org_a', name: 'Acme' }]
+      }
+      return []
+    })
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    // A tool retried 3x within the window used to brick the whole
+    // transport — now it just skips itself.
     await transport.listChannels({})
-    expect(transport.enabled).toBe(false)
-    expect(transport.degradation).toMatch(/3 failures/)
+    await transport.listChannels({})
+    await transport.listChannels({})
+    expect(transport.enabled).toBe(true)
+
+    const callsBeforeSkip = listChannelsCalls
+    await transport.listChannels({})
+    expect(listChannelsCalls).toBe(callsBeforeSkip) // short-circuited
+
+    // A different tool, never having failed, is completely unaffected.
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([{ id: 'org_a', name: 'Acme' }])
   })
 
   it('trips immediately on a ConvexError with code UNAUTHENTICATED (structured auth signal)', async () => {
@@ -139,6 +208,101 @@ describe('RemoteTransport graceful degradation', () => {
     await transport.listChannels({})
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/authentication failed/i)
+  })
+
+  it('a function-not-found on a long-lived subscription DOES disable the whole transport (structural drift stays strict — unlike per-tool skip)', () => {
+    // Counterpart to the per-tool-skip cases above: a missing CORE feed
+    // function (listByTopic/listByChannel) on a reactive subscription is
+    // genuine schema drift, not a stray tool. This is the one case that
+    // deliberately stays a transport-wide trip (alongside auth failure) —
+    // it must still trip the breaker so the user gets the "restart your
+    // session" signal instead of silent partial sync.
+    let onError: ((err: unknown) => void) | undefined
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(
+        (
+          _query: unknown,
+          _args: Record<string, unknown>,
+          _onNext: (rows: unknown) => void,
+          onErr: (err: unknown) => void,
+        ) => {
+          onError = onErr
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(transport.enabled).toBe(true)
+
+    onError!(new SchemaDriftError('Could not find function messages:listByTopic on deployment'))
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('a function-not-found on a channel reactive subscription also disables the transport (cc#30 I8)', async () => {
+    // Topic path above is covered; channel listByChannel must trip the same way.
+    let onError: ((err: unknown) => void) | undefined
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_dev', latestTs: 0 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn(
+        (
+          _query: unknown,
+          _args: Record<string, unknown>,
+          _onNext: (rows: unknown) => void,
+          onErr: (err: unknown) => void,
+        ) => {
+          onError = onErr
+          return () => {}
+        },
+      ),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(transport.enabled).toBe(true)
+    onError!(new SchemaDriftError('Could not find function messages:listByChannel on deployment'))
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('detects FunctionNotFound by error name alone and by message alone (cc#30 S2)', async () => {
+    // SchemaDriftError sets both; half-deletion of either arm must not go untested.
+    class NameOnly extends Error {
+      constructor() {
+        super('opaque')
+        this.name = 'FunctionNotFoundError'
+      }
+    }
+    class MessageOnly extends Error {
+      constructor() {
+        super('Could not find function channels:listAll on deployment')
+        this.name = 'Error'
+      }
+    }
+    for (const factory of [() => new NameOnly(), () => new MessageOnly()]) {
+      const { client } = makeStubClient(async () => {
+        throw factory()
+      })
+      const transport = new RemoteTransport({ client, log: () => {} })
+      // One-shot FNF must NOT brick the transport (per-op path).
+      await transport.listChannels({})
+      expect(transport.enabled).toBe(true)
+      expect(transport.degradation).toBeNull()
+    }
   })
 })
 
@@ -285,7 +449,7 @@ describe('RemoteTransport.introduce rethrow', () => {
     expect((transport as unknown as { sessionId: string | null }).sessionId).toBeNull()
   })
 
-  it('rethrow does not bypass the failure counter (still counts toward degradation)', async () => {
+  it('rethrow does not bypass the failure counter — three failures skip ONLY "introduce", not the whole transport', async () => {
     let calls = 0
     const stub = {
       query: vi.fn(async () => undefined),
@@ -297,14 +461,21 @@ describe('RemoteTransport.introduce rethrow', () => {
       setAuth: vi.fn(),
     }
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
-    // Three failures in the window disables the transport.
     for (let i = 0; i < 3; i++) {
       await expect(transport.introduce({ sessionName: 'laptop' })).rejects.toThrow()
     }
-    expect(transport.enabled).toBe(false)
+    // Transport-wide switch is untouched — three failures of one tool
+    // (even one that rethrows) must not brick every other tool.
+    expect(transport.enabled).toBe(true)
+
+    // The 4th call is short-circuited: `introduce` is now skipped, so the
+    // mutation is never reached again.
+    const callsBeforeSkip = calls
+    await expect(transport.introduce({ sessionName: 'laptop' })).rejects.toThrow(/skipped/i)
+    expect(calls).toBe(callsBeforeSkip)
   })
 
-  it('introduce on a disabled transport throws rather than silently no-op', async () => {
+  it('introduce on a skipped op throws rather than silently no-op', async () => {
     const stub = {
       query: vi.fn(async () => undefined),
       mutation: vi.fn(async () => {
@@ -314,13 +485,239 @@ describe('RemoteTransport.introduce rethrow', () => {
       setAuth: vi.fn(),
     }
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
-    // Trip the circuit breaker.
+    // Trip `introduce`'s per-op skip state.
     for (let i = 0; i < 3; i++) {
       await transport.introduce({ sessionName: 'x' }).catch(() => {})
     }
-    expect(transport.enabled).toBe(false)
+    expect(transport.enabled).toBe(true)
     // A subsequent introduce must not silently succeed.
-    await expect(transport.introduce({ sessionName: 'x' })).rejects.toThrow(/disabled/)
+    await expect(transport.introduce({ sessionName: 'x' })).rejects.toThrow(/skipped/i)
+  })
+})
+
+describe('RemoteTransport write/join skip fails closed (cc#30 C1)', () => {
+  async function introduceReady(
+    mutationImpl: (...args: unknown[]) => Promise<unknown>,
+  ): Promise<{ transport: RemoteTransport; mutationMock: ReturnType<typeof vi.fn> }> {
+    const { client, mutationMock } = makeStubClient(async () => [], mutationImpl)
+    const transport = new RemoteTransport({ client, log: () => {} })
+    mutationMock.mockImplementationOnce(async () => 'session_1')
+    await transport.introduce({ sessionName: 'laptop' })
+    mutationMock.mockClear()
+    mutationMock.mockImplementation(mutationImpl)
+    return { transport, mutationMock }
+  }
+
+  it('after three broadcast blips, a 4th broadcast THROWS while transport stays healthy and skippedOps is visible', async () => {
+    let calls = 0
+    const { transport, mutationMock } = await introduceReady(async () => {
+      calls += 1
+      throw new Error(`network blip ${calls}`)
+    })
+
+    for (let i = 0; i < 3; i++) {
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'hi' })
+    }
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+    expect(transport.skippedOps.map((s) => s.op)).toContain('broadcast')
+
+    const before = mutationMock.mock.calls.length
+    await expect(transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'hi' })).rejects.toThrow(/skipped/i)
+    expect(mutationMock.mock.calls.length).toBe(before)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  it('after three joinChannel blips, a 4th join THROWS rather than soft-returning subscriberCount 0', async () => {
+    let calls = 0
+    const { transport, mutationMock } = await introduceReady(async () => {
+      calls += 1
+      throw new Error(`join blip ${calls}`)
+    })
+    for (let i = 0; i < 3; i++) {
+      await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    }
+    const before = mutationMock.mock.calls.length
+    await expect(transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })).rejects.toThrow(/skipped/i)
+    expect(mutationMock.mock.calls.length).toBe(before)
+  })
+
+  it('a successful op clears the failure window so intermittent blips do not permanent-mute (cc#30 I3)', async () => {
+    let calls = 0
+    const { transport, mutationMock } = await introduceReady(async () => {
+      calls += 1
+      // fail, fail, succeed, fail — without success-clear the 4th would skip
+      if (calls === 3) return undefined
+      throw new Error(`blip ${calls}`)
+    })
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'a' })
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'b' })
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'c' }) // success
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'd' }) // fail again
+    expect(transport.skippedOps.map((s) => s.op)).not.toContain('broadcast')
+    // Still reaches the backend (not skipped).
+    const before = mutationMock.mock.calls.length
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'e' })
+    expect(mutationMock.mock.calls.length).toBe(before + 1)
+  })
+
+  it('two failures do not skip (threshold floor, cc#30 I8)', async () => {
+    let calls = 0
+    const { transport, mutationMock } = await introduceReady(async () => {
+      calls += 1
+      throw new Error(`blip ${calls}`)
+    })
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'a' })
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'b' })
+    expect(transport.skippedOps).toEqual([])
+    const before = mutationMock.mock.calls.length
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'c' })
+    expect(mutationMock.mock.calls.length).toBe(before + 1)
+  })
+
+  it('failures outside the rolling window do not count toward skip (window expiry, cc#30 I8)', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const { transport, mutationMock } = await introduceReady(async () => {
+        calls += 1
+        throw new Error(`blip ${calls}`)
+      })
+      // Two failures near t=0.
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'a' })
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'b' })
+      // Past the window the early failures must age out.
+      await vi.advanceTimersByTimeAsync(DEGRADATION_WINDOW_MS + 1)
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'c' })
+      expect(transport.skippedOps.map((s) => s.op)).not.toContain('broadcast')
+      // Still only one failure inside the window — a fourth call still reaches backend.
+      const before = mutationMock.mock.calls.length
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'd' })
+      expect(mutationMock.mock.calls.length).toBe(before + 1)
+      expect(transport.skippedOps.map((s) => s.op)).not.toContain('broadcast')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('one failure each on three different ops never skips any of them (multi-op isolation, cc#30 I8)', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [],
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/sessions:introduce') return 'session_1'
+        throw new Error(`fail ${name}`)
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    // 1 failure per op — must not trip any skip (threshold is 3 of the SAME op).
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'x' }).catch(() => {})
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    await transport.sendTopicMessage({ sessionName: 'laptop', topicId: 't1', text: 'y' }).catch(() => {})
+    // broadcast and sendTopicMessage throw only when skipped; join soft-returns.
+    // None should be in skippedOps.
+    expect(transport.skippedOps).toEqual([])
+    expect(transport.enabled).toBe(true)
+    const before = mutationMock.mock.calls.length
+    // A second broadcast still reaches the backend (only 1 prior failure).
+    await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'z' }).catch(() => {})
+    expect(mutationMock.mock.calls.length).toBeGreaterThan(before)
+  })
+
+  it('joinTopic history-query failure does not permanent-mute future joins (cc#30 I6)', async () => {
+    let joinCalls = 0
+    const { client, mutationMock, queryMock } = makeStubClient(
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/messages:listByTopic') throw new Error('history down')
+        return []
+      },
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/sessions:introduce') return 'session_1'
+        if (name === 'cccollab/topics:join') {
+          joinCalls += 1
+          return { topicId: 't1', channelId: 'c1', name: 'plan' }
+        }
+        return undefined
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    // Three joinTopic calls: join mutation succeeds, history fails — must NOT skip.
+    for (let i = 0; i < 3; i++) {
+      const res = await transport.joinTopic({ sessionName: 'laptop', topicId: 't1' })
+      expect(res.history).toEqual([])
+    }
+    expect(transport.skippedOps.map((s) => s.op)).not.toContain('joinTopic')
+    const joinsBefore = joinCalls
+    await transport.joinTopic({ sessionName: 'laptop', topicId: 't1' })
+    expect(joinCalls).toBe(joinsBefore + 1)
+    void mutationMock
+    void queryMock
+  })
+
+  it('successful introduce clears permanent skips (recovery, cc#30 I2)', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/sessions:introduce') return 'session_1'
+        if (name === 'cccollab/messages:sendToChannel') throw new Error('send blip')
+        return undefined
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    for (let i = 0; i < 3; i++) {
+      await transport.broadcast({ sessionName: 'laptop', channel: 'dev', text: 'x' })
+    }
+    expect(transport.skippedOps.map((s) => s.op)).toContain('broadcast')
+    // Re-introduce succeeds and clears skips.
+    await transport.introduce({ sessionName: 'laptop' })
+    expect(transport.skippedOps).toEqual([])
+  })
+})
+
+describe('RemoteTransport.createTopic skip state', () => {
+  it('three failures skip ONLY createTopic — a 4th call throws without reaching the mutation, other ops keep working', async () => {
+    let createCalls = 0
+    const { client } = makeStubClient(
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/organizations:listForUser') return [{ id: 'org_a', name: 'Acme' }]
+        return []
+      },
+      async (ref: unknown) => {
+        const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+        if (name === 'cccollab/sessions:introduce') return 'session_1'
+        if (name === 'cccollab/topics:start') {
+          createCalls += 1
+          throw new Error(`network blip ${createCalls}`)
+        }
+        return undefined
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    for (let i = 0; i < 3; i++) {
+      await expect(transport.createTopic({ sessionName: 'laptop', channel: 'dev', topic: 'plan' })).rejects.toThrow()
+    }
+    expect(transport.enabled).toBe(true)
+
+    // 4th call is short-circuited: never reaches the mutation again.
+    const callsBeforeSkip = createCalls
+    await expect(transport.createTopic({ sessionName: 'laptop', channel: 'dev', topic: 'plan-2' })).rejects.toThrow(
+      /skipped/i,
+    )
+    expect(createCalls).toBe(callsBeforeSkip)
+
+    // A different tool on the same transport is unaffected.
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([{ id: 'org_a', name: 'Acme' }])
   })
 })
 
@@ -511,6 +908,91 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
       sessionId: 'session_1',
       sinceTs: 4242,
     })
+  })
+})
+
+/**
+ * Bootstrap `listAll` vs reactive `listByChannel` (KAI-333 / cc#30 I4):
+ * - FNF on bootstrap still disables the whole transport (structural drift).
+ * - Transient bootstrap failures skip only `bootstrapChannelSubscribe`, so a
+ *   later cached-id subscribe still works.
+ */
+describe('RemoteTransport.subscribeChannelMessages bootstrap lookup failure routing (KAI-333 finding #3)', () => {
+  it('a function-not-found on the listAll bootstrap lookup disables the whole transport, same severity as the reactive subscription', async () => {
+    const stub = {
+      query: vi.fn(async () => {
+        throw new SchemaDriftError('Could not find function channels:listAll on deployment')
+      }),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    // No cached channel id, so this takes the async listAll-lookup path.
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    // Let the fire-and-forget async lookup settle.
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  it('transient (non-schema-drift) failures on the listAll bootstrap lookup eventually skip only the bootstrap op', async () => {
+    let calls = 0
+    const stub = {
+      query: vi.fn(async () => {
+        calls += 1
+        throw new Error(`network blip ${calls}`)
+      }),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    for (let i = 0; i < 3; i++) {
+      transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+    expect(transport.enabled).toBe(true)
+    expect(transport.skippedOps.some((s) => s.op === 'bootstrapChannelSubscribe')).toBe(true)
+
+    // 4th attempt is short-circuited: never reaches the backend lookup.
+    const callsBeforeSkip = stub.query.mock.calls.length
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stub.query.mock.calls.length).toBe(callsBeforeSkip)
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('bootstrap skip does NOT mute the cached-id subscribe path (cc#30 I4)', async () => {
+    let calls = 0
+    const onUpdate = vi.fn(() => () => {})
+    const stub = {
+      query: vi.fn(async () => {
+        calls += 1
+        throw new Error(`network blip ${calls}`)
+      }),
+      mutation: vi.fn(async () => undefined),
+      onUpdate,
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    for (let i = 0; i < 3; i++) {
+      transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+    // Seed cache as joinChannel would.
+    ;(transport as unknown as { channelIdsByName: Map<string, string> }).channelIdsByName.set('dev', 'chan_dev')
+    const before = onUpdate.mock.calls.length
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(onUpdate.mock.calls.length).toBe(before + 1)
   })
 })
 

@@ -253,6 +253,57 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
         expect(result.name).toBe('reviewer')
       })
+
+      it('surfaces a remote introduce skip/failure instead of silent success (cc#30 C2)', async () => {
+        const localTransport = new LocalTransport(7850)
+        const fakeRemote = {
+          source: 'remote' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {
+            throw new Error(
+              'remote transport op "introduce" is skipped ("introduce" skipped: 3 failures within 60000ms (last: blip))',
+            )
+          }),
+          joinChannel: vi.fn(async () => ({ subscriberCount: 0 })),
+          hasTopic: vi.fn(() => false),
+        }
+        const deps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([localTransport, fakeRemote as unknown as Transport]),
+        }
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps),
+        )
+        expect(result.error).toMatch(/Remote introduce failed/i)
+        expect(result.error).toMatch(/skipped/i)
+        expect(result.name).toBe('reviewer')
+      })
+
+      it('whoami exposes skippedOps on a remote transport that is still enabled (cc#30 C1)', async () => {
+        const localTransport = new LocalTransport(7850)
+        const fakeRemote = {
+          source: 'remote' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+          joinChannel: vi.fn(async () => ({ subscriberCount: 0 })),
+          hasTopic: vi.fn(() => false),
+          degradation: null,
+          skippedOps: [{ op: 'broadcast', reason: '"broadcast" skipped: 3 failures' }],
+          getBoundOrganizationName: vi.fn(async () => 'Acme'),
+        }
+        const deps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([localTransport, fakeRemote as unknown as Transport]),
+        }
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.enabled).toBe(true)
+        expect(result.locations.remote.skippedOps).toEqual([
+          { op: 'broadcast', reason: '"broadcast" skipped: 3 failures' },
+        ])
+      })
     })
 
     describe('whoami — organization', () => {
