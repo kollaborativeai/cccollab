@@ -51,11 +51,14 @@ function createMockDeps(): IdentityToolDeps {
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
  * Optional `remoteOverrides` can be used to add extra methods to the fake
- * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ * remote transport (e.g. `getBoundOrganization` for the whoami tests).
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganization: () => Promise<{ name: string; slug?: string } | null>
+    listOrganizations?: () => Promise<Array<{ id: string; name: string; slug?: string }>>
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -1225,6 +1228,74 @@ describe('Identity Tools', () => {
           expect(deps.session.getOrganizationFor('remote')).toBe('org_xxx')
         })
 
+        /**
+         * cc#31 C3 end-to-end (both branches): whoami surfaces organizationSlug
+         * via getBoundOrganization; that slug is fed back into introduce; the
+         * session must NOT tear down or drop topics. Without canonicalization
+         * this is `"org_xxx" !== "acme"` → full migration. Without the API
+         * rename, whoami cannot hand back a slug at all.
+         *
+         * RED: store/compare the raw introduce argument (skip canonicalize) →
+         * droppedTopics non-empty / leaveTopic fires.
+         */
+        it('C3 e2e: whoami organizationSlug re-introduce does not false-org-change', async () => {
+          const calls: RecordedCall[] = []
+          const orgs = [{ id: 'org_xxx', name: 'Acme', slug: 'acme' }]
+          const topicMap = new Map<string, () => void>()
+          const channelMap = new Map<string, () => void>()
+          const transport = makeRecordingRemoteTransport('remote', calls, { organizations: orgs })
+          // whoami path (KAI-407 API): bound org has display name + slug.
+          type BoundOrg = { name: string; slug?: string } | null
+          const withBound = transport as Transport & {
+            getBoundOrganization: () => Promise<BoundOrg>
+          }
+          withBound.getBoundOrganization = async () => ({ name: 'Acme', slug: 'acme' })
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+            remoteTopicUnsubscribes: topicMap,
+            remoteChannelUnsubscribes: channelMap,
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'architect', organization: 'org_xxx' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          ensureChannelSubscription({
+            transport,
+            locationName: 'remote',
+            channelName: 'kai',
+            messageBus,
+            map: channelMap,
+          })
+          ensureTopicSubscription({
+            transport,
+            locationName: 'remote',
+            topicId: 'topic_1',
+            channelName: 'kai',
+            messageBus,
+            map: topicMap,
+          })
+
+          const who = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+          expect(who.locations.remote.organization).toBe('Acme')
+          expect(who.locations.remote.organizationSlug).toBe('acme')
+          // Agent hand-back: re-introduce with the slug whoami just gave.
+          const handBack = who.locations.remote.organizationSlug as string
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'architect', organization: handBack }, deps)
+          expect(JSON.parse(result)).toEqual({ name: 'architect' })
+          expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
+          expect(calls.some((c) => c.method === 'invalidateChannelCaches')).toBe(false)
+          expect(JSON.parse(result).droppedTopics).toBeUndefined()
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_1'])
+          // Still stored as canonical id, not the slug string.
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_xxx')
+        })
+
         it('C2: first explicit org at a membership location migrates (previousOrg was undefined)', async () => {
           const calls: RecordedCall[] = []
           const topicMap = new Map<string, () => void>()
@@ -1776,16 +1847,26 @@ describe('Identity Tools', () => {
 
       it('reports the bound organization name for a remote location', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => 'Acme',
+          getBoundOrganization: async () => ({ name: 'Acme' }),
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
       })
 
+      it('reports organizationSlug as its own field for re-introduce hand-back', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganization: async () => ({ name: 'Acme', slug: 'acme' }),
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_xxx' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme')
+        expect(result.locations.remote.organizationSlug).toBe('acme')
+      })
+
       it('omits organization when the remote location has no bound org yet', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => null,
+          getBoundOrganization: async () => null,
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
