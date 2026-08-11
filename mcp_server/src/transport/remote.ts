@@ -440,13 +440,24 @@ export class RemoteTransport implements Transport {
    * unregistered on remote (verified live, 2026-07-15).
    *
    * Instead the retry IS the discriminator: re-run the identical call
-   * minus identity. If that succeeds, identity was the cause — proven by
-   * experiment rather than guessed from a string. If it fails too, this
-   * was never about identity: rethrow the ORIGINAL error so the
-   * failure-window/degradation logic sees the real cause unchanged.
+   * minus identity. If that succeeds, identity is the LIKELY cause. Not a
+   * proven one — the experiment has exactly one trial and inspects the
+   * error not at all, so a first attempt that failed transiently and then
+   * healed produces the identical signature. `identityRejectedReason` is
+   * worded to stay inside that limit; making it conclusive needs a second
+   * trial WITH identity after the retry succeeds, which is deliberately
+   * not done here (an extra mutation on every introduce). If the retry
+   * fails too, this was never about identity: rethrow the ORIGINAL error
+   * so the failure-window/degradation logic sees the real cause unchanged.
    *
-   * Safe to retry: Convex mutations are transactions, so the failed
-   * attempt committed nothing to roll back over.
+   * Safe to retry because `sessions:introduce` is an IDEMPOTENT UPSERT
+   * keyed by session name — running it twice converges on one row. It is
+   * NOT made safe by mutations being transactional: transactionality
+   * governs what happens inside a mutation and says nothing about a client
+   * that saw an error after the commit succeeded (dropped connection, lost
+   * acknowledgement). Do not carry this licence to a non-idempotent
+   * mutation such as `sendTopicMessage`, where attempt 1 commits, the ack
+   * is lost, and the retry posts a duplicate message.
    */
   private async introduceWithIdentityFallback(
     base: { sessionName: string; objective?: string; organizationId?: string },
@@ -454,6 +465,12 @@ export class RemoteTransport implements Transport {
   ): Promise<unknown> {
     const ref = fn<'mutation'>(this.refs.sessions.mutations.introduce)
     if (identity === undefined) {
+      // Nothing declared, so nothing can have been refused. Retract any
+      // reason left by an earlier introduce: `identityRejected` describes
+      // the CURRENT registration, and a stale one contradicts the very
+      // whoami payload it ships in (no top-level `identity`, yet a
+      // location claiming one was rejected).
+      this.identityRejectedReason = null
       return this.client.mutation(ref, base)
     }
     try {
@@ -467,14 +484,25 @@ export class RemoteTransport implements Transport {
         result = await this.client.mutation(ref, base)
       } catch {
         // Fails with AND without identity → not an identity problem.
+        // Retract any earlier reason before propagating: this attempt
+        // proved the failure is not about identity, so leaving the old
+        // claim standing would point the operator at the wrong cause.
+        this.identityRejectedReason = null
         // Propagate the original error untouched.
         throw err
       }
-      // Succeeded without identity, failed with it → identity is the cause.
+      // Succeeded without identity, failed with it → identity is the LIKELY
+      // cause. Not the proven one: this branch never inspects the error and
+      // never reads back the backend's state, so a first attempt that failed
+      // transiently and then healed is indistinguishable from a refusal.
+      // The wording stays inside what was actually observed.
       this.identityRejectedReason =
-        `Remote backend rejected the declared identity and it was NOT stored: ${withIdentityError}. ` +
-        `The session registered without it — grouping and stable-key restart (KAI-415) will not work ` +
-        `on this location until the backend accepts the optional \`identity\` arg on sessions:introduce.`
+        `Declared identity likely did not land at this location: introduce failed WITH identity and the ` +
+        `same call WITHOUT it succeeded, so identity is the likely cause. First attempt failed with: ${withIdentityError}. ` +
+        `The registration in place is the retry (no identity). Backend-stored grouping fields will be missing here ` +
+        `until the remote accepts the optional \`identity\` arg on sessions:introduce (KAI-430). ` +
+        `A one-off transient failure on the first attempt produces this same signature; client-side restart keys ` +
+        `are unaffected.`
       this.log(this.identityRejectedReason)
       return result
     }

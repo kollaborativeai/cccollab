@@ -106,6 +106,104 @@ describe('SessionManager', () => {
     it('resolves different sessionIds to different keys', () => {
       expect(sessionKey({ sessionId: 'uuid-abc' })).not.toBe(sessionKey({ sessionId: 'uuid-def' }))
     })
+
+    // `sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? ''` is the ordinary
+    // way a blank id arrives. `??` treats '' as "declared", so a blank id
+    // would resolve to the non-null key '' â and KAI-415 anchors its
+    // persisted state file on this key, so every blank-id session on the
+    // machine would share one state file and restore each other's state.
+    // A blank id carries no identifying information: it must read as
+    // "none declared", which is the safe, name-keyed floor.
+    it('returns null for an empty sessionId', () => {
+      expect(sessionKey({ sessionId: '' })).toBeNull()
+    })
+
+    it('returns null for a whitespace-only sessionId', () => {
+      expect(sessionKey({ sessionId: '   ' })).toBeNull()
+    })
+
+    it('does not hand two blank-id sessions the same non-null key', () => {
+      const a = sessionKey({ sessionId: '', cwd: '/projects/a' })
+      const b = sessionKey({ sessionId: '   ', cwd: '/projects/b' })
+      // Both must decline to answer rather than agree on a shared key.
+      expect(a).toBeNull()
+      expect(b).toBeNull()
+    })
+
+    /**
+     * C5. `sessionId` is self-declared, arrives unvalidated over the
+     * unauthenticated broker as well as through the MCP schema, and this is
+     * the resolver KAI-415 turns into a persisted-state FILE NAME. A key
+     * containing path separators, a NUL, or control characters is not a key
+     * â it is a path, and it must never be handed onward as if it were an
+     * opaque identifier. Refusing here holds for every caller, including the
+     * HTTP boundary that never sees the MCP schema.
+     */
+    it('refuses a sessionId carrying path separators', () => {
+      expect(sessionKey({ sessionId: '../../../../tmp/pwn' })).toBeNull()
+      expect(sessionKey({ sessionId: '/etc/passwd' })).toBeNull()
+      expect(sessionKey({ sessionId: 'a\\b' })).toBeNull()
+      expect(sessionKey({ sessionId: '..' })).toBeNull()
+    })
+
+    it('refuses a sessionId carrying a NUL or control character', () => {
+      expect(sessionKey({ sessionId: 'uuid\0truncated' })).toBeNull()
+      expect(sessionKey({ sessionId: 'uuid\nnewline' })).toBeNull()
+    })
+
+    it('refuses an absurdly long sessionId', () => {
+      expect(sessionKey({ sessionId: 'x'.repeat(10_000) })).toBeNull()
+    })
+
+    it('still accepts an ordinary Claude Code session UUID', () => {
+      const uuid = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+      expect(sessionKey({ sessionId: uuid })).toBe(uuid)
+    })
+  })
+
+  /**
+   * KAI-401: `introduce` is called from three places (the introduce tool,
+   * `attachLocation`, and server startup) and only one of them remembered
+   * to pass `identity`. Forwarding is structural rather than remembered:
+   * one method owns the payload, so a field added to the session reaches
+   * every transport by construction instead of by a maintainer noticing
+   * two other call sites.
+   */
+  describe('introduceArgs (KAI-401 structural forwarding)', () => {
+    it('carries every declared field', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/projects/cccollab' })
+      sm.setName('architect')
+      sm.setObjective('ship KAI-401')
+      sm.setOrganizationId('org_a')
+      sm.setIdentity({ sessionId: 'uuid-401', repo: 'cccollab', pid: 4321 })
+
+      expect(sm.introduceArgs()).toEqual({
+        sessionName: 'architect',
+        objective: 'ship KAI-401',
+        organizationId: 'org_a',
+        identity: { sessionId: 'uuid-401', repo: 'cccollab', pid: 4321 },
+      })
+    })
+
+    it('falls back to the display name and leaves undeclared fields undefined', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/projects/cccollab' })
+
+      expect(sm.introduceArgs()).toEqual({
+        sessionName: 'stefan',
+        objective: undefined,
+        organizationId: undefined,
+        identity: undefined,
+      })
+    })
+
+    it('reflects a re-introduce that drops the identity', () => {
+      const sm = new SessionManager({ username: 'stefan', cwd: '/projects/cccollab' })
+      sm.setName('architect')
+      sm.setIdentity({ sessionId: 'uuid-401' })
+      sm.setIdentity(undefined)
+
+      expect(sm.introduceArgs().identity).toBeUndefined()
+    })
   })
 
   describe('isSelf', () => {

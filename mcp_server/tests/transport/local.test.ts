@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -119,6 +119,63 @@ describe('LocalTransport: message history reads', () => {
       const second = await transport.readTopicMessages({ topicId: id, limit: 2, before: first.oldestTs })
       expect(second.messages.map((m) => m.text)).toEqual(['p1'])
       expect(second.hasMore).toBe(false)
+    })
+  })
+  /**
+   * C2. `install.sh` overwrites `dist/broker.js` in place and never restarts
+   * the running broker, which is spawned detached with no idle timeout — so a
+   * client that speaks `identity` routinely meets a broker that does not.
+   * That broker accepts the POST, returns 200, and stores nothing. Without a
+   * signal, `whoami` renders `local: {enabled: true}` beside an `identity`
+   * the broker never held: the exact silent drop KAI-401 exists to end, on
+   * the one transport every user has.
+   */
+  describe('identity drop detection against a stale broker (C2)', () => {
+    const identity = { company: 'flatout', repo: 'cccollab', sessionId: 'uuid-skew', pid: 4242 }
+
+    /** A broker whose POST /sessions answers exactly like the pre-KAI-401 build. */
+    function staleBrokerFetch() {
+      return async () => ({ ok: true, json: async () => ({ ok: true }) }) as unknown as Response
+    }
+
+    it('reports the drop when the broker acknowledges without echoing the identity', async () => {
+      const transport = new LocalTransport(1)
+      vi.stubGlobal('fetch', staleBrokerFetch())
+
+      await transport.introduce({ sessionName: 'skewtest', identity })
+
+      expect(transport.identityRejected).toMatch(/identity/i)
+      vi.unstubAllGlobals()
+    })
+
+    it('reports nothing when the broker echoes the identity back', async () => {
+      const transport = new LocalTransport(port)
+
+      await transport.introduce({ sessionName: 'lt-echo-ok', identity })
+
+      expect(transport.identityRejected).toBeNull()
+    })
+
+    it('reports nothing when no identity was declared', async () => {
+      const transport = new LocalTransport(1)
+      vi.stubGlobal('fetch', staleBrokerFetch())
+
+      await transport.introduce({ sessionName: 'skewtest-none' })
+
+      expect(transport.identityRejected).toBeNull()
+      vi.unstubAllGlobals()
+    })
+
+    it('retracts a previous drop report once a capable broker stores the identity', async () => {
+      const transport = new LocalTransport(port)
+      vi.stubGlobal('fetch', staleBrokerFetch())
+      await transport.introduce({ sessionName: 'lt-echo-heal', identity })
+      expect(transport.identityRejected).toMatch(/identity/i)
+      vi.unstubAllGlobals()
+
+      await transport.introduce({ sessionName: 'lt-echo-heal', identity })
+
+      expect(transport.identityRejected).toBeNull()
     })
   })
 })

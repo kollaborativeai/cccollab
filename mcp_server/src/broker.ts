@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { PROFILE, BROKER_RENDEZVOUS_FILE, CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 import { clampHistoryLimit, pageTopicHistory } from './history-paging.js'
+import { sessionKey } from './session.js'
 import type { SessionIdentity } from './transport/index.js'
 
 mkdirSync(CCCOLLAB_RUN_DIR, { recursive: true })
@@ -69,6 +70,49 @@ function normalizeChannel(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const trimmed = raw.trim().toLowerCase()
   return trimmed.length > 0 ? trimmed : null
+}
+
+/**
+ * Validate an `identity` off the wire instead of asserting a type onto it.
+ *
+ * This endpoint is raw HTTP on an unauthenticated loopback port — the MCP
+ * schema never runs here — and whatever is stored is re-served to every
+ * other session through `GET /sessions` typed as `SessionIdentity`. A
+ * consumer that trusts that type would get `pid: "nine"`. Unknown keys are
+ * dropped rather than passed through, and `sessionId` must survive
+ * `sessionKey` (which refuses paths, control characters and absurd
+ * lengths) since it is the value KAI-415 turns into a file name.
+ *
+ * Returns undefined when nothing usable was declared, so the stored record
+ * is identical to an undeclared session's.
+ */
+const MAX_IDENTITY_STRING = 256
+const MAX_IDENTITY_CWD = 1024
+
+function sanitizeIdentity(raw: unknown): SessionIdentity | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const source = raw as Record<string, unknown>
+  const clean: SessionIdentity = {}
+  for (const field of ['company', 'repo', 'worktree', 'branch'] as const) {
+    const value = source[field]
+    if (typeof value === 'string' && value !== '' && value.length <= MAX_IDENTITY_STRING) {
+      clean[field] = value
+    }
+  }
+  if (typeof source.cwd === 'string' && source.cwd !== '' && source.cwd.length <= MAX_IDENTITY_CWD) {
+    clean.cwd = source.cwd
+  }
+  if (
+    typeof source.pid === 'number' &&
+    Number.isFinite(source.pid) &&
+    source.pid >= 0 &&
+    Number.isInteger(source.pid)
+  ) {
+    clean.pid = source.pid
+  }
+  const id = sessionKey({ sessionId: source.sessionId } as SessionIdentity)
+  if (id !== null) clean.sessionId = id
+  return Object.keys(clean).length > 0 ? clean : undefined
 }
 
 function ensureSession(name: string): SessionInfo {
@@ -596,31 +640,49 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         const body = JSON.parse(await readBody(req)) as {
           name?: string
           objective?: string
-          identity?: SessionIdentity
+          identity?: unknown
         }
         if (!body.name) {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
+        // Validated, not asserted (C5/I8). Everything below works off
+        // `identity`, never `body.identity`.
+        //
+        // Distinguish OMIT (key absent) from EXPLICIT null/garbage (key present).
+        // Omit keeps prior identity — same session re-introduce that only
+        // updates objective must not wipe process identity (KAI-401 C2).
+        // Explicit null/garbage clears, so a caller can refuse inheritance
+        // when taking a vacated display name (name collisions are still
+        // pre-existing: two live processes that pick the same name share
+        // one record).
+        const hasIdentityKey = Object.prototype.hasOwnProperty.call(body, 'identity')
+        const identity = hasIdentityKey ? sanitizeIdentity(body.identity) : undefined
         const existing = sessions.get(body.name)
         const info: SessionInfo = existing
           ? {
               ...existing,
               objective: body.objective ?? existing.objective,
-              // Last-write-wins on a re-introduce, mirroring `objective`.
-              // A re-introduce that omits identity keeps the prior value.
-              identity: body.identity ?? existing.identity,
+              identity: hasIdentityKey ? identity : existing.identity,
             }
           : {
               name: body.name,
               objective: body.objective,
               registeredAt: new Date().toISOString(),
               channels: new Set(),
-              identity: body.identity,
+              identity,
             }
         sessions.set(body.name, info)
         log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
-        jsonResponse(res, 200, { ok: true })
+        // Echo what was actually stored (C2). A broker predating KAI-401
+        // accepts this body, returns a bare `{ok:true}` and drops `identity`
+        // on the floor — and brokers are long-lived: `install.sh` replaces
+        // `dist/broker.js` in place, the process is detached with no idle
+        // timeout, and nothing restarts it. The echo is what lets the client
+        // tell "stored" from "silently discarded" instead of reading 200 as
+        // success. Omitted when nothing was stored, so an undeclared
+        // session's response is unchanged.
+        jsonResponse(res, 200, { ok: true, ...(info.identity ? { identity: info.identity } : {}) })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
       }

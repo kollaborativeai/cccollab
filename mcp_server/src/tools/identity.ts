@@ -92,18 +92,37 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
-      deps.session.setIdentity(identity)
+      deps.session.setOrganizationId(organization)
+      // Omitting `identity` keeps the declared one — the same rule the
+      // broker already applies to this field (`body.identity ?? existing`).
+      // Empty `{}` is treated as undeclared (S1) and does not wipe a prior
+      // declaration either.
+      if (identity !== undefined && Object.keys(identity).length > 0) {
+        deps.session.setIdentity(identity)
+      }
 
       // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
+      // it can attribute messages and list us in `list_sessions`.
+      // The payload comes off the session rather than being reassembled
+      // here, so a location attached later re-sends this exact object
+      // (see `SessionManager.introduceArgs`).
+      const introduceArgs = deps.session.introduceArgs()
+      const transportResults: Record<string, { ok: boolean; error?: string; identityRejected?: string }> = {}
+      let anyOk = false
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization, identity })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+          await transport.introduce(introduceArgs)
+          anyOk = true
+          const maybeRemote = transport as Partial<RemoteTransport>
+          const rejected = typeof maybeRemote.identityRejected === 'string' ? maybeRemote.identityRejected : null
+          transportResults[transport.source] = {
+            ok: true,
+            ...(rejected ? { identityRejected: rejected } : {}),
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.error(`[cccollab] introduce failed on "${transport.source}": ${message}`)
+          transportResults[transport.source] = { ok: false, error: message }
         }
       }
 
@@ -118,7 +137,24 @@ export async function handleIdentityTool(
         }
       }
 
-      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
+      const enabledCount = deps.router.enabled().length
+      // No transport registered: do not report bare success. When zero
+      // transports are enabled the name is still set locally (identity for
+      // later attach); that is the empty-router case, not a failure.
+      if (enabledCount > 0 && !anyOk) {
+        return JSON.stringify({
+          error: 'introduce failed on every enabled transport',
+          name: displayName,
+          ...(objective ? { objective } : {}),
+          locations: transportResults,
+        })
+      }
+
+      return JSON.stringify({
+        name: displayName,
+        ...(objective ? { objective } : {}),
+        ...(enabledCount > 0 ? { locations: transportResults } : {}),
+      })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
