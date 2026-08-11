@@ -963,6 +963,105 @@ describe('RemoteTransport subscription resilience (KAI-438)', () => {
     // large part of why this read as harmless.
     expect(log.join('\n')).not.toMatch(/\(transient\)/)
   })
+
+  it('retires a resource-scoped ConvexError without disabling the transport (KAI-438 C1)', async () => {
+    // leave_channel tears down only the channel sub; topic listByTopic then
+    // throws NOT_SUBSCRIBED_TO_CHANNEL. Retrying burns the schedule into a
+    // false schema-drift disable. Classify err.data.code and retire once.
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const log: string[] = []
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    const resourceErr = Object.assign(new Error('Not subscribed to channel'), {
+      data: { code: 'NOT_SUBSCRIBED_TO_CHANNEL', message: 'Not subscribed to channel' },
+    })
+    errCbs[0]!(resourceErr)
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    // No replacement attempt — retired, not retried.
+    expect((stub.onUpdate as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+    expect(log.join('\n')).toMatch(/retired.*NOT_SUBSCRIBED_TO_CHANNEL/i)
+    expect(log.join('\n')).not.toMatch(/schema drift/i)
+  })
+
+  it('reports reconnecting + replacement count without self-disabling on recover cycles (KAI-438 I1)', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs, dataCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    expect(transport.subscriptionHealth).toEqual({ reconnecting: false, replacements: 0 })
+
+    errCbs[0]!(maskedProductionError())
+    // Mid-backoff: reconnecting true, one replacement scheduled.
+    expect(transport.subscriptionHealth.reconnecting).toBe(true)
+    expect(transport.subscriptionHealth.replacements).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    dataCbs[1]!([{ _id: 'm1', fromSessionId: 'alice', text: 'ok', ts: 1_700_000_100_000 }])
+    expect(transport.enabled).toBe(true)
+    expect(transport.subscriptionHealth.replacements).toBe(1)
+    // After recovery the scheduled reconnect has fired (count back to 0).
+    expect(transport.subscriptionHealth.reconnecting).toBe(false)
+  })
+
+  it('ignores a second onError on the same attempt (KAI-438 I3/S5 generation guard)', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    // Fire twice on the same dead subscription before the timer runs.
+    errCbs[0]!(maskedProductionError())
+    errCbs[0]!(maskedProductionError())
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    // Without a generation guard the second onError schedules a second
+    // timer (orphaning the first) and both fire → 3 onUpdate calls.
+    expect((stub.onUpdate as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2)
+  })
+
+  it('does not open a channel feed when listAll finds no match, and notifies onLookupMiss (KAI-438 C3)', async () => {
+    vi.useFakeTimers()
+    const { stub } = makeSubStub()
+    stub.query = vi.fn(async () => [{ channelId: 'chan_ops', name: 'ops' }])
+    const log: string[] = []
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+    const misses: string[] = []
+
+    transport.subscribeChannelMessages({ channelName: 'dev', onLookupMiss: (n) => misses.push(n) }, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(stub.onUpdate as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    expect(misses).toEqual(['dev'])
+    expect(log.join('\n')).toMatch(/channel "dev" not found/i)
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('exhausted-retry degradation names the schedule length, not length+1 (KAI-438 S2)', async () => {
+    vi.useFakeTimers()
+    const { stub, errCbs } = makeSubStub()
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    for (let i = 0; i < 8; i++) {
+      const cb = errCbs[errCbs.length - 1]
+      if (cb === undefined) break
+      cb(maskedProductionError())
+      await vi.advanceTimersByTimeAsync(30_000)
+    }
+    expect(transport.enabled).toBe(false)
+    expect(transport.degradation).toMatch(
+      new RegExp(`${RESUBSCRIBE_DELAYS_MS.length} consecutive re-subscribes failed`),
+    )
+    expect(transport.degradation).not.toMatch(
+      new RegExp(`${RESUBSCRIBE_DELAYS_MS.length + 1} consecutive re-subscribes failed`),
+    )
+  })
 })
 
 /**

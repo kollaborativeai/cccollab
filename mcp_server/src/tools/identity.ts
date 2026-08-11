@@ -213,11 +213,26 @@ export async function handleIdentityTool(
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<
+  Record<
+    string,
+    {
+      enabled: boolean
+      degradation?: string
+      organization?: string
+      reconnecting?: boolean
+      subscriptionReplacements?: number
+    }
+  >
+> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+      const health =
+        typeof maybeDegraded.subscriptionHealth === 'object' && maybeDegraded.subscriptionHealth !== null
+          ? maybeDegraded.subscriptionHealth
+          : null
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -226,16 +241,33 @@ async function buildLocationStates(
         organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: {
+        enabled: boolean
+        degradation?: string
+        organization?: string
+        reconnecting?: boolean
+        subscriptionReplacements?: number
+      } = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
+        // I1 (KAI-438): distinguish healthy from mid-backoff / high flap.
+        ...(health?.reconnecting ? { reconnecting: true } : {}),
+        ...(health && health.replacements > 0 ? { subscriptionReplacements: health.replacements } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<
+    string,
+    {
+      enabled: boolean
+      degradation?: string
+      organization?: string
+      reconnecting?: boolean
+      subscriptionReplacements?: number
+    }
+  > = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

@@ -209,7 +209,18 @@ const DEGRADATION_THRESHOLD = 3
  * pinned to a literal 4 stops guarding anything the moment a fourth
  * delay is added.
  */
-export const RESUBSCRIBE_DELAYS_MS = [1_000, 5_000, 15_000]
+// S7: immutable schedule — consumers must not push/splice process-wide.
+export const RESUBSCRIBE_DELAYS_MS = [1_000, 5_000, 15_000] as const
+
+/** Resource-scoped Convex errors that kill ONE subscription, not the whole
+ *  transport (KAI-438 C1). Retrying them re-issues identical args and burns
+ *  the backoff into a false "schema drift" disable. */
+const SUBSCRIPTION_RETIRE_CODES = new Set([
+  'NOT_SUBSCRIBED_TO_CHANNEL',
+  'TOPIC_NOT_FOUND',
+  'CHANNEL_NOT_FOUND',
+  'ORG_MISMATCH',
+])
 
 /**
  * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
@@ -291,6 +302,14 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /**
+   * I1 (KAI-438): surface in-flight reconnects and lifetime replacement
+   * count so whoami can distinguish "never wrong" from "flapping" without
+   * changing the flap-forever retry policy (product decision — see
+   * cc40-product-decisions.md / sibling KAI-438-degradation-policy).
+   */
+  private reconnectingSubscriptions = 0
+  private subscriptionReplacements = 0
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -356,6 +375,14 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /** Live subscription-replacement stats for whoami (KAI-438 I1). */
+  get subscriptionHealth(): { reconnecting: boolean; replacements: number } {
+    return {
+      reconnecting: this.reconnectingSubscriptions > 0,
+      replacements: this.subscriptionReplacements,
+    }
   }
 
   /**
@@ -950,7 +977,6 @@ export class RemoteTransport implements Transport {
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
-    const ownSessionId = this.sessionId
     return this.subscribeResilient('subscribeTopicMessages', ({ onHealthy, onError }) => {
       // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
       // cursor: the backend returns messages strictly after it. `topicMaxTs`
@@ -965,6 +991,9 @@ export class RemoteTransport implements Transport {
       const baseArgs: Record<string, unknown> =
         startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
       const queryArgs = this.orgScopedArgs(baseArgs)
+      // S6: re-read sessionId every attempt so a pre-introduce subscribe
+      // does not freeze ownSessionId === null across every replacement.
+      const ownSessionId = this.sessionId
       return this.client.onUpdate(
         fn<'query'>(this.refs.messages.queries.listByTopic),
         queryArgs,
@@ -1008,9 +1037,22 @@ export class RemoteTransport implements Transport {
    * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  subscribeChannelMessages(
+    args: {
+      channelName: string
+      /**
+       * C3: called when the async listAll lookup finds no matching channel
+       * (or the lookup itself fails). ensureChannelSubscription uses this
+       * to drop its map entry so the next call retries instead of caching
+       * a permanent no-op as "subscribed".
+       */
+      onLookupMiss?: (channelName: string) => void
+    },
+    onEvent: (msg: ParsedMessage) => void,
+  ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    const onChannelLookupMiss = args.onLookupMiss
 
     // Resolve the channel id. If we have it cached from a prior
     // joinChannel, use it synchronously; otherwise kick off an async
@@ -1114,9 +1156,19 @@ export class RemoteTransport implements Transport {
           if (match !== undefined) {
             this.channelIdsByName.set(args.channelName, match.channelId)
             register(match.channelId)
+          } else {
+            // C3 (KAI-438): lookup succeeded but the channel is missing
+            // (renamed, revoked, or org-scoped out). Falling off the if
+            // used to leave no subscription, no log, and a permanent map
+            // entry in ensureChannelSubscription that never retried.
+            this.log(
+              `subscribeChannelMessages: channel "${args.channelName}" not found on backend — no live feed opened`,
+            )
+            onChannelLookupMiss?.(args.channelName)
           }
         } catch (err) {
           this.registerFailure('subscribeChannelMessages.lookup', err)
+          onChannelLookupMiss?.(args.channelName)
         }
       })()
     }
@@ -1240,13 +1292,18 @@ export class RemoteTransport implements Transport {
     let disposed = false
     let failures = 0
     let timer: ReturnType<typeof setTimeout> | null = null
+    // S5 / I3: each attempt gets a generation; stale onError/onHealthy
+    // from a superseded subscription must not tear down its replacement
+    // or double-schedule timers.
+    let generation = 0
 
     const closeInner = (): void => {
       if (inner === null) return
       try {
         inner()
-      } catch {
-        /* best-effort: the handle is already dead */
+      } catch (err) {
+        // S1: same signal trackUnsubscribe logs — empty catch hid dual-stream.
+        this.log(`unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       inner = null
     }
@@ -1254,27 +1311,72 @@ export class RemoteTransport implements Transport {
     const attempt = (): void => {
       timer = null
       if (disposed || this.shutdownStarted || !this.enabled) return
-      inner = open({ onHealthy, onError })
+      // Clear reconnecting flag for the timer that just fired.
+      if (this.reconnectingSubscriptions > 0) this.reconnectingSubscriptions -= 1
+      const gen = ++generation
+      // Tear down any prior handle before open so two streams cannot share a feed (I3).
+      closeInner()
+      const handle = open({
+        onHealthy: () => {
+          if (gen !== generation) return
+          onHealthy()
+        },
+        onError: (err) => {
+          if (gen !== generation) return
+          onError(err)
+        },
+      })
+      // S4: null open is a permanently blind subscription if ignored.
+      if (handle == null) {
+        this.log(`subscription ${op}: open() returned no handle — treating as error`)
+        onError(new Error(`${op}: open returned null`))
+        return
+      }
+      inner = handle
     }
 
-    function onHealthy(): void {
+    const onHealthy = (): void => {
       // Delivery proves this subscription works, so the earlier fault was
-      // transient: don't hold it against the next one.
+      // transient: don't hold consecutive failures against the next one.
+      // (Policy: alternating recover-cycles never disable — product decision.)
       failures = 0
     }
 
     const onError = (err: unknown): void => {
+      // I3/S5: invalidate sibling callbacks from this attempt immediately so a
+      // second onError cannot double-schedule (and so a stale onHealthy cannot
+      // clear failures on a replacement that has not delivered yet).
+      generation += 1
       const msg = err instanceof Error ? err.message : String(err)
       // Dead, not transient. Drop the handle before replacing it so we
       // never run two streams over the same feed.
       closeInner()
-      if (disposed || this.shutdownStarted || !this.enabled) return
+
+      // C1: resource-scoped application errors kill THIS subscription only.
+      // Retrying re-issues identical args forever and falsely blames schema drift.
+      const code = extractConvexErrorCode(err)
+      if (code !== null && SUBSCRIPTION_RETIRE_CODES.has(code)) {
+        disposed = true
+        this.log(`subscription ${op} retired (resource error ${code}) — not retrying, transport stays enabled: ${msg}`)
+        return
+      }
+
+      // S3: log even when the transport is already disabled so sibling
+      // feeds' deaths are visible after the first disable.
+      if (disposed || this.shutdownStarted || !this.enabled) {
+        this.log(`subscription ${op} died while transport inactive: ${msg}`)
+        return
+      }
+
       const delay = RESUBSCRIBE_DELAYS_MS[failures]
       failures += 1
+      this.subscriptionReplacements += 1
       if (delay === undefined) {
         this.enabled = false
+        // S2: report schedule length (3), not the post-increment failures (4).
+        const attempted = RESUBSCRIBE_DELAYS_MS.length
         this.degradationReason =
-          `Remote sync disabled: subscription ${op} died and ${failures} consecutive re-subscribes failed — ` +
+          `Remote sync disabled: subscription ${op} died and ${attempted} consecutive re-subscribes failed — ` +
           `the backend function is likely missing or renamed (schema drift), or the deployment is ` +
           `unreachable. Restart the session once the deployment is confirmed. (last: ${msg})`
         this.log(this.degradationReason)
@@ -1284,6 +1386,9 @@ export class RemoteTransport implements Transport {
         `subscription ${op} died (a Convex subscription does not recover; replacing it) — ` +
           `re-subscribe attempt ${failures}/${RESUBSCRIBE_DELAYS_MS.length} in ${delay}ms: ${msg}`,
       )
+      // I1: mark reconnecting while a replacement is scheduled.
+      this.reconnectingSubscriptions += 1
+      if (timer !== null) clearTimeout(timer)
       timer = setTimeout(attempt, delay)
       // Never hold the event loop open just to retry a subscription.
       timer.unref?.()
@@ -1293,7 +1398,12 @@ export class RemoteTransport implements Transport {
 
     return this.trackUnsubscribe(() => {
       disposed = true
-      if (timer !== null) clearTimeout(timer)
+      generation += 1 // invalidate in-flight callbacks
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+        if (this.reconnectingSubscriptions > 0) this.reconnectingSubscriptions -= 1
+      }
       closeInner()
     })
   }
