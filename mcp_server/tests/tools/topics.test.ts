@@ -762,6 +762,61 @@ describe('Topic Tools', () => {
       )
     })
 
+    it('read_topic_messages passes the resolved id, not the name, to the transport (KAI-446 I3)', async () => {
+      const readTopicMessages = vi.fn().mockResolvedValue({ messages: [{ text: 'hi' }], hasMore: false })
+      const listTopics = vi
+        .fn()
+        .mockResolvedValue([
+          {
+            id: 'k5701resolvedid01',
+            topic: 'sprint planning',
+            channel: 'dev',
+            creator: 'a',
+            state: 'active',
+            createdAt: '',
+          },
+        ])
+      const stubTransport = {
+        source: 'local',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: async () => {},
+        joinChannel: async () => ({ subscriberCount: 1 }),
+        leaveChannel: async () => {},
+        listChannels: async () => [],
+        broadcast: async () => {},
+        createTopic: async () => {
+          throw new Error('not implemented')
+        },
+        listTopics,
+        getTopicById: async () => null,
+        joinTopic: async () => ({ history: [] }),
+        leaveTopic: async () => {},
+        archiveTopic: async () => {},
+        unarchiveTopic: async () => {},
+        sendTopicMessage: async () => {},
+        listSessions: async () => [],
+        deregisterSession: async () => {},
+        readChannelMessages: async () => ({ messages: [], hasMore: false }),
+        readTopicMessages,
+      }
+      const context = new ActiveContext()
+      context.joinChannel('dev', 'fallback', 'local')
+      // Not already joined under the name — forces the resolve-by-name path.
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const stubDeps: TopicToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([stubTransport as unknown as import('../../src/transport/index.js').Transport]),
+      }
+      await handleTopicTool('read_topic_messages', { topic: 'sprint planning' }, stubDeps)
+      expect(readTopicMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ topicId: 'k5701resolvedid01', sessionName: 'architect' }),
+      )
+      expect(readTopicMessages).not.toHaveBeenCalledWith(expect.objectContaining({ topicId: 'sprint planning' }))
+    })
+
     /**
      * KAI-446's Expected Result asks for `read_topic_messages` to gate "at the
      * tool layer before it reaches the broker". Carrying a name is not that: a

@@ -99,7 +99,15 @@ export async function handleIdentityTool(
         })
       }
 
-      deps.session.setName(displayName)
+      // Reject empty/whitespace names (KAI-446 I5): `setName("")` used to make
+      // hasName() true while displayName was "", so the SSE stream connected
+      // as anonymous and stayed deaf to every channel-tagged event.
+      const trimmedName = typeof displayName === 'string' ? displayName.trim() : ''
+      if (!trimmedName) {
+        return JSON.stringify({ error: 'Name must be a non-empty string.' })
+      }
+
+      deps.session.setName(trimmedName)
       deps.session.setObjective(objective)
 
       // Re-open the broker's event stream under the new name before the
@@ -114,7 +122,7 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          await transport.introduce({ sessionName: trimmedName, objective, organizationId: organization })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.
@@ -123,12 +131,19 @@ export async function handleIdentityTool(
 
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name.
+      // Failures are no longer silent (KAI-446 I1): broker membership is
+      // what entitles the SSE stream, so a failed re-join leaves the
+      // session permanently deaf. Surface them the same way version drift
+      // is surfaced — on the result, where the model actually reads.
+      const joinFailures: string[] = []
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
           const transport = deps.router.get(ch.location)
-          await transport.joinChannel({ sessionName: displayName, channel: ch.name })
-        } catch {
-          // Non-fatal.
+          await transport.joinChannel({ sessionName: trimmedName, channel: ch.name })
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          joinFailures.push(`${ch.name}@${ch.location}: ${reason}`)
+          console.error(`[cccollab] introduce re-join failed for ${ch.name}@${ch.location}: ${reason}`)
         }
       }
 
@@ -138,11 +153,16 @@ export async function handleIdentityTool(
       // describe this server. Attached to the result rather than logged: the
       // model reads results, and stderr goes to a file nobody opens mid-session.
       const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+      const joinWarning =
+        joinFailures.length > 0
+          ? `Failed to re-join ${joinFailures.length} channel(s) under the new name (SSE will stay deaf until join_channel succeeds): ${joinFailures.join('; ')}`
+          : undefined
+      const warnings = [versionWarning, joinWarning].filter((w): w is string => Boolean(w))
 
       return JSON.stringify({
-        name: displayName,
+        name: trimmedName,
         ...(objective ? { objective } : {}),
-        ...(versionWarning ? { warning: versionWarning } : {}),
+        ...(warnings.length === 1 ? { warning: warnings[0] } : warnings.length > 1 ? { warnings } : {}),
       })
     }
     case 'whoami': {

@@ -544,7 +544,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       description:
         'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers on every enabled transport. Returns JSON.',
       inputSchema: {
-        name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
+        name: z.string().trim().min(1).describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
         organization: z
           .string()

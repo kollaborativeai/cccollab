@@ -100,7 +100,10 @@ export class LocalTransport implements Transport {
   async getTopicById(args: { sessionName: string; topicId: string }): Promise<TransportTopic | null> {
     const qs = `?sessionId=${encodeURIComponent(args.sessionName)}`
     const res = await fetch(`${this.base()}/topics/${encodeURIComponent(args.topicId)}${qs}`)
-    if (!res.ok) return null
+    if (res.status === 404) return null
+    // 403 (not subscribed) and other non-2xx must not collapse to "not found"
+    // (KAI-446 I2) — the tool layer needs the status to report the real refusal.
+    if (!res.ok) throw new BrokerHttpError(res.status, await res.text())
     const data = (await res.json()) as { topic: TransportTopic }
     return data.topic
   }
@@ -218,7 +221,12 @@ export class LocalTransport implements Transport {
 
   private async brokerGet<T>(path: string): Promise<T> {
     const res = await fetch(`${this.base()}${path}`)
-    if (!res.ok) throw new Error(`Broker ${res.status}: ${await res.text()}`)
+    if (!res.ok) {
+      // Typed status so tool-layer loops can surface 4xx (subscription refused)
+      // instead of collapsing them into "transport unreachable" empty lists
+      // (KAI-446 I2).
+      throw new BrokerHttpError(res.status, await res.text())
+    }
     return (await res.json()) as T
   }
 
@@ -228,7 +236,17 @@ export class LocalTransport implements Transport {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (!res.ok) throw new Error(`Broker ${res.status}: ${await res.text()}`)
+    if (!res.ok) throw new BrokerHttpError(res.status, await res.text())
     return (await res.json()) as T
+  }
+}
+
+/** HTTP error from the local broker with a preserved status code. */
+export class BrokerHttpError extends Error {
+  readonly status: number
+  constructor(status: number, body: string) {
+    super(`Broker ${status}: ${body}`)
+    this.name = 'BrokerHttpError'
+    this.status = status
   }
 }

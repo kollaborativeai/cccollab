@@ -613,6 +613,19 @@ describe('Broker: isolation guards and invariants', () => {
       expect(res.status).toBe(403)
     })
 
+    /** KAI-446 I12: the leave happy path was untested — making leave refuse
+     *  everyone stayed green. Pin 200 + joinedSessions cleanup. */
+    it('still allows a subscribed session to leave a topic', async () => {
+      const { topicId, victim } = await setup('leave-ok')
+      // Join first so joinedSessions contains the victim (leave deletes from it).
+      expect((await joinTopic(port, topicId, victim)).status).toBe(200)
+      const res = await leaveTopic(topicId, victim)
+      expect(res.status).toBe(200)
+      // Re-leave after already left: still subscribed to the channel, so 200
+      // (joinedSessions delete is idempotent).
+      expect((await leaveTopic(topicId, victim)).status).toBe(200)
+    })
+
     it('still allows a subscribed session to archive and unarchive', async () => {
       const { topicId, victim } = await setup('happy')
       expect((await archiveTopic(port, topicId, victim)).status).toBe(200)

@@ -127,6 +127,28 @@ describe('Identity Tools', () => {
       expect(result).toEqual({ name: 'architect' })
     })
 
+    it('introduce rejects an empty or whitespace-only name (KAI-446 I5)', async () => {
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: '   ' }, deps))
+      expect(result.error).toMatch(/non-empty/i)
+      expect(deps.session.hasName()).toBe(false)
+    })
+
+    it('introduce surfaces a warning when channel re-join fails (KAI-446 I1)', async () => {
+      const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/channels/join')) {
+          return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }
+        }
+        return { ok: true, json: async () => ({ ok: true }) }
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('backend', 'fallback', 'local')
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.name).toBe('architect')
+      expect(result.warning ?? result.warnings).toBeTruthy()
+      const warningText = result.warning ?? (Array.isArray(result.warnings) ? result.warnings.join(' ') : '')
+      expect(warningText).toMatch(/re-join|backend/i)
+    })
+
     it('introduce includes objective in JSON when provided', async () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)

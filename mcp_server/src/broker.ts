@@ -45,24 +45,24 @@ function log(msg: string): void {
  */
 function sseSubscribed(client: SSEClient, channel: string): boolean {
   if (!client.sessionName) return false
-  return sessions.get(client.sessionName)?.channels.has(channel) === true
+  // Same lookup as the route guards (KAI-446 S1) — one source of truth.
+  return subscribedChannels(client.sessionName).has(channel)
 }
 
 /**
  * Fan an event out to the SSE streams entitled to it.
  *
  * `channel` scopes delivery: a channel-tagged event reaches only connections
- * whose session is subscribed to that channel. Before KAI-446 this route was
- * the hole the rest of the ticket left open — every topic ROUTE was gated
- * while `/events` handed every event to every connection, and the only channel
- * filtering lived client-side in `broker-event-listener.ts`. A cooperating
- * client filtered; a hostile one read the wire, so "an unsubscribed local
- * process can read topic message text" stayed true with all five routes gated.
+ * whose session is subscribed to that channel. Before KAI-446, `/events`
+ * handed every event to every connection and the only channel filtering lived
+ * client-side in `broker-event-listener.ts`. A cooperating client filtered; a
+ * hostile one read the wire. This branch also added the matching subscription
+ * checks on the topic routes themselves (several of which were previously
+ * ungated) — see `requireSubscribed`.
  *
- * Untagged events (no `channel`) still reach every connection. That lane is
- * how the broker signals things that are not channel-scoped, and narrowing it
- * is a separate decision from this one — it must stay wide, or a leak INTO it
- * stops being observable.
+ * Untagged events (no `channel`) still reach every connection. That lane stays
+ * wide so a leak INTO it remains observable (product decision; do not narrow
+ * here). External `/local-event` posts are the only untagged producer today.
  *
  * Like the route guards this is not authentication — see `requireSubscribed`
  * for what naming a session is actually worth. It makes the stream answer to
@@ -292,21 +292,36 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
  * does not guarantee that an unauthorized read leaves a trace — borrowing an
  * existing name is quieter than joining. Only broker authentication would.
  */
-function requireSubscribed(res: ServerResponse, channel: string, sessionId: string | undefined | null): string | null {
+/**
+ * Subscription gate for routes that mutate or read topic/channel content.
+ * Returns a discriminated result so callers cannot discard the gate and still
+ * typecheck, and so every site uses the same (possibly normalized) sessionId
+ * rather than the raw input (KAI-446 I10).
+ */
+type Gate = { ok: true; sessionId: string } | { ok: false }
+
+function requireSessionId(res: ServerResponse, sessionId: string | undefined | null): sessionId is string {
   if (!sessionId) {
     jsonResponse(res, 400, { error: 'sessionId is required' })
-    return null
+    return false
   }
-  if (!subscribedChannels(sessionId).has(channel)) {
-    jsonResponse(res, 403, { error: `Not subscribed to channel "${channel}".` })
-    return null
-  }
-  return sessionId
+  return true
 }
 
-/** The channels this session is subscribed to; empty for an unknown session. */
+function requireSubscribed(res: ServerResponse, channel: string, sessionId: string | undefined | null): Gate {
+  if (!requireSessionId(res, sessionId)) return { ok: false }
+  if (!subscribedChannels(sessionId).has(channel)) {
+    jsonResponse(res, 403, { error: `Not subscribed to channel "${channel}".` })
+    return { ok: false }
+  }
+  return { ok: true, sessionId }
+}
+
+/** The channels this session is subscribed to; empty for an unknown session.
+ *  Returns a fresh Set so callers cannot grant entitlement by mutating the
+ *  live registry through a cast (KAI-446 S3). */
 function subscribedChannels(sessionId: string): ReadonlySet<string> {
-  return sessions.get(sessionId)?.channels ?? new Set()
+  return new Set(sessions.get(sessionId)?.channels)
 }
 
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
@@ -449,17 +464,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'text, sender and channel are required' })
           return
         }
-        if (!requireSubscribed(res, channel, body.sender)) return
+        const gate = requireSubscribed(res, channel, body.sender)
+        if (!gate.ok) return
         const event = {
           source: 'local' as const,
           type: 'broadcast' as const,
           channel,
-          sender: body.sender,
+          sender: gate.sessionId,
           text: body.text,
           ts: new Date().toISOString(),
         }
         broadcast(JSON.stringify(event), channel)
-        log(`BROADCAST ${channel}: ${body.sender}: ${body.text}`)
+        log(`BROADCAST ${channel}: ${gate.sessionId}: ${body.text}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -477,7 +493,8 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'topic, creator and channel are required' })
           return
         }
-        if (!requireSubscribed(res, channel, body.creator)) return
+        const gate = requireSubscribed(res, channel, body.creator)
+        if (!gate.ok) return
         const wanted = body.topic.trim().toLowerCase()
         for (const t of topics.values()) {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {
@@ -501,17 +518,24 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           id,
           topic: body.topic,
           channel,
-          creator: body.creator,
+          creator: gate.sessionId,
           state: 'active',
           createdAt,
           messages: [],
           joinedSessions: new Set(),
         }
         topics.set(id, localTopic)
-        const topicData = { id, topic: body.topic, channel, creator: body.creator, state: 'active', createdAt }
+        const topicData = {
+          id,
+          topic: body.topic,
+          channel,
+          creator: gate.sessionId,
+          state: 'active',
+          createdAt,
+        }
         const event = { source: 'local' as const, type: 'topic_created' as const, channel, topic: topicData }
         broadcast(JSON.stringify(event), channel)
-        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${body.creator}`)
+        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${gate.sessionId}`)
         jsonResponse(res, 200, topicData)
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -533,13 +557,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     let allowedChannels: ReadonlySet<string>
     if (channelFilter) {
-      if (!requireSubscribed(res, channelFilter, sessionId)) return
+      const gate = requireSubscribed(res, channelFilter, sessionId)
+      if (!gate.ok) return
       allowedChannels = new Set([channelFilter])
     } else {
-      if (!sessionId) {
-        jsonResponse(res, 400, { error: 'sessionId is required' })
-        return
-      }
+      if (!requireSessionId(res, sessionId)) return
       allowedChannels = subscribedChannels(sessionId)
     }
 
@@ -577,7 +599,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId'))) return
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId')).ok) return
     jsonResponse(res, 200, {
       topic: {
         id: t.id,
@@ -610,7 +632,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId'))) return
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId')).ok) return
     const limit = clampHistoryLimit(searchParams.get('limit'))
     const beforeRaw = searchParams.get('before')
     const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
@@ -647,58 +669,60 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               jsonResponse(res, 400, { error: 'text and sender are required' })
               return
             }
-            if (!requireSubscribed(res, t.channel, sender)) return
+            const gate = requireSubscribed(res, t.channel, sender)
+            if (!gate.ok) return
             const ts = new Date().toISOString()
-            t.messages.push({ sender, text, ts })
+            t.messages.push({ sender: gate.sessionId, text, ts })
             const event = {
               source: 'local' as const,
               type: 'message' as const,
               channel: t.channel,
               topicId: id,
-              sender,
+              sender: gate.sessionId,
               text,
               ts,
             }
             broadcast(JSON.stringify(event), t.channel)
-            log(`MESSAGE in ${id} (${t.channel}): ${sender}: ${text}`)
+            log(`MESSAGE in ${id} (${t.channel}): ${gate.sessionId}: ${text}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'join': {
-            const sessionId = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
-            if (!sessionId) return
-            t.joinedSessions.add(sessionId)
-            log(`JOIN: ${sessionId} joined topic ${id} (${t.channel})`)
+            const gate = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
+            if (!gate.ok) return
+            t.joinedSessions.add(gate.sessionId)
+            log(`JOIN: ${gate.sessionId} joined topic ${id} (${t.channel})`)
             jsonResponse(res, 200, { ok: true, channel: t.channel, messages: t.messages })
             return
           }
           case 'leave': {
-            const sessionId = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
-            if (!sessionId) return
-            t.joinedSessions.delete(sessionId)
-            log(`LEAVE: ${sessionId} left topic ${id}`)
+            const gate = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
+            if (!gate.ok) return
+            t.joinedSessions.delete(gate.sessionId)
+            log(`LEAVE: ${gate.sessionId} left topic ${id}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'archive': {
-            const archivedBy = requireSubscribed(res, t.channel, body.archivedBy as string | undefined)
-            if (!archivedBy) return
+            const gate = requireSubscribed(res, t.channel, body.archivedBy as string | undefined)
+            if (!gate.ok) return
             t.state = 'archived'
             const event = {
               source: 'local' as const,
               type: 'topic_archived' as const,
               channel: t.channel,
               topicId: id,
-              archivedBy,
+              archivedBy: gate.sessionId,
             }
             broadcast(JSON.stringify(event), t.channel)
-            log(`TOPIC ARCHIVED: ${id} by ${archivedBy}`)
+            log(`TOPIC ARCHIVED: ${id} by ${gate.sessionId}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'unarchive': {
-            const unarchivedBy = requireSubscribed(res, t.channel, body.unarchivedBy as string | undefined)
-            if (!unarchivedBy) return
+            const gate = requireSubscribed(res, t.channel, body.unarchivedBy as string | undefined)
+            if (!gate.ok) return
+            const unarchivedBy = gate.sessionId
             t.state = 'active'
             const event = {
               source: 'local' as const,
