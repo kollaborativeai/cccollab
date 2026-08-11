@@ -463,14 +463,13 @@ export class RemoteTransport implements Transport {
       })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
-        // Seed the per-channel cursor with the channel's ts at join time so
-        // `subscribeChannelMessages` starts the reactive feed past existing
-        // history instead of replaying it as fresh inbound notifications.
-        // Monotonic non-decreasing: a later rejoin can't regress it.
-        if (typeof res.latestTs === 'number') {
-          const prior = this.channelMaxTs.get(res.channelId) ?? 0
-          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
-        }
+        // Do NOT seed channelMaxTs from joinChannel's latestTs. That value is
+        // the channel head, not what this session has acked. Passing it as
+        // exclusive sinceTs overrides the server session cursor
+        // (lastDeliveredTs) and skips unacked rows after a failed delivery or
+        // restart. When sinceTs is omitted, listByChannel uses the server
+        // cursor. Local channelMaxTs advances only after successful delivery
+        // (and via primeChannelCursor for history already shown).
       }
       return { subscriberCount: 0 }
     } catch (err) {
@@ -1048,11 +1047,10 @@ export class RemoteTransport implements Transport {
       // don't want to hard-fail if the order is ever violated.
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
-      // Narrow the initial reactive batch past the channel's join-time
-      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
-      // this callback). An explicit `sinceTs` overrides the server-side
-      // read cursor, so a first-ever join — which has no cursor yet — does
-      // not replay the channel's whole broadcast history.
+      // Narrow the reactive window only after we have a local high-water mark
+      // from successful deliveries (or primeChannelCursor for history already
+      // shown). An explicit sinceTs overrides the server session cursor, so
+      // we must never set it above a ts we have actually delivered.
       const startingTs = this.channelMaxTs.get(channelId)
       if (startingTs !== undefined) queryArgs.sinceTs = startingTs
       innerUnsubscribe = this.client.onUpdate(
@@ -1066,22 +1064,23 @@ export class RemoteTransport implements Transport {
             ts: number
             images?: InboundImage[]
           }>
-          // Each row's ts paired with the promise that settles when it has been
-          // delivered. Rows arrive in ascending ts order, so this list is the
-          // order the cursor may advance through.
-          const deliveries: Array<{ ts: number; done: Promise<void> }> = []
+          // Each row's id/ts paired with the promise that settles when it has
+          // been delivered. Rows arrive in ascending ts order, so this list is
+          // the order the cursor may advance through.
+          //
+          // Do NOT mark seen or advance channelMaxTs until delivery succeeds.
+          // Marking early made a failed notify unrecoverable in-process (id
+          // never re-emitted) and pushed exclusive sinceTs past unacked rows
+          // on resubscribe.
+          const deliveries: Array<{ id: string; ts: number; done: Promise<void> }> = []
           for (const row of arr) {
             if (seen.has(row._id)) continue
-            seen.add(row._id)
-            const prior = this.channelMaxTs.get(channelId) ?? 0
-            if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
             // Skip self-echo: own broadcasts shouldn't push back to our
-            // own Claude. Cursor + ack advance above still happens so
-            // we don't re-deliver our own row on reconnect. Mirrors the
-            // local broker's self-broadcast drop.
+            // own Claude. Still count as delivered for ack/seen/maxTs so we
+            // don't re-offer our own row on reconnect. Mirrors the local
+            // broker's self-broadcast drop.
             if (sessionId !== null && row.fromSessionId === sessionId) {
-              // Nothing to wait for, but it must not stall the cursor either.
-              deliveries.push({ ts: row.ts, done: Promise.resolve() })
+              deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve() })
               continue
             }
             const delivered = onEvent({
@@ -1093,7 +1092,7 @@ export class RemoteTransport implements Transport {
               threadTs: undefined,
               images: row.images,
             })
-            deliveries.push({ ts: row.ts, done: Promise.resolve(delivered) })
+            deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve(delivered) })
           }
           // Ack the highest ts that was actually DELIVERED, once it has been.
           //
@@ -1106,7 +1105,8 @@ export class RemoteTransport implements Transport {
           // again. Silent, permanent loss.
           //
           // Stops at the FIRST failure rather than acking the last success:
-          // acking past a gap buries exactly the message that failed.
+          // acking past a gap buries exactly the message that failed. Local
+          // seen / channelMaxTs advance only on success for the same reason.
           //
           // Fire-and-forget at the mutation itself; a failure there is non-fatal
           // — the NEXT successful ack bumps the cursor to cover this batch too
@@ -1118,7 +1118,7 @@ export class RemoteTransport implements Transport {
           // kill the whole transport for the session. The reactive
           // listByChannel subscription's own error path still degrades
           // on persistent failure, which is the right signal.
-          if (deliveries.length > 0 && sessionId !== null) {
+          if (deliveries.length > 0) {
             void (async () => {
               let ackTs = 0
               for (const delivery of deliveries) {
@@ -1127,9 +1127,12 @@ export class RemoteTransport implements Transport {
                 } catch {
                   break
                 }
+                seen.add(delivery.id)
+                const prior = this.channelMaxTs.get(channelId) ?? 0
+                if (delivery.ts > prior) this.channelMaxTs.set(channelId, delivery.ts)
                 if (delivery.ts > ackTs) ackTs = delivery.ts
               }
-              if (ackTs === 0) return
+              if (ackTs === 0 || sessionId === null) return
               try {
                 await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
                   sessionId,

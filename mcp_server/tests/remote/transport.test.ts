@@ -493,6 +493,87 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     expect(acks).toEqual([1])
   })
 
+  it('re-offers a row whose delivery failed when the same onUpdate batch is re-fired', async () => {
+    // C2: seen must not advance before delivery settles. If m2 fails, a later
+    // onUpdate that still includes m2 must call onEvent again — not treat m2
+    // as permanently seen for this process lifetime.
+    const { transport, callbacks, acks } = await readyTransport()
+    const delivered: string[] = []
+    let failM2 = true
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) => {
+      delivered.push(msg.text)
+      if (msg.text === 'boom' && failM2) return Promise.reject(new Error('delivery failed'))
+      return Promise.resolve()
+    })
+
+    const batch = [
+      { _id: 'm1', fromSessionId: 'alice', text: 'first', ts: 1 },
+      { _id: 'm2', fromSessionId: 'alice', text: 'boom', ts: 2 },
+    ]
+    callbacks[0]!(batch)
+    await settle()
+    expect(acks).toEqual([1])
+    expect(delivered).toEqual(['first', 'boom'])
+
+    // Same rows again (e.g. reactive re-fire before server drops m1).
+    // m1 succeeded → seen; m2 failed → must re-call onEvent.
+    failM2 = false
+    callbacks[0]!(batch)
+    await settle()
+
+    expect(delivered).toEqual(['first', 'boom', 'boom'])
+    expect(acks).toEqual([1, 2])
+  })
+
+  it('does not advance channelMaxTs/sinceTs past a failed delivery on resubscribe', async () => {
+    // After fail at ts=2 (m1 delivered), resubscribe must use sinceTs=1 not 2.
+    // Advancing channelMaxTs before delivery settled made exclusive sinceTs
+    // skip the unacked row forever.
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const acks: number[] = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) return { channelId: 'chan_dev' }
+        if ('ts' in args) acks.push(args.ts as number)
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+
+    transport.subscribeChannelMessages({ channelName: 'dev' }, (msg) =>
+      msg.text === 'boom' ? Promise.reject(new Error('delivery failed')) : Promise.resolve(),
+    )
+
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'alice', text: 'first', ts: 1 },
+      { _id: 'm2', fromSessionId: 'alice', text: 'boom', ts: 2 },
+    ])
+    await settle()
+    expect(acks).toEqual([1])
+
+    // Unsubscribe + resubscribe: sinceTs must reflect last SUCCESS only.
+    // The first subscription's unsub is the return of subscribeChannelMessages;
+    // calling subscribe again registers a new onUpdate with current channelMaxTs.
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => Promise.resolve())
+    expect(onUpdateCalls.length).toBeGreaterThanOrEqual(2)
+    const lastArgs = onUpdateCalls[onUpdateCalls.length - 1]!.args
+    expect(lastArgs).toMatchObject({ channelId: 'chan_dev', sessionId: 'session_1', sinceTs: 1 })
+    expect(lastArgs.sinceTs).toBe(1)
+    expect(lastArgs.sinceTs).not.toBe(2)
+  })
+
   it('still advances over a self-echo row, which is deliberately not delivered', async () => {
     // Anti-vacuity: the fix must not stall the cursor on our own broadcasts.
     const { transport, callbacks, acks } = await readyTransport()
@@ -572,11 +653,11 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     })
   })
 
-  it('seeds the channel cursor from joinChannel latestTs and subscribes past it', async () => {
-    // joinChannel returns the channel's join-time ts. The transport must
-    // seed it so the reactive listByChannel subscription starts strictly
-    // after it — otherwise the channel's pre-existing broadcast history
-    // replays as fresh inbound notifications on join.
+  it('does not seed sinceTs from joinChannel latestTs (relies on server session cursor)', async () => {
+    // C2 scenario 3: seeding channelMaxTs from join latestTs made client
+    // sinceTs override the server's lastDeliveredTs and skip unacked rows
+    // on restart. After join with no deliveries, subscribe must omit sinceTs
+    // so listByChannel uses the server cursor.
     const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
     const stub = {
       query: vi.fn(async () => undefined),
@@ -600,11 +681,11 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
 
     expect(onUpdateCalls).toHaveLength(1)
-    expect(onUpdateCalls[0]!.args).toMatchObject({
+    expect(onUpdateCalls[0]!.args).toEqual({
       channelId: 'chan_dev',
       sessionId: 'session_1',
-      sinceTs: 4242,
     })
+    expect(onUpdateCalls[0]!.args.sinceTs).toBeUndefined()
   })
 })
 

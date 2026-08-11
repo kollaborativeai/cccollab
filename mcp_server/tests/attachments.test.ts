@@ -9,6 +9,7 @@ import {
   imagesDirForSession,
   MAX_INBOUND_IMAGE_BYTES,
   imageFileName,
+  readResponseBodyCapped,
   renderImageBlock,
   safeImageName,
   renderInboundText,
@@ -181,6 +182,109 @@ describe('saveInboundImages', () => {
   it('refuses a body that exceeds the cap even when the server understated the size', async () => {
     // The size field comes from the other end; the bytes are the only truth.
     stubFetch(pngOf(MAX_INBOUND_IMAGE_BYTES + 1))
+    const result = await saveInboundImages([image({ size: 10 })], { dir, ts: 100 })
+    expect(result.saved).toEqual([])
+    expect(result.failed[0]!.reason).toMatch(/large/i)
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('refuses an oversized streamed body without buffering the whole response', async () => {
+    // Claimed size is small/honest-looking; body streams past the cap. The
+    // capped reader must cancel and return too-large without allocating the
+    // full multi-chunk payload as one arrayBuffer.
+    const max = 64
+    const chunk = new Uint8Array(32).fill(0x41)
+    let cancelCalled = false
+    let reads = 0
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1
+        // Keep offering chunks well past max; cancel must stop us.
+        controller.enqueue(chunk)
+      },
+      cancel() {
+        cancelCalled = true
+      },
+    })
+    const response = {
+      headers: { get: () => null },
+      body: stream,
+      arrayBuffer: async () => {
+        throw new Error('arrayBuffer must not be used when a body stream is present')
+      },
+    } as unknown as Response
+
+    const result = await readResponseBodyCapped(response, max)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/large/i)
+    expect(cancelCalled).toBe(true)
+    // Stopped after the chunk that crossed the cap (2 × 32 > 64), not after
+    // reading unbounded further chunks.
+    expect(reads).toBeLessThanOrEqual(3)
+  })
+
+  it('aborts on Content-Length over the cap without reading the body', async () => {
+    let bodyRead = false
+    const response = {
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-length' ? String(MAX_INBOUND_IMAGE_BYTES + 1) : null),
+      },
+      body: {
+        cancel: vi.fn(async () => {}),
+        getReader: () => {
+          bodyRead = true
+          throw new Error('getReader must not run when Content-Length exceeds the cap')
+        },
+      },
+      arrayBuffer: async () => {
+        bodyRead = true
+        throw new Error('arrayBuffer must not run when Content-Length exceeds the cap')
+      },
+    } as unknown as Response
+
+    const result = await readResponseBodyCapped(response, MAX_INBOUND_IMAGE_BYTES)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/large/i)
+    expect(bodyRead).toBe(false)
+  })
+
+  it('refuses a fetch body larger than MAX_INBOUND when claimed size is small (end-to-end)', async () => {
+    const huge = pngOf(MAX_INBOUND_IMAGE_BYTES + 100)
+    // Stream in small chunks so a naive full buffer would still allocate huge,
+    // but the capped path stops once past the limit.
+    let offset = 0
+    const chunkSize = 64 * 1024
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        url: 'https://files.example/api/storage/huge',
+        headers: { get: () => null },
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (offset >= huge.byteLength) return { done: true as const, value: undefined }
+                const end = Math.min(offset + chunkSize, huge.byteLength)
+                const value = huge.subarray(offset, end)
+                offset = end
+                return { done: false as const, value }
+              },
+              async cancel() {
+                offset = huge.byteLength
+              },
+            }
+          },
+          async cancel() {
+            offset = huge.byteLength
+          },
+        },
+        arrayBuffer: async () => {
+          throw new Error('arrayBuffer fallback must not run when body stream is present')
+        },
+      })),
+    )
     const result = await saveInboundImages([image({ size: 10 })], { dir, ts: 100 })
     expect(result.saved).toEqual([])
     expect(result.failed[0]!.reason).toMatch(/large/i)

@@ -134,6 +134,80 @@ function hasImageSignature(body: Uint8Array, mimeType: string): boolean {
   return signature.every((byte, i) => byte === null || body[i] === byte)
 }
 
+/**
+ * Read a fetch Response body with a hard byte ceiling.
+ *
+ * Claimed `Content-Length` / sender size are not a memory gate — a small claim
+ * with a multi-GB body still OOMs if we `arrayBuffer()` the whole response.
+ * Stream when possible; abort as soon as the running total exceeds `maxBytes`
+ * without holding the rest of the body.
+ */
+export async function readResponseBodyCapped(
+  response: Response,
+  maxBytes: number,
+): Promise<{ ok: true; body: Uint8Array } | { ok: false; reason: string }> {
+  const contentLengthRaw = response.headers?.get?.('content-length')
+  if (contentLengthRaw !== null && contentLengthRaw !== undefined && contentLengthRaw !== '') {
+    const contentLength = Number(contentLengthRaw)
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      try {
+        await response.body?.cancel?.()
+      } catch {
+        /* best-effort: free the connection if the runtime supports it */
+      }
+      return { ok: false, reason: `too large (${contentLength} bytes)` }
+    }
+  }
+
+  const stream = response.body
+  if (stream !== null && stream !== undefined && typeof stream.getReader === 'function') {
+    const reader = stream.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value === undefined || value.byteLength === 0) continue
+        total += value.byteLength
+        if (total > maxBytes) {
+          try {
+            await reader.cancel()
+          } catch {
+            /* ignore cancel errors */
+          }
+          // Drop accumulated chunks so a near-cap overshoot does not linger.
+          chunks.length = 0
+          return { ok: false, reason: `too large (${total} bytes)` }
+        }
+        chunks.push(value)
+      }
+    } catch (err) {
+      try {
+        await reader.cancel()
+      } catch {
+        /* ignore */
+      }
+      throw err
+    }
+    const body = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      body.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return { ok: true, body }
+  }
+
+  // No ReadableStream (unit mocks, some runtimes): fall back to arrayBuffer
+  // but still refuse bodies over the cap. Content-Length was already checked.
+  const ab = await response.arrayBuffer()
+  if (ab.byteLength > maxBytes) {
+    return { ok: false, reason: `too large (${ab.byteLength} bytes)` }
+  }
+  return { ok: true, body: new Uint8Array(ab) }
+}
+
 /** An image that made it onto disk. */
 export interface SavedImage {
   name: string
@@ -346,12 +420,14 @@ export async function saveInboundImages(
         failed.push({ name, reason: 'refused: redirected to cleartext http' })
         continue
       }
-      const body = new Uint8Array(await response.arrayBuffer())
-      // The size above was the sender's claim; this is the only real check.
-      if (body.byteLength > MAX_INBOUND_IMAGE_BYTES) {
-        failed.push({ name, reason: `too large (${body.byteLength} bytes)` })
+      // Stream with a hard cap — never arrayBuffer() the whole response first.
+      // Claimed size above is an early reject for honest large claims only.
+      const read = await readResponseBodyCapped(response, MAX_INBOUND_IMAGE_BYTES)
+      if (!read.ok) {
+        failed.push({ name, reason: read.reason })
         continue
       }
+      const body = read.body
       // Whatever answered is not trusted to have answered honestly. Without
       // this the response body is written verbatim under a .png name: a JSON
       // credential blob from an internal endpoint, or an html/gif polyglot.
