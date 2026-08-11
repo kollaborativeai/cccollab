@@ -7,6 +7,8 @@ import {
   BROKER_UUID_PATTERN,
   OrganizationRejectedError,
   TopicNameConflictError,
+  type BoundOrganization,
+  type OrganizationSummary,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -532,14 +534,20 @@ export class RemoteTransport implements Transport {
    * Backs the `list_organizations` tool. `slug` (KAI-407) is absent on orgs
    * that never got one; those remain addressable by `id`.
    */
-  async listOrganizations(): Promise<Array<{ id: string; name: string; slug?: string }>> {
+  async listOrganizations(): Promise<OrganizationSummary[]> {
     if (!this.enabled) return []
     try {
-      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+      const rows = (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
         slug?: string
       }>
+      // S1: normalize empty slug at the remote edge so list/get/whoami share one rule.
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        ...(r.slug ? { slug: r.slug } : {}),
+      }))
     } catch (err) {
       this.registerFailure('listOrganizations', err)
       return []
@@ -563,7 +571,7 @@ export class RemoteTransport implements Transport {
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  async getBoundOrganization(): Promise<{ name: string; slug?: string } | null> {
+  async getBoundOrganization(): Promise<BoundOrganization | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
       const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {

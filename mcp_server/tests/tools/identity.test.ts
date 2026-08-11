@@ -276,6 +276,20 @@ describe('Identity Tools', () => {
         expect(result.error).toContain('Organization not found.')
       })
 
+      it('reports an error when the remote refuses guest role (I1), not silent success', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new OrganizationRejectedError('Requires member or higher')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBeUndefined()
+        expect(result.error).toMatch(/Requires member or higher|acme/)
+        expect(deps.session.hasName()).toBe(false)
+      })
+
       /**
        * C2: org reject must not rename the session or skip channel re-join
        * bookkeeping under a half-applied identity. Remotes introduce first;

@@ -358,6 +358,14 @@ describe('RemoteTransport — organizations', () => {
     expect(await transport.listOrganizations()).toEqual([{ id: 'org_a', name: 'Acme', slug: 'acme' }])
   })
 
+  it('listOrganizations omits an empty slug at the remote edge (S1)', async () => {
+    const { client } = makeStubClient(async () => [{ id: 'org_a', name: 'Acme', slug: '' }])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([{ id: 'org_a', name: 'Acme' }])
+    expect('slug' in orgs[0]!).toBe(false)
+  })
+
   it('getBoundOrganization returns the slug as its own field so whoami can hand it to introduce', async () => {
     let queryCallCount = 0
     const { client } = makeStubClient(

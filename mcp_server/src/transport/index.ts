@@ -209,3 +209,9 @@ export class OrganizationRejectedError extends Error {
     this.name = 'OrganizationRejectedError'
   }
 }
+
+/** Bound org as returned by `RemoteTransport.getBoundOrganization` (KAI-407 S2). */
+export type BoundOrganization = { name: string; slug?: string }
+
+/** Row from `list_organizations` / `listOrganizations` (KAI-407 S2). */
+export type OrganizationSummary = { id: string; name: string; slug?: string }
