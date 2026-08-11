@@ -212,6 +212,37 @@ export const HEARTBEAT_INTERVAL_MS = 60_000
 const DEDUP_CAPACITY = 10_000
 
 /**
+ * Max parallel attachment materialisations on a single history/join page (I5).
+ * Unbounded Promise.all on a full page × MAX_INBOUND_IMAGE_BYTES spikes RAM/FD.
+ */
+const HISTORY_ATTACHMENT_CONCURRENCY = 3
+
+/**
+ * Map `items` with at most `concurrency` async workers in flight.
+ * Preserves result order. Used for history/join image materialisation.
+ */
+export async function mapPool<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return []
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Math.min(Math.max(1, concurrency), items.length)
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      for (;;) {
+        const index = next++
+        if (index >= items.length) return
+        results[index] = await fn(items[index]!, index)
+      }
+    }),
+  )
+  return results
+}
+
+/**
  * Bounded FIFO id-set used to dedupe already-delivered messages across the
  * lifetime of a single subscription. Per-`_id` lookups are O(1); eviction
  * is O(1) amortised. Grows monotonically until it hits `capacity`, then
@@ -307,6 +338,9 @@ export class RemoteTransport implements Transport {
   /** Message ids currently mid-delivery for any channel subscription.
    *  Concurrent onUpdate must not re-call onEvent for the same id. */
   private readonly channelInFlight = new Set<string>()
+
+  /** Same as channelInFlight for topic live subscriptions (I2). */
+  private readonly topicInFlight = new Set<string>()
 
   /** Handle for the periodic `updateLastSeen` ping started once `introduce`
    *  sets `sessionId`. Cleared on `shutdown`. */
@@ -724,13 +758,11 @@ export class RemoteTransport implements Transport {
       // This history is handed straight to the model, and its caller primes the
       // reactive cursor past it — so anything dropped here is dropped for good.
       return {
-        history: await Promise.all(
-          rows.map(async (r) => ({
-            sender: r.fromSessionId,
-            text: (await renderInboundText({ text: r.text, images: r.images, ts: r.ts })).text,
-            ts: new Date(r.ts).toISOString(),
-          })),
-        ),
+        history: await mapPool(rows, HISTORY_ATTACHMENT_CONCURRENCY, async (r) => ({
+          sender: r.fromSessionId,
+          text: (await renderInboundText({ text: r.text, images: r.images, ts: r.ts })).text,
+          ts: new Date(r.ts).toISOString(),
+        })),
       }
     } catch (err) {
       this.registerFailure('joinTopic', err)
@@ -854,14 +886,13 @@ export class RemoteTransport implements Transport {
     }>
     hasMore: boolean
   }): Promise<TransportHistoryPage> {
-    const messages = await Promise.all(
-      raw.messages.map(async (m) => ({
-        sender: m.fromSessionId,
-        senderSessionName: m.senderSessionName,
-        text: (await renderInboundText({ text: m.text, images: m.images, ts: m.ts })).text,
-        ts: m.ts,
-      })),
-    )
+    // Cap concurrent attachment downloads per page (I5).
+    const messages = await mapPool(raw.messages, HISTORY_ATTACHMENT_CONCURRENCY, async (m) => ({
+      sender: m.fromSessionId,
+      senderSessionName: m.senderSessionName,
+      text: (await renderInboundText({ text: m.text, images: m.images, ts: m.ts })).text,
+      ts: m.ts,
+    }))
     return {
       messages,
       hasMore: raw.hasMore,
@@ -958,7 +989,7 @@ export class RemoteTransport implements Transport {
    */
   subscribeTopicMessages(
     args: { topicId: string; channelName: string },
-    onEvent: (msg: ParsedMessage) => void,
+    onEvent: (msg: ParsedMessage) => void | Promise<void>,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
@@ -967,6 +998,9 @@ export class RemoteTransport implements Transport {
     // to the user on join, so that boundary message is not replayed. The
     // `_id` dedup below still guards against the same row appearing in
     // successive onUpdate batches within one subscription.
+    //
+    // onEvent may return a promise; local seen / topicMaxTs advance only after
+    // it fulfills (I2) — same contract as the channel path (C2).
     const startingTs = this.topicMaxTs.get(args.topicId)
     const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
@@ -984,26 +1018,48 @@ export class RemoteTransport implements Transport {
           ts: number
           images?: InboundImage[]
         }>
+        const deliveries: Array<{ id: string; ts: number; done: Promise<void> }> = []
         for (const row of arr) {
           if (seen.has(row._id)) continue
-          seen.add(row._id)
-          const prior = this.topicMaxTs.get(args.topicId) ?? 0
-          if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
-          // Skip self-echo: messages this session just sent shouldn't push
-          // back into our own Claude. The cursor advance above still
-          // happens so the next reconnect doesn't re-deliver our own row.
-          // Mirrors the local broker's `isExactSelf` drop.
-          if (row.fromSessionId === ownSessionId) continue
-          onEvent({
-            sender: row.fromSessionId,
-            text: row.text,
-            ts: new Date(row.ts).toISOString(),
-            channel: args.channelName,
-            channelName: args.channelName,
-            threadTs: args.topicId,
-            images: row.images,
+          if (this.topicInFlight.has(row._id)) continue
+          // Skip self-echo: own topic sends shouldn't push back. Still count
+          // as delivered so the watermark advances past our own row.
+          if (row.fromSessionId === ownSessionId) {
+            deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve() })
+            continue
+          }
+          this.topicInFlight.add(row._id)
+          const delivered = Promise.resolve(
+            onEvent({
+              sender: row.fromSessionId,
+              text: row.text,
+              ts: new Date(row.ts).toISOString(),
+              channel: args.channelName,
+              channelName: args.channelName,
+              threadTs: args.topicId,
+              images: row.images,
+            }),
+          ).finally(() => {
+            this.topicInFlight.delete(row._id)
           })
+          deliveries.push({ id: row._id, ts: row.ts, done: delivered })
         }
+        if (deliveries.length === 0) return
+        // Advance topicMaxTs / seen only after successful delivery, stop at
+        // the first failure — same as the channel path. No server ack for
+        // topics; local watermark is the only resubscribe gate.
+        void (async () => {
+          for (const delivery of deliveries) {
+            try {
+              await delivery.done
+            } catch {
+              break
+            }
+            seen.add(delivery.id)
+            const prior = this.topicMaxTs.get(args.topicId) ?? 0
+            if (delivery.ts > prior) this.topicMaxTs.set(args.topicId, delivery.ts)
+          }
+        })()
       },
       (err) => {
         this.registerSubscriptionFailure('subscribeTopicMessages', err)

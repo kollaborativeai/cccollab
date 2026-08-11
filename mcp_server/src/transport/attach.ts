@@ -689,15 +689,13 @@ export function ensureTopicSubscription(args: {
   }
   const unsub = args.transport.subscribeTopicMessages(
     { topicId: args.topicId, channelName: args.channelName },
-    (msg: ParsedMessage) => {
-      // Deliberately swallowed HERE, unlike the channel path. `push` now
-      // rejects on a failed notification so the channel ack can withhold
-      // itself, but a topic has no persisted server-side cursor —
-      // `topicMaxTs` is in-process and re-primed on join — so there is nothing
-      // here to withhold, and an unhandled rejection would take the process
-      // down for a failure the next join recovers from anyway.
-      void args.messageBus.push(msg, args.transport.source).catch(() => {})
-    },
+    (msg: ParsedMessage) =>
+      // RETURNED, not `void`ed (I2): topicMaxTs advances only after delivery
+      // settles. Swallowing the rejection used to leave the watermark past a
+      // failed notify with no re-offer on resubscribe. The transport itself
+      // catches per-row failures so an unhandled rejection does not take the
+      // process down.
+      args.messageBus.push(msg, args.transport.source),
   )
   args.map.set(key, unsub)
 }

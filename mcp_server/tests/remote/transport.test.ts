@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
 
-import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
+import { RemoteTransport, HEARTBEAT_INTERVAL_MS, mapPool } from '../../src/transport/remote.js'
 
 /**
  * Self-disable transition test.
@@ -149,8 +149,13 @@ describe('RemoteTransport graceful degradation', () => {
  * watermark (`topicMaxTs`) must persist across unsubscribe/resubscribe
  * so a reconnect after leave-topic/join-topic still benefits.
  */
+async function settleTopic(): Promise<void> {
+  // topicMaxTs / seen advance in a fire-and-forget async chain after delivery.
+  for (let i = 0; i < 12; i++) await Promise.resolve()
+}
+
 describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
-  it('omits sinceTs on first subscribe and passes the running max on a resubscribe', () => {
+  it('omits sinceTs on first subscribe and passes the running max on a resubscribe', async () => {
     // Capture every `onUpdate` call's args so we can assert the second
     // subscribe received sinceTs === the max ts delivered by the first.
     const onUpdateCalls: Array<{ query: unknown; args: Record<string, unknown> }> = []
@@ -176,46 +181,34 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
       { _id: 'msg_1', fromSessionId: 'alice', text: 'first', ts: 1_700_000_100_000 },
       { _id: 'msg_2', fromSessionId: 'alice', text: 'second', ts: 1_700_000_200_000 },
     ])
+    await settleTopic()
     expect(delivered).toHaveLength(2)
     expect(onUpdateCalls[0]!.args).toEqual({ topicId: 't1' })
 
     unsub1()
 
-    // Resubscribe: sinceTs must be the highest ts seen so far.
+    // Resubscribe: sinceTs must be the highest ts successfully delivered so far.
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
     expect(onUpdateCalls[1]!.args).toEqual({ topicId: 't1', sinceTs: 1_700_000_200_000 })
 
-    // A message with a newer ts on the resubscribed stream advances the
-    // watermark; a message at or below the prior watermark is filtered
-    // client-side via the id-dedup set (the second subscribe gets a fresh
-    // BoundedIdSet, so the "dup" id is treated as new — but if it's the
-    // same ts we already had plus a new content, it'd still be surfaced).
     callbacks[1]!([
       { _id: 'msg_3', fromSessionId: 'alice', text: 'third', ts: 1_700_000_300_000 },
       { _id: 'msg_2', fromSessionId: 'alice', text: 'second', ts: 1_700_000_200_000 },
     ])
-    // Only `third` is delivered because the `_id` dedup inside the second
-    // subscription has seen msg_2 in its own Set when it arrived first.
-    // Wait — second subscription has a FRESH Set. So msg_2 WOULD be
-    // re-delivered via the server's inclusive cursor. That's the expected
-    // same-ms-safety behavior; assertion below accepts either.
-    // Assert: `third` is delivered. `msg_2` may or may not be redelivered
-    // depending on whether the second subscription's Set has seen it yet.
+    await settleTopic()
     expect(delivered.some((d) => d.text === 'third')).toBe(true)
   })
 
-  it('dedupes same-ms messages delivered in a single onUpdate callback', () => {
+  it('dedupes same-ms messages delivered in a single onUpdate callback', async () => {
     // Same-millisecond messages must both be delivered exactly once.
     // Before the fix: the second was silently dropped because the client
     // filtered on `row.ts <= lastTs` and lastTs equalled row.ts after
     // processing the first.
-    const onUpdateCalls: Array<{ query: unknown; args: Record<string, unknown> }> = []
     const callbacks: Array<(rows: unknown) => void> = []
     const stub = {
       query: vi.fn(async () => undefined),
       mutation: vi.fn(async () => undefined),
-      onUpdate: vi.fn((query: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
-        onUpdateCalls.push({ query, args })
+      onUpdate: vi.fn((_q: unknown, _args: Record<string, unknown>, cb: (rows: unknown) => void) => {
         callbacks.push(cb)
         return () => {}
       }),
@@ -231,11 +224,12 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
       { _id: 'msg_a', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 },
       { _id: 'msg_b', fromSessionId: 'alice', text: 'b', ts: 1_700_000_000_000 },
     ])
+    await settleTopic()
 
     expect(delivered.map((d) => d.text).sort()).toEqual(['a', 'b'])
   })
 
-  it('dedupes the same message arriving twice in subsequent onUpdate callbacks (no duplicate delivery)', () => {
+  it('dedupes the same message arriving twice in subsequent onUpdate callbacks (no duplicate delivery)', async () => {
     // Convex's `onUpdate` fires with the full result set for each update.
     // On every new-message tick, the server re-sends all rows matching the
     // current sinceTs window. The client must not re-deliver rows it has
@@ -256,13 +250,53 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push({ text: msg.text }))
 
     callbacks[0]!([{ _id: 'msg_1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 }])
+    await settleTopic()
     // Second tick: Convex re-sends all rows plus a new one.
     callbacks[0]!([
       { _id: 'msg_1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 },
       { _id: 'msg_2', fromSessionId: 'alice', text: 'b', ts: 1_700_000_100_000 },
     ])
+    await settleTopic()
 
     expect(delivered.map((d) => d.text)).toEqual(['a', 'b'])
+  })
+
+  it('I2: does not advance topicMaxTs/sinceTs past a failed delivery on resubscribe', async () => {
+    // Topic path used to mark seen + topicMaxTs before onEvent settled, then
+    // attach.ts swallowed push failures. A failed image notify never re-offered.
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const callbacks: Array<(rows: unknown) => void> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        callbacks.push(cb)
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const delivered: string[] = []
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) =>
+      msg.text === 'boom'
+        ? Promise.reject(new Error('delivery failed'))
+        : (delivered.push(msg.text), Promise.resolve()),
+    )
+
+    callbacks[0]!([
+      { _id: 'm1', fromSessionId: 'alice', text: 'first', ts: 1 },
+      { _id: 'm2', fromSessionId: 'alice', text: 'boom', ts: 2 },
+    ])
+    await settleTopic()
+    expect(delivered).toEqual(['first'])
+
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => Promise.resolve())
+    expect(onUpdateCalls.length).toBeGreaterThanOrEqual(2)
+    const lastArgs = onUpdateCalls[onUpdateCalls.length - 1]!.args
+    expect(lastArgs).toEqual({ topicId: 't1', sinceTs: 1 })
+    expect(lastArgs.sinceTs).not.toBe(2)
   })
 })
 
@@ -1023,5 +1057,22 @@ describe('RemoteTransport heartbeat', () => {
 
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/authentication failed/i)
+  })
+})
+
+describe('mapPool concurrency (I5)', () => {
+  it('never runs more than the concurrency cap at once', async () => {
+    let inFlight = 0
+    let peak = 0
+    const items = [1, 2, 3, 4, 5, 6]
+    const results = await mapPool(items, 3, async (n) => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 15))
+      inFlight--
+      return n * 10
+    })
+    expect(peak).toBeLessThanOrEqual(3)
+    expect(results).toEqual([10, 20, 30, 40, 50, 60])
   })
 })

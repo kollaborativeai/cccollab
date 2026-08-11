@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CCCOLLAB_HOME, SESSION_SCOPE } from './constants.js'
 import type { InboundImage } from './types.js'
@@ -285,6 +285,11 @@ export function imageFileName(args: { ts: number; url: string; name: string; mim
  * a directory that only grows when images actually arrive, with no scheduler to
  * start, no handle to leak, and no shutdown wiring. Move it to a timer only if a
  * session ever receives enough images that the readdir shows up in a profile.
+ *
+ * Session directories under the images ROOT are never removed solely because
+ * the directory's own mtime is old (I8). Sweep file mtimes inside them; only
+ * remove a session dir once it is empty. Otherwise session B saving an image
+ * (ROOT sweep) could wipe session A's still-referenced paths.
  */
 export function sweepOldImages(dir: string = CCCOLLAB_IMAGES_DIR, now: number = Date.now()): void {
   if (!existsSync(dir)) return
@@ -298,12 +303,28 @@ export function sweepOldImages(dir: string = CCCOLLAB_IMAGES_DIR, now: number = 
     const path = join(dir, entry)
     try {
       const stats = statSync(path)
+      if (stats.isDirectory()) {
+        // Recurse into session dirs: age files by their own mtime, never the
+        // parent directory's mtime alone.
+        sweepOldImages(path, now)
+        let remaining: string[]
+        try {
+          remaining = readdirSync(path)
+        } catch {
+          continue
+        }
+        // Empty after the per-file pass: drop it. Deleting the last file
+        // refreshes the directory mtime on most filesystems, so an
+        // age-only gate would leave empty session shells forever.
+        // recursive: true is required by Node for directory targets even
+        // when empty (rmSync without it throws EISDIR).
+        if (remaining.length === 0) {
+          rmSync(path, { force: true, recursive: true })
+        }
+        continue
+      }
       if (now - stats.mtimeMs <= IMAGE_RETENTION_MS) continue
-      // Directories too: images are stored one directory per session now, and a
-      // machine that runs many sessions would otherwise accumulate one empty
-      // directory per process it has ever started. `recursive` because a stale
-      // session's directory still holds its (equally stale) images.
-      rmSync(path, { force: true, recursive: stats.isDirectory() })
+      rmSync(path, { force: true })
     } catch {
       // A file that vanished under us, or one we may not stat, is not our
       // problem — sweeping is opportunistic housekeeping, never load-bearing.
@@ -370,10 +391,28 @@ export async function saveInboundImages(
       const path = join(dir, imageFileName({ ts: opts.ts, url: image.url, name: image.name, mimeType: image.mimeType }))
 
       // Same file name means same url means same bytes (see imageFileName), so
-      // a redelivery costs nothing.
+      // a redelivery costs nothing — but only if the cached file is complete and
+      // still a valid image. A crash mid-write left a truncated file; treating
+      // existsSync as success (I4) stuck the session on a broken path forever.
       if (existsSync(path)) {
-        saved.push({ name, path })
-        continue
+        try {
+          const cached = readFileSync(path)
+          if (
+            cached.byteLength > 0 &&
+            cached.byteLength <= MAX_INBOUND_IMAGE_BYTES &&
+            hasImageSignature(cached, image.mimeType)
+          ) {
+            saved.push({ name, path })
+            continue
+          }
+          rmSync(path, { force: true })
+        } catch {
+          try {
+            rmSync(path, { force: true })
+          } catch {
+            /* re-fetch below */
+          }
+        }
       }
 
       if (IMAGE_EXTENSIONS[image.mimeType] === undefined) {
@@ -436,8 +475,12 @@ export async function saveInboundImages(
         continue
       }
       // 0o600: a delivered screenshot may be private, and this directory lives
-      // in the user's home on a possibly shared machine.
-      writeFileSync(path, body, { mode: 0o600 })
+      // in the user's home on a possibly shared machine. Write via *.tmp +
+      // rename so a crash mid-write cannot leave a truncated final path that
+      // the existsSync short-circuit would treat as a successful cache hit.
+      const tmpPath = `${path}.tmp`
+      writeFileSync(tmpPath, body, { mode: 0o600 })
+      renameSync(tmpPath, path)
       saved.push({ name, path })
     } catch (err) {
       failed.push({ name, reason: err instanceof Error ? err.message : String(err) })
@@ -502,8 +545,9 @@ const FENCE_MARKER = new RegExp(`[<＜]\\s*/?\\s*${FENCE_TAG}[\\w-]*`, 'gi')
 
 /**
  * The inner `<image …>` vocabulary. Ambiguous with ordinary prose and code, so
- * this one demands a COMPLETE, single-line, parser-shaped tag before it will
- * touch anything: no whitespace after the bracket, and no newline inside.
+ * this one demands a COMPLETE, parser-shaped tag before it will touch anything:
+ * no whitespace after the bracket (the tag name must sit tight against `<`).
+ * Attributes may span lines (I3 multiline forge); body is capped.
  *
  * The discriminator is what follows the TAG NAME, and it has to be, because
  * requiring no space after the bracket only rules out the spaced comparison
@@ -519,7 +563,13 @@ const FENCE_MARKER = new RegExp(`[<＜]\\s*/?\\s*${FENCE_TAG}[\\w-]*`, 'gi')
  * `path` and no `name`, so it conveys nothing to the model, and matching it
  * would take `Promise<Image>` with it.
  */
-const IMAGE_ELEMENT = /[<＜](?:\/image\s*[>＞]|image(?=[ \t])[^>＞\n]*[>＞])/gi
+// I3: newlines inside the tag used to bypass the strip (`[^>＞\n]*` required a
+// same-line close). Allow any whitespace after the tag name and newlines inside
+// attributes, still capped so a missing `>` cannot swallow a whole message.
+// Bare `<image>` (no attributes) is still not matched — same as before.
+// Unspaced comparisons (`i<image.length`) and generics (`Promise<Image>`) still
+// fail the whitespace-after-name gate.
+const IMAGE_ELEMENT = /[<＜](?:\/image\s*[>＞]|image(?=[ \t\n\r])[^>＞]{0,500}[>＞])/gi
 
 export function stripFenceMarkers(text: string): string {
   // `text` is the message body straight off the wire. A non-string here threw
