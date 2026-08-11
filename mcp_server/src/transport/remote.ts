@@ -367,9 +367,12 @@ export class RemoteTransport implements Transport {
    * holds. Callers that need a best-effort introduce should catch the
    * rethrow themselves.
    *
-   * `registerFailure` still runs on the way out so the circuit breaker
-   * counts this against the failure window — a transient blip at startup
-   * is a failure just like one mid-session.
+   * Transient transport faults still count against the circuit breaker via
+   * `registerFailure`. A refused organization (wrong slug/id, non-member,
+   * guest role) does NOT — that is the caller's argument being wrong, not
+   * the transport being unhealthy (KAI-407 / C1). Counting those trips the
+   * breaker after three typos and then a correct introduce reports local-only
+   * success with remote permanently disabled.
    */
   async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     if (!this.enabled) {
@@ -397,14 +400,11 @@ export class RemoteTransport implements Transport {
         /* best-effort preload */
       }
     } catch (err) {
-      this.registerFailure('introduce', err)
-      // A refused organization is the caller's argument being wrong, not
-      // the transport being unhealthy. Re-throw it as a distinct type so
-      // the tool layer can report it instead of swallowing it as
-      // "transient, a later introduce will re-register" (KAI-407).
+      // Org / authz refusals: rethrow without counting against the breaker.
       if (args.organizationId !== undefined && isOrganizationRejection(err)) {
         throw new OrganizationRejectedError(extractConvexErrorMessage(err))
       }
+      this.registerFailure('introduce', err)
       throw err
     }
   }
@@ -1280,25 +1280,39 @@ function extractConvexErrorMessage(err: unknown): string {
 
 /**
  * Detect whether an introduce failure is the backend refusing the
- * `organizationId` argument, as opposed to a transient transport fault.
+ * organization bind, as opposed to a transient transport fault.
  *
- * Two shapes reach us, one per backend generation:
- *  - `ConvexError({code: 'ORGANIZATION_NOT_FOUND'})` — the slug-resolving
- *    backend's own refusal (unknown slug/id, non-member, archived; all
- *    collapsed into that one code on purpose).
- *  - `ArgumentValidationError` — a backend whose `introduce` validator is
- *    still `v.id('organizations')`, which rejects any slug before the
- *    handler runs. Convex raises this by name; the string check is a
- *    fallback for clients that only surface it in the message.
+ * Production (slug-resolving backend):
+ *  - `ConvexError({code: 'ORGANIZATION_NOT_FOUND'})` — unknown slug/id,
+ *    non-member, archived (collapsed into one code on purpose).
+ *  - Role/authz refusal — guest (or lower) hits `requireCccollabParticipant`
+ *    with "Requires member or higher" (I1). Not a transport fault.
+ *
+ * Legacy-compat:
+ *  - `ArgumentValidationError` whose **message** implicates `organizationId`
+ *    — a backend whose `introduce` validator is still `v.id('organizations')`.
+ *    The production path for AVE is the **message** regex (Convex embeds the
+ *    name in the message more often than as `err.name`); we do not treat every
+ *    AVE as an org rejection (I7).
  *
  * Callers must additionally confirm an `organizationId` was actually sent
- * before treating an ArgumentValidationError as an org rejection — the
- * same error covers every other argument too.
+ * before treating an ArgumentValidationError as an org rejection.
  */
 function isOrganizationRejection(err: unknown): boolean {
   if (extractConvexErrorCode(err) === 'ORGANIZATION_NOT_FOUND') return true
-  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
-  return err instanceof Error && /ArgumentValidationError/i.test(err.message)
+
+  const message = extractConvexErrorMessage(err)
+  // Guest / insufficient-role on introduce (I1). Distinct from ORGANIZATION_NOT_FOUND.
+  if (/Requires member or higher/i.test(message) || /Not authorized/i.test(message)) {
+    return true
+  }
+
+  // Legacy AVE: only when the message names organizationId (I7).
+  const looksLikeAve =
+    (err instanceof Error && err.name === 'ArgumentValidationError') || /ArgumentValidationError/i.test(message)
+  if (looksLikeAve && /organizationId/i.test(message)) return true
+
+  return false
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {

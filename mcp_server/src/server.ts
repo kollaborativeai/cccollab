@@ -505,7 +505,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
           .optional()
           .describe(
             'Organization to create this session in, as its slug (e.g. "acme") — the readable ' +
-              "handle from list_organizations, matching the organization's web URL. Its id is " +
+              'handle from list_organizations (the path segment in `/{slug}/...`, not the full URL). Its id is ' +
               'also accepted, and is the only way to name an organization that has no slug. ' +
               'Required when connected to a remote location.',
           ),
@@ -524,7 +524,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, organizationSlug?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `organizationSlug` is the path segment for re-introduce; prefer it over scraping `organization` (display names can contain parentheses). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
       inputSchema: {},
     },
     async () => {
@@ -568,8 +568,8 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     {
       description:
         'List the organizations you belong to on each remote location, as {id, name, slug?, location}. ' +
-        'Pass the `slug` to introduce as the `organization` argument — it is the readable handle, ' +
-        "matching the organization's web URL. Fall back to `id` for an organization with no slug. " +
+        'Pass the `slug` to introduce as the `organization` argument — it is the path segment in ' +
+        '`/{slug}/...` (e.g. `acme`), not the full URL. Fall back to `id` for an organization with no slug. ' +
         'Callable before introduce.',
       inputSchema: {},
     },

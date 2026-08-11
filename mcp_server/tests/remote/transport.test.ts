@@ -410,6 +410,56 @@ describe('RemoteTransport — organizations', () => {
     )
   })
 
+  /**
+   * C1 (KAI-407 review): three org refusals must NOT trip the circuit breaker.
+   * A refused org is the caller's argument being wrong, not transport health.
+   * Without this, a fourth introduce with a correct slug reports local-only
+   * success because the remote was dropped from `router.enabled()`.
+   */
+  it('org refusals do not disable the transport (five refusals leave enabled=true)', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'ORGANIZATION_NOT_FOUND', message: 'Organization not found.' },
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    for (let i = 0; i < 5; i++) {
+      await expect(
+        transport.introduce({ sessionName: 'reviewer', organizationId: `typo-${i}` }),
+      ).rejects.toBeInstanceOf(OrganizationRejectedError)
+      expect(transport.enabled).toBe(true)
+    }
+    expect(transport.degradation).toBeNull()
+
+    // A subsequent good introduce must still hit the client (not short-circuit
+    // as "remote transport is disabled").
+    mutationMock.mockImplementation(async () => 'session_ok')
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })
+    expect(transport.enabled).toBe(true)
+    expect(mutationMock).toHaveBeenCalled()
+  })
+
+  /** I1: guest role denial is a hard org-bind refusal, not a soft transport fault. */
+  it('introduce raises OrganizationRejectedError when the backend refuses guest role', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'FORBIDDEN', message: 'Requires member or higher' },
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
+    expect(transport.enabled).toBe(true)
+  })
+
   it('introduce raises OrganizationRejectedError when the backend validator refuses a slug', async () => {
     // A backend whose introduce validator is still `v.id('organizations')`
     // rejects any slug before the handler runs. Deterministic, not transient.

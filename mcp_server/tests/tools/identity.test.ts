@@ -276,6 +276,76 @@ describe('Identity Tools', () => {
         expect(result.error).toContain('Organization not found.')
       })
 
+      /**
+       * C2: org reject must not rename the session or skip channel re-join
+       * bookkeeping under a half-applied identity. Remotes introduce first;
+       * setName only after accept.
+       */
+      it('on org reject does not set the session name and does not re-join channels', async () => {
+        const joinChannel = vi.fn(async () => {})
+        const localIntroduce = vi.fn(async () => {})
+        const localTransport = new LocalTransport(7850)
+        // Spy local introduce/join via a wrapper transport in the router.
+        const localWrapper = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: localIntroduce,
+          joinChannel,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listChannels: vi.fn(async () => []),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c' })),
+          joinTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c', history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+        }
+        const remoteIntroduce = vi.fn(async () => {
+          throw new OrganizationRejectedError('Organization not found.')
+        })
+        const fakeRemote = {
+          source: 'remote' as const,
+          enabled: true,
+          introduce: remoteIntroduce,
+          joinChannel: vi.fn(async () => {}),
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listChannels: vi.fn(async () => []),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c' })),
+          joinTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c', history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+        }
+        const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+        const context = new ActiveContext()
+        // Pretend we were already on a channel under a prior name.
+        context.joinChannel('dev', 'manual', 'local')
+        const deps: IdentityToolDeps = {
+          session,
+          context,
+          router: new TransportRouter([localWrapper as unknown as Transport, fakeRemote as unknown as Transport]),
+        }
+
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'bob', organization: 'typo-slug' }, deps),
+        )
+        expect(result.error).toContain('typo-slug')
+        expect(session.hasName()).toBe(false)
+        expect(localIntroduce).not.toHaveBeenCalled()
+        expect(joinChannel).not.toHaveBeenCalled()
+        expect(remoteIntroduce).toHaveBeenCalled()
+        void localTransport
+      })
+
       it('still reports success when a transport fails transiently, so a later introduce re-registers', async () => {
         // The counterpart to the test above: a dropped connection is not a
         // refusal. It stays non-fatal — the org is fine, the socket was not.
@@ -289,6 +359,14 @@ describe('Identity Tools', () => {
         )
         expect(result.name).toBe('reviewer')
         expect(result.error).toBeUndefined()
+      })
+
+      it('treats whitespace-only organization as missing when a remote is enabled', async () => {
+        const deps = makeDepsWithRemote()
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: '   ' }, deps),
+        )
+        expect(result.error).toMatch(/organization/i)
       })
     })
 

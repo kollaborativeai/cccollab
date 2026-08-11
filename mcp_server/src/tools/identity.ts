@@ -81,38 +81,72 @@ export async function handleIdentityTool(
         organization?: string
       }
 
-      const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
-      if (hasRemote && !organization) {
+      // S3: whitespace-only must not count as "present".
+      const organizationId = organization?.trim() || undefined
+
+      const enabled = deps.router.enabled()
+      const remotes = enabled.filter((t) => t.source !== LOCAL_LOCATION)
+      const locals = enabled.filter((t) => t.source === LOCAL_LOCATION)
+      const hasRemote = remotes.length > 0
+
+      if (hasRemote && !organizationId) {
         return JSON.stringify({
           error:
             'An organization is required. Call list_organizations and pass its `slug` (or `id`) as `organization`.',
         })
       }
 
+      // C2: when an org is being bound, introduce remotes FIRST — before
+      // setName / local introduce. A refused org must not rename the session
+      // or leave channel re-joins skipped under a half-applied identity.
+      // Retrying the SAME bad value fails forever (backend); a different
+      // valid slug/id succeeds while the transport is still enabled (I5).
+      if (organizationId) {
+        for (const transport of remotes) {
+          try {
+            await transport.introduce({
+              sessionName: displayName,
+              objective,
+              organizationId,
+            })
+          } catch (err) {
+            if (err instanceof OrganizationRejectedError) {
+              // Do not setName; do not touch local; rejoin not needed.
+              // Multi-remote partial bind after one success is a product
+              // decision (I2) — left alone for Samuel.
+              return JSON.stringify({
+                error: `Could not join organization "${organizationId}" at "${transport.source}": ${err.message}`,
+              })
+            }
+            // Transient: continue; a later introduce may re-register.
+          }
+        }
+      }
+
+      // Commit local identity only after remote org bind accepted (or no
+      // remote/org path).
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
 
-      // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
-      for (const transport of deps.router.enabled()) {
+      // Local transport (and remotes when no org was requested — local-only
+      // fan-out). Remotes with an org were already introduced above.
+      const remaining = organizationId ? locals : enabled
+      for (const transport of remaining) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          await transport.introduce({
+            sessionName: displayName,
+            objective,
+            organizationId,
+          })
         } catch (err) {
-          // A refused organization is the one failure we must not swallow:
-          // the session never binds, and reporting success would leave the
-          // caller believing it did (KAI-407). It is also permanent —
-          // unlike a dropped connection, no later introduce recovers it.
-          // The backend's message is forwarded as-is; it is deliberately
-          // vague so `introduce` cannot be used to probe for org slugs.
           if (err instanceof OrganizationRejectedError) {
+            // Should not happen on local (ignores org); if a remote is in
+            // `remaining` without orgId this path is unused. Still hard-fail.
             return JSON.stringify({
-              error: `Could not join organization "${organization}" at "${transport.source}": ${err.message}`,
+              error: `Could not join organization "${organizationId}" at "${transport.source}": ${err.message}`,
             })
           }
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+          // Non-fatal transient.
         }
       }
 
