@@ -51,11 +51,14 @@ function createMockDeps(): IdentityToolDeps {
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
  * Optional `remoteOverrides` can be used to add extra methods to the fake
- * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ * remote transport (e.g. `getBoundOrganization` for the whoami tests).
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganization: () => Promise<{ name: string; slug?: string } | null>
+    listOrganizations?: () => Promise<Array<{ id: string; name: string; slug?: string }>>
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -198,11 +201,18 @@ interface FakeFeed {
 function makeRecordingRemoteTransport(
   source: string,
   calls: RecordedCall[],
-  opts?: { introduceThrowsAfter?: number; introduceThrowsOnCall?: number },
+  opts?: {
+    introduceThrowsAfter?: number
+    introduceThrowsOnCall?: number
+    /** Throw on joinChannel only after the first successful introduce (org-change re-join). */
+    joinChannelThrowsAfterFirstIntroduce?: boolean
+    organizations?: Array<{ id: string; name: string; slug?: string }>
+  },
 ): Transport {
   let sessionId: string | null = null
   let boundOrg: string | undefined
   let introduceCount = 0
+  let successfulIntroduces = 0
   const topicFeeds = new Map<string, FakeFeed>()
   const channelFeeds = new Map<string, FakeFeed>()
   const base = makeRecordingTransport(source, calls)
@@ -244,6 +254,7 @@ function makeRecordingRemoteTransport(
       // when EITHER changes — an org-only switch rebinds just as a rename does.
       sessionId = `session_${String(args.sessionName)}${organizationId !== undefined ? `@${organizationId}` : ''}`
       boundOrg = organizationId
+      successfulIntroduces += 1
       if (previousSessionId === null || previousSessionId === sessionId) return
 
       const orgChanged = previousOrg !== undefined && organizationId !== undefined && previousOrg !== organizationId
@@ -259,10 +270,20 @@ function makeRecordingRemoteTransport(
     },
     joinChannel: async (args: Record<string, unknown>): Promise<{ subscriberCount: number }> => {
       calls.push({ method: 'joinChannel', args })
+      // After the *second* introduce (org-change re-join), not the first.
+      if (opts?.joinChannelThrowsAfterFirstIntroduce && successfulIntroduces > 1) {
+        throw new Error(`joinChannel failed on ${source}`)
+      }
       const name = String(args.channel)
       const feed = channelFeeds.get(name)
       if (feed !== undefined && !feed.live) attach('Channel', name, feed)
       return { subscriberCount: 1 }
+    },
+    listOrganizations: async (): Promise<Array<{ id: string; name: string; slug?: string }>> => {
+      return opts?.organizations ?? []
+    },
+    invalidateChannelCaches: (): void => {
+      calls.push({ method: 'invalidateChannelCaches', args: {} })
     },
     joinTopic: async (args: Record<string, unknown>): Promise<{ history: [] }> => {
       calls.push({ method: 'joinTopic', args })
@@ -1109,6 +1130,139 @@ describe('Identity Tools', () => {
           })
         })
 
+        it('canonical: id then same-org slug is NOT an org-change (no teardown, no droppedTopics)', async () => {
+          // cc#31 merge critical: store/compare by canonical id so whoami slug
+          // hand-back does not destroy memberships. (KAI-418 feed model: no maps.)
+          const calls: RecordedCall[] = []
+          const orgs = [{ id: 'org_xxx', name: 'Acme', slug: 'acme' }]
+          const transport = makeRecordingRemoteTransport('remote', calls, { organizations: orgs })
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'a', organization: 'org_xxx' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          ensureChannelSubscription({ transport, channelName: 'kai', messageBus })
+          ensureTopicSubscription({
+            transport,
+            topicId: 'topic_1',
+            channelName: 'kai',
+            messageBus,
+          })
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_xxx')
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'acme' }, deps)
+
+          expect(JSON.parse(result)).toEqual({ name: 'a' })
+          expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
+          expect(calls.some((c) => c.method === 'invalidateChannelCaches')).toBe(false)
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_1'])
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_xxx')
+        })
+
+        /**
+         * cc#31 C3 e2e: whoami organizationSlug via getBoundOrganization, re-introduce
+         * by slug → no false org-change. RED: sabotage canonicalize → droppedTopics.
+         */
+        it('C3 e2e: whoami organizationSlug re-introduce does not false-org-change', async () => {
+          const calls: RecordedCall[] = []
+          const orgs = [{ id: 'org_xxx', name: 'Acme', slug: 'acme' }]
+          const transport = makeRecordingRemoteTransport('remote', calls, { organizations: orgs })
+          type BoundOrg = { name: string; slug?: string } | null
+          const withBound = transport as Transport & {
+            getBoundOrganization: () => Promise<BoundOrg>
+          }
+          withBound.getBoundOrganization = async () => ({ name: 'Acme', slug: 'acme' })
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await handleIdentityTool('introduce', { name: 'architect', organization: 'org_xxx' }, deps)
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          ensureChannelSubscription({ transport, channelName: 'kai', messageBus })
+          ensureTopicSubscription({
+            transport,
+            topicId: 'topic_1',
+            channelName: 'kai',
+            messageBus,
+          })
+
+          const who = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+          expect(who.locations.remote.organization).toBe('Acme')
+          expect(who.locations.remote.organizationSlug).toBe('acme')
+          const handBack = who.locations.remote.organizationSlug as string
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'architect', organization: handBack }, deps)
+          expect(JSON.parse(result)).toEqual({ name: 'architect' })
+          expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
+          expect(calls.some((c) => c.method === 'invalidateChannelCaches')).toBe(false)
+          expect(JSON.parse(result).droppedTopics).toBeUndefined()
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_1'])
+          expect(deps.session.getOrganizationFor('remote')).toBe('org_xxx')
+        })
+
+        it('C2: first explicit org at a membership location migrates (previousOrg was undefined)', async () => {
+          const calls: RecordedCall[] = []
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          await transport.introduce({ sessionName: 'bootstrap' })
+          ensureChannelSubscription({ transport, channelName: 'kai', messageBus })
+          deps.session.setName('bootstrap')
+          calls.length = 0
+
+          const result = await handleIdentityTool('introduce', { name: 'bootstrap', organization: 'org_1' }, deps)
+          expect(calls.some((c) => c.method === 'invalidateChannelCaches')).toBe(true)
+          expect(calls.some((c) => c.method === 'joinChannel')).toBe(true)
+          expect(JSON.parse(result).name).toBe('bootstrap')
+        })
+
+        it('C1: failed channel re-join after org change is degraded', async () => {
+          const calls: RecordedCall[] = []
+          const orgs = [
+            { id: 'org_1', name: 'One', slug: 'one' },
+            { id: 'org_2', name: 'Two', slug: 'two' },
+          ]
+          const transport = makeRecordingRemoteTransport('remote', calls, {
+            organizations: orgs,
+            joinChannelThrowsAfterFirstIntroduce: true,
+          })
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+          }
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          // First introduce: joinChannel still works (gate is after first introduce).
+          const first = await handleIdentityTool('introduce', { name: 'a', organization: 'org_1' }, deps)
+          expect(JSON.parse(first).degraded).toBeUndefined()
+          calls.length = 0
+          const result = await handleIdentityTool('introduce', { name: 'a', organization: 'org_2' }, deps)
+          const parsed = JSON.parse(result)
+          expect(parsed.degraded).toContain('remote')
+          expect(calls.some((c) => c.method === 'invalidateChannelCaches')).toBe(true)
+        })
+
         it('never drops LOCAL topics on an org change (the broker is single-tenant)', async () => {
           // The single most dangerous mistake available here: treating the local
           // location as org-changed would tear down and DROP the user's local
@@ -1545,16 +1699,26 @@ describe('Identity Tools', () => {
 
       it('reports the bound organization name for a remote location', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => 'Acme',
+          getBoundOrganization: async () => ({ name: 'Acme' }),
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
       })
 
+      it('reports organizationSlug as its own field for re-introduce hand-back', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganization: async () => ({ name: 'Acme', slug: 'acme' }),
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_xxx' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme')
+        expect(result.locations.remote.organizationSlug).toBe('acme')
+      })
+
       it('omits organization when the remote location has no bound org yet', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => null,
+          getBoundOrganization: async () => null,
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))

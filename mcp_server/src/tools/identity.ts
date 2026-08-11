@@ -593,8 +593,13 @@ function logMigrationWarning(what: string, err: unknown): void {
  * cases). The local transport has no degradation surface.
  *
  * `organization` is `"local"` for the local broker, the bound
- * organization name for a remote transport (via `getBoundOrganizationName`),
- * or omitted when a remote transport has no session yet.
+ * organization **display name** for a remote transport (via
+ * `getBoundOrganization`), or omitted when a remote transport has no session yet.
+ *
+ * `organizationSlug` (cc#31 C3 merge) accompanies it when the bound org has a
+ * slug. It is the handle `introduce` accepts — a caller reads it here and
+ * passes it straight back. Storing/comparing by canonical **id** (KAI-408)
+ * means that hand-back does not trip a false org-change.
  *
  * `diagnostics`, when provided, contributes an entry for every location
  * whose attach FAILED and which is therefore absent from the router
@@ -602,32 +607,42 @@ function logMigrationWarning(what: string, err: unknown): void {
  * A location that is live in the router takes precedence over a stale
  * diagnostics entry for the same name.
  */
+type LocationState = {
+  enabled: boolean
+  degradation?: string
+  organization?: string
+  organizationSlug?: string
+}
+
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<Record<string, LocationState>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
 
       let organization: string | undefined
+      let organizationSlug: string | undefined
       if (transport.source === LOCAL_LOCATION) {
         organization = 'local'
-      } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
-        organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
+      } else if (typeof maybeDegraded.getBoundOrganization === 'function') {
+        const bound = await maybeDegraded.getBoundOrganization()
+        organization = bound?.name
+        organizationSlug = bound?.slug
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: LocationState = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
+        ...(organizationSlug ? { organizationSlug } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<string, LocationState> = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

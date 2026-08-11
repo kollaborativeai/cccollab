@@ -13,6 +13,8 @@ import {
   type TransportSession,
   type TransportTopic,
   type TransportTopicMessage,
+  type BoundOrganization,
+  type OrganizationSummary,
 } from './index.js'
 
 /**
@@ -646,10 +648,19 @@ export class RemoteTransport implements Transport {
   async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
     if (!this.enabled) return []
     try {
-      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+      const rows = (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
+        slug?: string
       }>
+      // Normalize empty slug so list/get/whoami share one rule (KAI-407 S1).
+      return rows.map(
+        (r): OrganizationSummary => ({
+          id: r.id,
+          name: r.name,
+          ...(r.slug ? { slug: r.slug } : {}),
+        }),
+      )
     } catch (err) {
       this.registerFailure('listOrganizations', err)
       return []
@@ -665,22 +676,34 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Returns the name of the organization this transport's session is bound
-   * to, or null when no session has been introduced or the lookup fails.
-   * Backs the `organization` field of `whoami`.
+   * Returns the organization this transport's session is bound to, or null
+   * when no session has been introduced or the lookup fails. Backs the
+   * `organization` / `organizationSlug` fields of `whoami` (cc#31 C3 merge).
+   *
+   * The slug is its own field rather than folded into the name (`"Acme (acme)"`)
+   * because the point of surfacing it is that a caller can hand it straight
+   * back to `introduce` — and a name may itself contain parentheses.
+   *
+   * Renamed from `getBoundOrganizationName` so this branch and KAI-407 share
+   * one API: Partial&lt;RemoteTransport&gt; only optionalizes existing keys, and
+   * after a rename `typeof === 'function'` on the old name would silently omit
+   * remote org from whoami.
    *
    * Errors are intentionally swallowed without `registerFailure` — this
    * method backs an informational status surface (`whoami`) that is polled
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  async getBoundOrganizationName(): Promise<string | null> {
+  async getBoundOrganization(): Promise<BoundOrganization | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
       const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
         sessionId: this.sessionId,
-      })) as { organizationName: string }
-      return ctx.organizationName
+      })) as { organizationName: string; organizationSlug?: string }
+      return {
+        name: ctx.organizationName,
+        ...(ctx.organizationSlug ? { slug: ctx.organizationSlug } : {}),
+      }
     } catch {
       return null
     }

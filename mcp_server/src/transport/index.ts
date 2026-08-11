@@ -184,3 +184,14 @@ export class TopicNameConflictError extends Error {
     this.name = 'TopicNameConflictError'
   }
 }
+
+/**
+ * Bound org as returned by `RemoteTransport.getBoundOrganization` (KAI-407 / cc#31 C3).
+ * `slug` is the path segment hand-back for re-introduce; omit when empty.
+ * Prefer this over folding slug into the display name — names can contain
+ * parentheses and would make a packed form ambiguous to parse.
+ */
+export type BoundOrganization = { name: string; slug?: string }
+
+/** Row from `list_organizations` / `listOrganizations`. */
+export type OrganizationSummary = { id: string; name: string; slug?: string }
