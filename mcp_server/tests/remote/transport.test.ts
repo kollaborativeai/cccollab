@@ -1345,3 +1345,39 @@ describe('RemoteTransport heartbeat', () => {
     expect(transport.degradation).toMatch(/authentication failed/i)
   })
 })
+
+describe('RemoteTransport.invalidateChannelCaches (C1)', () => {
+  it('clears name→id and cursor maps so a later subscribe cannot use a stale org channel id', async () => {
+    const onUpdateCalls: Array<{ args: Record<string, unknown> }> = []
+    const stub = {
+      query: vi.fn(async () => undefined),
+      mutation: vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+        if ('sessionName' in args) return 'session_1'
+        if ('channel' in args && 'sessionId' in args && !('text' in args)) {
+          return { channelId: 'chan_old_org', latestTs: 100 }
+        }
+        return undefined
+      }),
+      onUpdate: vi.fn((_q: unknown, args: Record<string, unknown>, _cb: (rows: unknown) => void) => {
+        onUpdateCalls.push({ args })
+        return () => {}
+      }),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop', organizationId: 'org_a' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    expect(onUpdateCalls[0]!.args).toMatchObject({ channelId: 'chan_old_org' })
+
+    transport.invalidateChannelCaches()
+    onUpdateCalls.length = 0
+    // Without a cached id, subscribe must not register with the stale channel id.
+    // listAll fallback may leave no subscription until id resolves — either way
+    // the old id must not appear.
+    transport.subscribeChannelMessages({ channelName: 'dev' }, () => {})
+    for (const call of onUpdateCalls) {
+      expect(call.args.channelId).not.toBe('chan_old_org')
+    }
+  })
+})

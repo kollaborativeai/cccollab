@@ -1305,7 +1305,11 @@ describe('Identity Tools', () => {
        * EFFECTIVE display name (username fallback included), not only an
        * explicitly-set name.
        */
-      it('tears down the username ghost when a no-config-name session introduces a real name', async () => {
+      it('C3: does NOT leave local under the shared username fallback (sibling safety)', async () => {
+        // KAI-408 C3: when no config name was set, displayName is the OS
+        // username shared by every sibling session at the local broker. Leaving
+        // channels under that name would evict siblings. Re-join under the new
+        // name still runs; the username membership is left for the siblings.
         const calls: RecordedCall[] = []
         const deps: IdentityToolDeps = {
           // No name set ⇒ displayName falls back to the username.
@@ -1319,19 +1323,13 @@ describe('Identity Tools', () => {
         const result = await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
 
         expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
-        const leave = calls.find((c) => c.method === 'leaveChannel')
+        expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
+        expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
         const join = calls.find((c) => c.method === 'joinChannel')
-        expect(leave?.args).toMatchObject({ sessionName: 'samuel', channel: 'kai' })
         expect(join?.args).toMatchObject({ sessionName: 'kai-408', channel: 'kai' })
-        // The ghost is dropped before the new identity re-joins.
-        expect(calls.indexOf(leave!)).toBeLessThan(calls.indexOf(join!))
       })
 
-      it('tears down the username ghost from TOPICS too, not just channels', async () => {
-        // The channel path above says nothing about topics, which are the other
-        // half of the ghost: server.ts auto-joins configured topics under the
-        // same username fallback, and a topic membership left behind under it is
-        // just as real a ghost as a channel one.
+      it('C3: re-joins local topics under the new name without leaving under the username', async () => {
         const calls: RecordedCall[] = []
         const deps: IdentityToolDeps = {
           session: new SessionManager({ username: 'samuel', cwd: '/projects/dispatcher' }),
@@ -1343,15 +1341,10 @@ describe('Identity Tools', () => {
 
         await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
 
-        const leaveTopicAt = calls.findIndex((c) => c.method === 'leaveTopic')
+        expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
         const joinTopicAt = calls.findIndex((c) => c.method === 'joinTopic')
-        expect(leaveTopicAt).toBeGreaterThanOrEqual(0)
         expect(joinTopicAt).toBeGreaterThanOrEqual(0)
-        expect(calls[leaveTopicAt]!.args).toMatchObject({ sessionName: 'samuel', topicId: 'uuid-1' })
         expect(calls[joinTopicAt]!.args).toMatchObject({ sessionName: 'kai-408', topicId: 'uuid-1' })
-        // Left under the old identity before being re-joined under the new one.
-        expect(leaveTopicAt).toBeLessThan(joinTopicAt)
-        // Same-org rename ⇒ the topic is re-joined, never dropped.
         expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['uuid-1'])
       })
 
@@ -1410,10 +1403,12 @@ describe('Identity Tools', () => {
 
           const result = await handleIdentityTool('introduce', { name: 'kai-408' }, deps)
 
-          expect(JSON.parse(result)).toEqual({ name: 'kai-408' })
+          // joinTopic failed → I1 reports degraded rather than a clean success.
+          expect(JSON.parse(result)).toEqual({ name: 'kai-408', degraded: ['local'] })
           expect(deps.session.displayName).toBe('kai-408')
           expect(calls.map((c) => c.method)).toEqual(['introduce', 'joinChannel'])
-          // The migration really did attempt each step (and survived them).
+          // Explicit-name rename: leave under previous name IS attempted (C3
+          // only skips the username-fallback case).
           expect(attempted).toEqual({ leaveTopic: 1, leaveChannel: 1, joinTopic: 1 })
 
           // A swallowed teardown is exactly the ghost this migration exists to

@@ -63,6 +63,55 @@ export interface IdentityToolDeps {
   diagnostics?: AttachDiagnostics
 }
 
+type OrgListEntry = { id: string; name: string; slug?: string }
+
+/**
+ * Map a raw org handle (id, slug, or unique name) to the catalog's canonical
+ * document id. Unresolvable handles pass through so a genuine unknown value
+ * still looks different from a known binding.
+ *
+ * KAI-408 / cc#31: without this, id↔slug of the same org is a destructive
+ * false org-change once agents pass slugs.
+ */
+export function canonicalizeOrganizationId(
+  handle: string | undefined,
+  orgs: readonly OrgListEntry[],
+): string | undefined {
+  if (handle === undefined) return undefined
+  for (const o of orgs) {
+    if (o.id === handle) return o.id
+  }
+  for (const o of orgs) {
+    if (o.slug !== undefined && o.slug === handle) return o.id
+  }
+  const nameHits = orgs.filter((o) => o.name === handle)
+  if (nameHits.length === 1) return nameHits[0]!.id
+  return handle
+}
+
+async function listOrgsFromRemotes(router: TransportRouter): Promise<OrgListEntry[]> {
+  const seen = new Map<string, OrgListEntry>()
+  for (const transport of router.enabled()) {
+    if (transport.source === LOCAL_LOCATION) continue
+    const listFn = (transport as { listOrganizations?: () => Promise<OrgListEntry[]> }).listOrganizations
+    if (typeof listFn !== 'function') continue
+    try {
+      const rows = await listFn.call(transport)
+      for (const row of rows) {
+        if (row && typeof row.id === 'string' && !seen.has(row.id)) seen.set(row.id, row)
+      }
+    } catch {
+      /* best-effort: detection falls back to raw string compare */
+    }
+  }
+  return [...seen.values()]
+}
+
+function invalidateRemoteChannelCaches(transport: Transport): void {
+  const fn = (transport as { invalidateChannelCaches?: () => void }).invalidateChannelCaches
+  if (typeof fn === 'function') fn.call(transport)
+}
+
 export async function handleIdentityTool(
   name: string,
   args: Record<string, unknown>,
@@ -78,6 +127,12 @@ export async function handleIdentityTool(
         name: string
         objective?: string
         organization?: string
+      }
+
+      // I7 (KAI-408): empty string is a valid zod string without min(1) on
+      // older clients but a destructive migration key.
+      if (typeof displayName !== 'string' || displayName.trim() === '') {
+        return JSON.stringify({ error: 'name must be a non-empty string.' })
       }
 
       const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
@@ -116,7 +171,21 @@ export async function handleIdentityTool(
       // Snapshot this BEFORE the fan-out, which records the NEW bindings and
       // would otherwise make every location look unchanged by the time the
       // topic decisions below are taken.
+      //
+      // Canonicalize org handles BEFORE compare/store (KAI-408 / cc#31): raw
+      // string equality treated id and slug of the same org as a destructive
+      // org-change once agents pass slugs.
+      const orgCatalog = organization !== undefined ? await listOrgsFromRemotes(deps.router) : []
+      const canonicalOrganization =
+        organization !== undefined ? canonicalizeOrganizationId(organization, orgCatalog) : undefined
+
+      // Locations whose org REALLY changed (previous binding known and different)
+      // — foreign-org topic ids must be DROPPED. Separate from first-binding:
+      // attachLocation introduces without org, so previous is undefined until
+      // the first introduce with an org; that rebinds the session row (C2) but
+      // does NOT make existing topic ids foreign.
       const orgChangedLocations = new Set<string>()
+      const firstOrgBindingLocations = new Set<string>()
       for (const location of membershipLocations(deps)) {
         if (location === LOCAL_LOCATION) continue
         // Prefer what the TRANSPORT is actually bound to over what the session
@@ -132,12 +201,35 @@ export async function handleIdentityTool(
         } catch {
           // Not routable; fall back to the session's record.
         }
-        if (previousOrg !== undefined && organization !== undefined && previousOrg !== organization) {
-          orgChangedLocations.add(location)
+        const previousCanonical =
+          previousOrg !== undefined ? canonicalizeOrganizationId(previousOrg, orgCatalog) : undefined
+        // C2 (KAI-408): first explicit org at a location that already holds
+        // membership is a rebind. attachLocation introduces without
+        // organizationId and never records a binding, so previousOrg stays
+        // undefined while the backend row still rebinds on the next introduce
+        // that passes an org — without this, migration is skipped and feeds
+        // stay on the old org row.
+        if (canonicalOrganization !== undefined) {
+          if (previousCanonical === undefined) {
+            firstOrgBindingLocations.add(location)
+          } else if (previousCanonical !== canonicalOrganization) {
+            orgChangedLocations.add(location)
+          }
         }
       }
-      const rebinds = (location: ChannelLocation): boolean => renamed || orgChangedLocations.has(location)
-      const migrating = renamed || orgChangedLocations.size > 0
+      const rebinds = (location: ChannelLocation): boolean =>
+        renamed || orgChangedLocations.has(location) || firstOrgBindingLocations.has(location)
+      const migrating = renamed || orgChangedLocations.size > 0 || firstOrgBindingLocations.size > 0
+
+      // C3 (KAI-408): capture before setName. When no config `name` was set,
+      // displayName falls back to the shared OS username every sibling session
+      // of this user shares at the local broker. Leaving channels under that
+      // name would evict the siblings, not just this process.
+      const hadExplicitName = deps.session.hasName()
+      const leaveRebinds = (location: ChannelLocation): boolean => {
+        if (location === LOCAL_LOCATION && !hadExplicitName) return false
+        return rebinds(location)
+      }
 
       // The old-identity leave is gated on `migrating` ALONE: a heal has no
       // previous identity to leave.
@@ -156,8 +248,21 @@ export async function handleIdentityTool(
         // Nothing here touches subscriptions: `RemoteTransport.leaveTopic` /
         // `leaveChannel` suspend their own feeds before issuing the mutation
         // that would invalidate them, and the re-joins below re-attach them
-        // under the new session row (KAI-418).
-        await leaveUnderPreviousName(deps, previousName, rebinds)
+        // under the new session row (KAI-418). Local leave is gated by
+        // leaveRebinds (C3).
+        await leaveUnderPreviousName(deps, previousName, leaveRebinds)
+
+        // C1/I8 (KAI-408): drop stale org-A channel ids and cursors before
+        // re-join so a failed join cannot leave subscribe on the wrong tenant.
+        // First-org binding also rebinds the session row, so clear caches there
+        // too (no prior id is trustworthy after attach without org).
+        for (const location of [...orgChangedLocations, ...firstOrgBindingLocations]) {
+          try {
+            invalidateRemoteChannelCaches(deps.router.get(location))
+          } catch {
+            /* transport absent/degraded — nothing to invalidate */
+          }
+        }
       }
 
       deps.session.setName(displayName)
@@ -177,16 +282,20 @@ export async function handleIdentityTool(
       const failed: string[] = []
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          await transport.introduce({
+            sessionName: displayName,
+            objective,
+            organizationId: canonicalOrganization ?? organization,
+          })
           introduced.add(transport.source)
           // Record the org binding ONLY where the row actually rebound, and
           // only off-broker: the local broker is single-tenant and ignores
           // organizationId, so an org is meaningless there — and tracking one
           // would let an org switch mark LOCAL as changed and drop the user's
-          // local topics. A location whose introduce threw keeps its previous
-          // binding, so the next introduce still sees the change and migrates it.
-          if (organization !== undefined && transport.source !== LOCAL_LOCATION) {
-            deps.session.setOrganizationFor(transport.source, organization)
+          // local topics. Store the CANONICAL id so a later introduce with the
+          // other spelling of the same org is not a change.
+          if (canonicalOrganization !== undefined && transport.source !== LOCAL_LOCATION) {
+            deps.session.setOrganizationFor(transport.source, canonicalOrganization)
           }
         } catch {
           failed.push(transport.source)
@@ -208,13 +317,14 @@ export async function handleIdentityTool(
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name. Skip
       // locations whose introduce did not rebind (see above).
+      // I1 (KAI-408): a failed re-join is degraded, not silent success.
       for (const ch of deps.context.getSubscribedChannels()) {
         if (!introduced.has(ch.location)) continue
         try {
           const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
         } catch {
-          // Non-fatal.
+          if (!failed.includes(ch.location)) failed.push(ch.location)
         }
       }
 
@@ -266,7 +376,8 @@ export async function handleIdentityTool(
             const transport = deps.router.get(topic.location)
             await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
           } catch {
-            // Non-fatal.
+            // I1 (KAI-408): failed re-join is degraded, not silent success.
+            if (!failed.includes(topic.location)) failed.push(topic.location)
           }
         }
       }

@@ -44,8 +44,9 @@ function makeHarness(opts?: {
   /** How the async channel-id lookup behaves. A channel feed subscribed before
    *  any `joinChannel` has cached its id must resolve the id via
    *  `channels:listAll` — which can reject, or come back with no matching row.
-   *  Either way `register()` never runs and the feed is NOT live. */
-  listAll?: 'ok' | 'reject' | 'nomatch'
+   *  Either way `register()` never runs and the feed is NOT live. A custom
+   *  async function overrides the preset for tests that need a sequence. */
+  listAll?: 'ok' | 'reject' | 'nomatch' | (() => Promise<unknown>)
   /** Make `client.onUpdate` throw for this query, modelling a client that
    *  refuses to register the subscription (e.g. closed / rejected args). The
    *  feed must then NOT be considered live. */
@@ -84,6 +85,7 @@ function makeHarness(opts?: {
       const name = shortName(ref)
       if (name === 'channels:listAll') {
         events.push('query:channels:listAll')
+        if (typeof listAll === 'function') return listAll()
         if (listAll === 'reject') throw new Error('listAll blew up')
         if (listAll === 'nomatch') return [{ channelId: 'chan_other', name: 'somewhere-else' }]
         return [
@@ -512,6 +514,37 @@ describe('RemoteTransport channel feed — attached means genuinely attached', (
     const feed = h.live(CHANNEL_Q).at(-1)!
     feed.cb([{ _id: 'm1', fromSessionId: 'peer', text: 'hello', ts: 500 }])
     expect(msgs).toEqual(['hello'])
+  })
+
+  /**
+   * cc#34 I3: subscribeChannelMessages early-return used to mean "one entry",
+   * so reconcileFeeds / a second subscribe left a never-attached feed dead.
+   * RED: restore `if (existing !== undefined) return` without the !attached
+   * restore branch → this stays hasLiveChannelFeed false.
+   */
+  it('I3: re-subscribe restores a never-attached channel feed without joinChannel', async () => {
+    let listAllCalls = 0
+    const h = makeHarness({
+      listAll: async () => {
+        listAllCalls += 1
+        if (listAllCalls === 1) throw new Error('lookup blip')
+        return [{ channelId: 'chan_dev', name: 'dev' }]
+      },
+    })
+    const t = makeTransport(h)
+    const msgs: string[] = []
+    await t.introduce({ sessionName: 'a' })
+    t.subscribeChannelMessages({ channelName: 'dev' }, (m: ParsedMessage) => msgs.push(m.text))
+    await vi.waitFor(() => expect(listAllCalls).toBe(1))
+    expect(t.hasLiveChannelFeed('dev')).toBe(false)
+
+    // Second subscribe (as reconcileFeeds does) must re-attach, not early-return.
+    t.subscribeChannelMessages({ channelName: 'dev' }, (m: ParsedMessage) => msgs.push(m.text))
+    await vi.waitFor(() => expect(t.hasLiveChannelFeed('dev')).toBe(true))
+    expect(listAllCalls).toBe(2)
+    const feed = h.live(CHANNEL_Q).at(-1)!
+    feed.cb([{ _id: 'm1', fromSessionId: 'peer', text: 'healed', ts: 500 }])
+    expect(msgs).toEqual(['healed'])
   })
 })
 

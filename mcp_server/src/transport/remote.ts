@@ -475,8 +475,12 @@ export class RemoteTransport implements Transport {
             this.topicFeeds.delete(topicId)
             this.detach(feed)
           }
-          // The cached ids belong to the old org too.
-          this.channelIdsByName.clear()
+          // C1/I8 (KAI-408) + cc#34 S6: drop name→id and delivery cursors for
+          // the old org so a failed re-join cannot leave subscribe on a stale
+          // tenant document id, and so cursors do not grow unboundedly across
+          // org switches / silently skip backlog on return.
+          this.invalidateChannelCaches()
+          this.topicMaxTs.clear()
         } else {
           for (const topicId of this.topicFeeds.keys()) this.suspendTopicFeed(topicId)
         }
@@ -1065,8 +1069,15 @@ export class RemoteTransport implements Transport {
     // the existing one rather than stacking a second onUpdate against the same
     // topic. Callers (auto-subscribe at attach, join_topic, a re-introduce)
     // can all call this freely without coordinating.
+    //
+    // cc#34 I3: "already registered" is not "live". A never-attached or
+    // suspended entry must be restored — otherwise reconcileFeeds is a no-op
+    // and only joinTopic can heal.
     const existing = this.topicFeeds.get(args.topicId)
-    if (existing !== undefined) return
+    if (existing !== undefined) {
+      if (!existing.attached) this.restoreTopicFeed(args.topicId)
+      return
+    }
 
     const feed: TopicFeed = { channelName: channelKey(args.channelName), onEvent, inner: null, attached: false }
     this.topicFeeds.set(args.topicId, feed)
@@ -1150,9 +1161,16 @@ export class RemoteTransport implements Transport {
     if (!this.enabled || this.shutdownStarted) return
 
     // Idempotent by NORMALIZED channel name — see `channelKey`.
+    //
+    // cc#34 I3: a registered-but-never-attached entry (async id lookup threw
+    // or matched nothing) is not a live feed. Re-attach it so reconcileFeeds
+    // can heal without requiring another join_channel.
     const key = channelKey(args.channelName)
     const existing = this.channelFeeds.get(key)
-    if (existing !== undefined) return
+    if (existing !== undefined) {
+      if (!existing.attached) this.restoreChannelFeed(key)
+      return
+    }
 
     const feed: ChannelFeed = { onEvent, inner: null, attached: false }
     this.channelFeeds.set(key, feed)
@@ -1422,6 +1440,26 @@ export class RemoteTransport implements Transport {
       this.topicFeeds.delete(topicId)
       this.detach(feed)
     }
+  }
+
+  /**
+   * Drop every name→id and delivery-cursor entry this transport holds.
+   *
+   * Required on an organization rebind (KAI-408 C1 / I8): `channelIdsByName` is
+   * only written by a successful `joinChannel`, so after an org change the map
+   * still holds the OLD org's channel document ids. A failed re-join then leaves
+   * the stale id in place, and `subscribeChannelMessages` takes the sync
+   * cache-hit path against it — `ORG_MISMATCH` on every batch until the
+   * transport self-disables. Cursor entries keyed by those ids would also
+   * replay the excursion window as live notifications on return (I8 / cc#34 S6).
+   *
+   * Call before the org-change re-join loop; safe no-op when empty. Identity
+   * also calls this via a duck-typed `invalidateChannelCaches` so the tool
+   * layer does not need the shared-map model.
+   */
+  invalidateChannelCaches(): void {
+    this.channelIdsByName.clear()
+    this.channelMaxTs.clear()
   }
 
   /** Is this topic's feed actually delivering right now? Liveness is read from
