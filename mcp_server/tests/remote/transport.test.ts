@@ -173,7 +173,9 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     const delivered: Array<{ ts: string; text: string }> = []
-    const onEvent = (msg: { ts: string; text: string }) => delivered.push(msg)
+    const onEvent = (msg: { ts: string; text: string }): void => {
+      delivered.push(msg)
+    }
 
     const unsub1 = transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, onEvent)
     // Simulate Convex delivering two messages.
@@ -217,7 +219,9 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     const delivered: Array<{ text: string }> = []
-    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push({ text: msg.text }))
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => {
+      delivered.push({ text: msg.text })
+    })
 
     // Two inserts in the same millisecond.
     callbacks[0]!([
@@ -247,7 +251,9 @@ describe('RemoteTransport.subscribeTopicMessages sinceTs windowing', () => {
     const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
 
     const delivered: Array<{ text: string }> = []
-    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => delivered.push({ text: msg.text }))
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (msg) => {
+      delivered.push({ text: msg.text })
+    })
 
     callbacks[0]!([{ _id: 'msg_1', fromSessionId: 'alice', text: 'a', ts: 1_700_000_000_000 }])
     await settleTopic()

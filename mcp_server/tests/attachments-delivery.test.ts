@@ -616,7 +616,9 @@ describe('live subscription wiring — image metadata reaches the bus', () => {
   it('a topic subscription forwards the image metadata', () => {
     const { transport, emit } = subscribingClient([row])
     const events: ParsedMessage[] = []
-    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (m) => events.push(m))
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, (m) => {
+      events.push(m)
+    })
     emit()
     expect(events[0]!.images).toEqual([image()])
   })
