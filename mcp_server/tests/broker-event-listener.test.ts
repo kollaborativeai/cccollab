@@ -37,15 +37,81 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
+      // S10: watcher must get threadTs/topicName so it can act on the new topic.
+      // RED: drop threadTs/topicName from the topic_created push → this fails.
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
           sender: 'tester',
           text: expect.stringContaining('Auth discussion'),
           channel: 'default',
           channelName: 'default',
+          threadTs: 'uuid-1',
+          topicName: 'Auth discussion',
         }),
       )
     })
+  })
+
+  /**
+   * cc#35 pr-test I3 / code-reviewer S7: gap WARNING fans out once per LOCAL
+   * subscription only. Remote-only and zero-local must not invent a channel.
+   * RED: filter with bare `'local'` string that drifts, or push a hardcoded
+   * fallback channel → multi-local count / remote-only / zero-local fail.
+   */
+  it('stream_gap WARNING fans out to every local channel and skips remote-only', async () => {
+    const gap: BrokerLocalEvent = {
+      source: 'local',
+      type: 'stream_gap',
+      reason: 'buffer overflow',
+    }
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const bus = createMockMessageBus()
+
+    // two local + one remote (fresh context: beforeEach already has "default")
+    const multi = new ActiveContext()
+    multi.joinChannel('alpha', 'manual', 'local')
+    multi.joinChannel('beta', 'manual', 'local')
+    multi.joinChannel('gamma', 'manual', 'flatout')
+    const multiListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: multi,
+    })
+    multiListener.processLocalEvent(gap)
+    await vi.waitFor(() => expect(bus.push).toHaveBeenCalledTimes(2))
+    const channels = bus.push.mock.calls.map((c) => (c[0] as { channel: string }).channel).sort()
+    expect(channels).toEqual(['alpha', 'beta'])
+    expect(multiListener.mayHaveMissedEvents()).toBe(true)
+
+    // remote-only: flag set, no push destination
+    bus.push.mockClear()
+    const remoteOnly = new ActiveContext()
+    remoteOnly.joinChannel('only-remote', 'manual', 'flatout')
+    const remoteListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: remoteOnly,
+    })
+    remoteListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(remoteListener.mayHaveMissedEvents()).toBe(true)
+
+    // zero channels
+    bus.push.mockClear()
+    const emptyListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+    emptyListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(emptyListener.mayHaveMissedEvents()).toBe(true)
   })
 
   it('drops topic_created for a channel we are not subscribed to', async () => {
@@ -676,6 +742,52 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       // could plausibly reset the flag too. It must not.
       listener.dropStream()
       expect(listener.mayHaveMissedEvents()).toBe(true)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
+
+  /**
+   * cc#35 pr-test I6: reconnectPending coalesces end+close+error into one
+   * reconnect. Without it, a single socket teardown can schedule N timers and
+   * open N parallel SSE streams.
+   * RED: remove `if (this.reconnectPending) return` → connections exceeds 2
+   * before the delay window closes.
+   */
+  it('reconnectPending coalesces multiple teardowns into a single reconnect', async () => {
+    let connections = 0
+    const server = http.createServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write('id: b1:0\ndata: ' + JSON.stringify({ source: 'local', type: 'stream_hello' }) + '\n\n')
+      if (connections === 1) {
+        // One destroy fires end + close (and sometimes error). Without the
+        // guard that is 2–3 scheduled reconnects → 2–3 parallel sockets.
+        setTimeout(() => res.destroy(), 20)
+      }
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBe(1), { timeout: 5000 })
+      // After destroy, exactly one reconnect should land (connections === 2).
+      // RECONNECT_DELAY_MS is 2000; wait past it once.
+      await vi.waitFor(() => expect(connections).toBe(2), { timeout: 5000 })
+      // Brief settle: a double-scheduled reconnect would open a third socket.
+      await new Promise<void>((r) => setTimeout(r, 500))
+      expect(connections).toBe(2)
     } finally {
       listener.stop()
       await new Promise<void>((r) => server.close(() => r()))
