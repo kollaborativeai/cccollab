@@ -14,8 +14,12 @@ import {
 } from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
+import { driftWarning, type VersionState } from '../plugin-version.js'
 
 export interface IdentityToolDeps {
+  /** Result of the plugin/binary version handshake, computed once at startup.
+   *  Optional so unit tests that do not exercise it can omit it. */
+  versionState?: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -97,30 +101,44 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
-      // MERGE, never replace. The session already carries an env-derived
-      // identity (`identityFromEnv` at startup), and its `sessionId` is the
-      // key everything in KAI-415 is filed under. A self-declaration is a
-      // partial statement — `introduce({identity: {repo}})` must not erase
-      // the sessionId and silently disable restore for the rest of the
-      // session. Declared fields still win; omitted ones fall through.
-      const merged = mergeIdentity(deps.session.getIdentity(), identity)
-      deps.session.setIdentity(merged)
+      // KAI-401: bind the org the session is acting as before introduce fans out.
+      deps.session.setOrganizationId(organization)
+      // KAI-415: MERGE, never replace. The session already carries an env-derived
+      // identity (`identityFromEnv` at startup), and its `sessionId` is the key
+      // everything in KAI-415 is filed under. A self-declaration is a partial
+      // statement — `introduce({identity: {repo}})` must not erase the sessionId
+      // and silently disable restore for the rest of the session. Declared fields
+      // still win; omitted ones fall through. Empty `{}` is treated as undeclared
+      // (KAI-401 S1) and does not wipe a prior declaration either.
+      if (identity !== undefined && Object.keys(identity).length > 0) {
+        const merged = mergeIdentity(deps.session.getIdentity(), identity)
+        deps.session.setIdentity(merged)
+      }
 
       // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
+      // it can attribute messages and list us in `list_sessions`.
+      // The payload comes off the session rather than being reassembled
+      // here, so a location attached later re-sends this exact object
+      // (see `SessionManager.introduceArgs`). KAI-401: use introduceArgs() so
+      // organization + merged identity travel as one payload; surface
+      // identityRejected per location instead of silent swallow.
+      const introduceArgs = deps.session.introduceArgs()
+      const transportResults: Record<string, { ok: boolean; error?: string; identityRejected?: string }> = {}
+      let anyOk = false
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({
-            sessionName: displayName,
-            objective,
-            organizationId: organization,
-            identity: merged,
-          })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+          await transport.introduce(introduceArgs)
+          anyOk = true
+          const maybeRemote = transport as Partial<RemoteTransport>
+          const rejected = typeof maybeRemote.identityRejected === 'string' ? maybeRemote.identityRejected : null
+          transportResults[transport.source] = {
+            ok: true,
+            ...(rejected ? { identityRejected: rejected } : {}),
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.error(`[cccollab] introduce failed on "${transport.source}": ${message}`)
+          transportResults[transport.source] = { ok: false, error: message }
         }
       }
 
@@ -170,7 +188,33 @@ export async function handleIdentityTool(
         }
       }
 
-      return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
+      // Drift is reported on `introduce` because it is the one tool every
+      // session must call before any other, which makes it the only reliable
+      // place to tell the model that the instructions it is following may not
+      // describe this server. Attached to the result rather than logged: the
+      // model reads results, and stderr goes to a file nobody opens mid-session.
+      const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+
+      const enabledCount = deps.router.enabled().length
+      // No transport registered: do not report bare success. When zero
+      // transports are enabled the name is still set locally (identity for
+      // later attach); that is the empty-router case, not a failure.
+      if (enabledCount > 0 && !anyOk) {
+        return JSON.stringify({
+          error: 'introduce failed on every enabled transport',
+          name: displayName,
+          ...(objective ? { objective } : {}),
+          locations: transportResults,
+          ...(versionWarning ? { warning: versionWarning } : {}),
+        })
+      }
+
+      return JSON.stringify({
+        name: displayName,
+        ...(objective ? { objective } : {}),
+        ...(enabledCount > 0 ? { locations: transportResults } : {}),
+        ...(versionWarning ? { warning: versionWarning } : {}),
+      })
     }
     case 'whoami': {
       if (!deps.session.hasName()) {
@@ -212,6 +256,15 @@ export async function handleIdentityTool(
           : {}),
         subscribedChannels,
         locations: locationStates,
+        ...(deps.versionState
+          ? {
+              versions: {
+                server: deps.versionState.serverVersion,
+                ...(deps.versionState.pluginVersion ? { skill: deps.versionState.pluginVersion } : {}),
+                status: deps.versionState.status,
+              },
+            }
+          : {}),
       })
     }
     case 'authenticate': {
@@ -233,6 +286,13 @@ export async function handleIdentityTool(
  * transport carries it for auth / function-not-found / repeated-failure
  * cases). The local transport has no degradation surface.
  *
+ * `identityRejected` is set on a location that accepted the session but
+ * refused its declared identity (KAI-401). It is deliberately distinct
+ * from `degradation`: the transport is healthy and `enabled` stays true —
+ * the session simply isn't identifiable there. Without this the drop is
+ * invisible, which is the failure mode that let a broken identity path
+ * pass review: the fallback swallowed it and nothing ever said so.
+ *
  * `organization` is `"local"` for the local broker, the bound
  * organization name for a remote transport (via `getBoundOrganizationName`),
  * or omitted when a remote transport has no session yet.
@@ -243,14 +303,24 @@ export async function handleIdentityTool(
  * A location that is live in the router takes precedence over a stale
  * diagnostics entry for the same name.
  */
+/** Per-location state as reported by `whoami`. */
+interface LocationState {
+  enabled: boolean
+  degradation?: string
+  identityRejected?: string
+  organization?: string
+}
+
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<Record<string, LocationState>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+      const identityRejected =
+        typeof maybeDegraded.identityRejected === 'string' ? maybeDegraded.identityRejected : null
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -259,16 +329,16 @@ async function buildLocationStates(
         organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: LocationState = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
+        ...(identityRejected ? { identityRejected } : {}),
         ...(organization ? { organization } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<string, LocationState> = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

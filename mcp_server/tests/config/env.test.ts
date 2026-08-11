@@ -25,7 +25,7 @@ describe('applyEnvOverrides', () => {
             url: 'https://file.convex.cloud',
             accessToken: 'file-token',
             refreshToken: 'file-refresh',
-            userEmail: 'stefan@flatout.solutions',
+            userEmail: 'stefan@cccollab.dev',
           },
         },
       },
@@ -34,7 +34,7 @@ describe('applyEnvOverrides', () => {
     expect(result.locations?.remote?.url).toBe('https://env.convex.cloud')
     // Existing auth fields are preserved.
     expect(result.locations?.remote?.accessToken).toBe('file-token')
-    expect(result.locations?.remote?.userEmail).toBe('stefan@flatout.solutions')
+    expect(result.locations?.remote?.userEmail).toBe('stefan@cccollab.dev')
   })
 
   it("clears other locations' active flag when CCCOLLAB_REMOTE_URL is set", () => {
@@ -42,13 +42,13 @@ describe('applyEnvOverrides', () => {
       {
         locations: {
           local: { active: true },
-          flatout: { url: 'https://a.convex.cloud', active: true },
+          acme: { url: 'https://a.convex.cloud', active: true },
         },
       },
       { CCCOLLAB_REMOTE_URL: 'https://env.convex.cloud' },
     )
     expect(result.locations?.local?.active).toBeUndefined()
-    expect(result.locations?.flatout?.active).toBeUndefined()
+    expect(result.locations?.acme?.active).toBeUndefined()
     expect(result.locations?.remote?.active).toBe(true)
   })
 
@@ -123,7 +123,7 @@ describe('applyEnvOverrides', () => {
       {
         locations: {
           local: {},
-          flatout: { url: 'https://a.convex.cloud', active: true },
+          acme: { url: 'https://a.convex.cloud', active: true },
         },
       },
       {
@@ -131,7 +131,7 @@ describe('applyEnvOverrides', () => {
         CCCOLLAB_CLERK_CLIENT_ID: 'cccollab-cli',
       },
     )
-    expect(result.locations?.flatout).toMatchObject({
+    expect(result.locations?.acme).toMatchObject({
       clerkIssuer: 'https://x.clerk.accounts.dev',
       clerkClientId: 'cccollab-cli',
       authType: 'clerk',
@@ -145,13 +145,13 @@ describe('applyEnvOverrides', () => {
     const result = applyEnvOverrides(
       {
         locations: {
-          flatout: { url: 'https://a.convex.cloud', clerkClientId: 'file-cid', active: true },
+          acme: { url: 'https://a.convex.cloud', clerkClientId: 'file-cid', active: true },
         },
       },
       { CCCOLLAB_CLERK_ISSUER: 'https://override.clerk.accounts.dev' },
     )
-    expect(result.locations?.flatout?.clerkIssuer).toBe('https://override.clerk.accounts.dev')
-    expect(result.locations?.flatout?.clerkClientId).toBe('file-cid')
+    expect(result.locations?.acme?.clerkIssuer).toBe('https://override.clerk.accounts.dev')
+    expect(result.locations?.acme?.clerkClientId).toBe('file-cid')
   })
 
   it('ignores empty env var strings', () => {

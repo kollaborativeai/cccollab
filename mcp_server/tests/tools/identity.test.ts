@@ -124,7 +124,8 @@ describe('Identity Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
-      expect(result).toEqual({ name: 'architect' })
+      expect(result.name).toBe('architect')
+      expect(result.locations?.local?.ok).toBe(true)
     })
 
     it('introduce includes objective in JSON when provided', async () => {
@@ -133,7 +134,53 @@ describe('Identity Tools', () => {
       const result = JSON.parse(
         await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps),
       )
-      expect(result).toEqual({ name: 'architect', objective: 'reviewing auth module' })
+      expect(result.name).toBe('architect')
+      expect(result.objective).toBe('reviewing auth module')
+      expect(result.locations?.local?.ok).toBe(true)
+    })
+
+    it('introduce surfaces identityRejected on the location that dropped identity (I3)', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+      const remoteDeps = makeDepsWithRemote(undefined, {
+        identityRejected: 'Declared identity likely did not land at this location: introduce failed WITH identity',
+      } as never)
+
+      const result = JSON.parse(
+        await handleIdentityTool(
+          'introduce',
+          {
+            name: 'architect',
+            organization: 'org_a',
+            identity: { sessionId: 'uuid-1', company: 'flatout' },
+          },
+          remoteDeps,
+        ),
+      )
+
+      expect(result.name).toBe('architect')
+      expect(result.error).toBeUndefined()
+      expect(result.locations.remote.ok).toBe(true)
+      expect(result.locations.remote.identityRejected).toMatch(/identity/i)
+      expect(result.locations.local.ok).toBe(true)
+    })
+
+    it('introduce reports error when every enabled transport fails (I2)', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: 'down' }) })
+      vi.stubGlobal('fetch', mockFetch)
+      const remoteDeps = makeDepsWithRemote(() => {
+        throw new Error('remote introduce hard fail')
+      })
+
+      const result = JSON.parse(
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps),
+      )
+
+      expect(result.error).toMatch(/every enabled transport/i)
+      expect(result.name).toBe('architect')
+      expect(result.locations.remote.ok).toBe(false)
+      expect(result.locations.remote.error).toMatch(/hard fail/i)
+      expect(result.locations.local.ok).toBe(false)
     })
 
     it('introduce re-registers already-subscribed channels with broker', async () => {
@@ -214,6 +261,77 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result).not.toHaveProperty('identity')
       })
+
+      /**
+       * A re-introduce is how a session changes its NAME or objective, and
+       * `identity` is optional on every call — so the ordinary re-introduce
+       * omits it. Clearing the session's identity on that call made the two
+       * readers of one session contradict each other: `whoami` reported no
+       * identity while the broker, whose documented rule is "an omitted
+       * field keeps the prior value", still served the declared one.
+       *
+       * It is not only a display mismatch. `introduceArgs()` is the payload
+       * every transport receives, so a cleared identity is re-broadcast as
+       * "I have none" — moving the broker record off its identity key and
+       * splitting one session across two rows (see broker.test.ts). The
+       * client must hold the same rule the broker does.
+       */
+      /**
+       * C2, at the surface that matters. The drop only counts as reported if
+       * `whoami` says so — the same guarantee AC5 makes for remote, extended
+       * to the transport 100% of users have.
+       */
+      it('whoami reports a local broker that took the session but not its identity', async () => {
+        // A broker predating KAI-401: 200, no identity echoed back.
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) }))
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local.enabled).toBe(true)
+        expect(result.locations.local.identityRejected).toMatch(/identity/i)
+      })
+
+      it('whoami reports no local identity problem when the broker echoes the identity', async () => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, identity }) }),
+        )
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local).not.toHaveProperty('identityRejected')
+      })
+
+      it('keeps the declared identity when a later introduce omits it', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        await handleIdentityTool('introduce', { name: 'architect-renamed' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.name).toBe('architect-renamed')
+        expect(result.identity).toEqual(identity)
+      })
+
+      it('re-sends the retained identity on the wire when a later introduce omits it', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', identity, organization: 'org_a' }, remoteDeps)
+        await handleIdentityTool('introduce', { name: 'architect-renamed', organization: 'org_a' }, remoteDeps)
+
+        // Second introduce still carries it — a transport that learns of this
+        // session only on the second call must still learn who it is.
+        expect(seen).toHaveLength(2)
+        expect(seen[1]?.identity).toEqual(identity)
+        const localPosts = mockFetch.mock.calls.filter(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(JSON.parse((localPosts.at(-1)![1]! as RequestInit).body as string).identity).toEqual(identity)
+      })
     })
 
     describe('whoami', () => {
@@ -286,6 +404,43 @@ describe('Identity Tools', () => {
           enabled: false,
           degradation: 'introduce() failed for "personal": Server Error',
         })
+      })
+
+      /**
+       * KAI-401: a location that took the session but refused its identity
+       * must SAY SO. This is the end of the silence chain — the transport
+       * records the rejection, and whoami is where a human/session can
+       * actually see it. Without this the drop is invisible: introduce
+       * reports success and the identity is simply gone.
+       */
+      it('surfaces a location that registered the session but rejected its declared identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote(undefined, {
+          identityRejected:
+            'Declared identity did not reach this location: introduce failed WITH identity and the same ' +
+            'call WITHOUT it succeeded, so identity is the likely cause. First attempt failed with: Server Error.',
+        } as never)
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        // Healthy transport — this is NOT degradation. The session works,
+        // it just isn't identifiable there.
+        expect(result.locations.remote.enabled).toBe(true)
+        expect(result.locations.remote.degradation).toBeUndefined()
+        expect(result.locations.remote.identityRejected).toMatch(/identity/i)
+      })
+
+      it('omits identityRejected from a location that accepted the identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote()
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        expect(result.locations.remote).not.toHaveProperty('identityRejected')
       })
     })
 
@@ -379,7 +534,7 @@ describe('Identity Tools', () => {
         }
         const transport = new RemoteTransport({
           client: stubClient as unknown as import('convex/browser').ConvexClient,
-          source: 'flatout',
+          source: 'acme',
           log: () => {},
         })
         const customDeps: IdentityToolDeps = {
@@ -387,19 +542,19 @@ describe('Identity Tools', () => {
           router: new TransportRouter([transport]),
           locations: [
             {
-              name: 'flatout',
+              name: 'acme',
               isLocal: false,
               url: 'https://example.convex.cloud',
               accessToken: 'a',
               refreshToken: 'r',
-              userEmail: 'stefan@flatout.solutions',
+              userEmail: 'stefan@cccollab.dev',
               channels: [],
             },
           ],
         }
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
-        expect(result).toContain('Already authenticated to "flatout"')
-        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
+        expect(result).toContain('Already authenticated to "acme"')
+        expect(result).toContain('(signed in as stefan@cccollab.dev)')
         expect(result).toContain('Pass force: true to re-authenticate.')
       })
 
@@ -414,7 +569,7 @@ describe('Identity Tools', () => {
         }
         const transport = new RemoteTransport({
           client: stubClient as unknown as import('convex/browser').ConvexClient,
-          source: 'flatout',
+          source: 'acme',
           log: () => {},
         })
         const customDeps: IdentityToolDeps = {
@@ -422,7 +577,7 @@ describe('Identity Tools', () => {
           router: new TransportRouter([transport]),
           locations: [
             {
-              name: 'flatout',
+              name: 'acme',
               isLocal: false,
               url: 'https://example.convex.cloud',
               accessToken: 'a',
@@ -431,8 +586,8 @@ describe('Identity Tools', () => {
             },
           ],
         }
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
-        expect(result).toBe('Already authenticated to "flatout". Pass force: true to re-authenticate.')
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
+        expect(result).toBe('Already authenticated to "acme". Pass force: true to re-authenticate.')
       })
 
       it('lazily attaches a dormant token-bearing location and short-circuits without a fresh sign-in', async () => {
@@ -445,7 +600,7 @@ describe('Identity Tools', () => {
         ;(runClerkPkce as ReturnType<typeof vi.fn>).mockClear()
 
         const dormant: ResolvedLocation = {
-          name: 'flatout',
+          name: 'acme',
           isLocal: false,
           url: 'https://example.convex.cloud',
           accessToken: 'a',
@@ -453,7 +608,7 @@ describe('Identity Tools', () => {
           idToken: 'i',
           clerkIssuer: 'https://x.clerk.accounts.dev',
           clerkClientId: 'cid',
-          userEmail: 'stefan@flatout.solutions',
+          userEmail: 'stefan@cccollab.dev',
           channels: [],
         }
         const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
@@ -462,7 +617,7 @@ describe('Identity Tools', () => {
         const router = new TransportRouter([new LocalTransport(7850)])
         const bus = { push: vi.fn(async () => {}) } as unknown as MessageBus
         const fakeRemote = {
-          source: 'flatout',
+          source: 'acme',
           enabled: true,
           introduce: vi.fn(async () => {}),
         } as unknown as Transport
@@ -476,7 +631,7 @@ describe('Identity Tools', () => {
             remoteTopicUnsubscribes: new Map(),
             remoteChannelUnsubscribes: new Map(),
             inflight: new Map<string, Promise<void>>(),
-            candidates: ['flatout'],
+            candidates: ['acme'],
             resolve: () => ({
               locations: [dormant],
               activeLocation: undefined,
@@ -494,12 +649,12 @@ describe('Identity Tools', () => {
           ensureAttached,
         }
 
-        const result = await handleIdentityTool('authenticate', { location: 'flatout' }, customDeps)
+        const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
 
         expect(runClerkPkce).not.toHaveBeenCalled()
-        expect(router.has('flatout')).toBe(true)
-        expect(result).toContain('Already authenticated to "flatout"')
-        expect(result).toContain('(signed in as stefan@flatout.solutions)')
+        expect(router.has('acme')).toBe(true)
+        expect(result).toContain('Already authenticated to "acme"')
+        expect(result).toContain('(signed in as stefan@cccollab.dev)')
       })
 
       it('authenticate dispatches to runClerkPkce when location.authType === "clerk"', async () => {
@@ -621,6 +776,58 @@ describe('Identity Tools', () => {
       const deps = createMockDeps()
       await handleIdentityTool('introduce', { name: 'worker' }, deps)
       expect(deps.session.getIdentity()).toBeUndefined()
+    })
+  })
+})
+
+describe('version handshake surfacing', () => {
+  const aligned = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.5.0',
+    pluginRoot: '/cache/3.5.0',
+    status: 'aligned' as const,
+  }
+  const drifted = {
+    serverVersion: '3.5.0',
+    pluginVersion: '3.4.0',
+    pluginRoot: '/cache/3.4.0',
+    status: 'drifted' as const,
+  }
+
+  describe('introduce', () => {
+    it('warns about drift on the one tool every session must call first', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toContain('3.4.0')
+      expect(result.warning).toContain('3.5.0')
+    })
+
+    it('stays silent when the skill matches the server', async () => {
+      const deps = { ...createMockDeps(), versionState: aligned }
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.warning).toBeUndefined()
+      expect(result.name).toBe('architect')
+    })
+
+    it('stays silent when no handshake was performed', async () => {
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, createMockDeps()))
+      expect(result.warning).toBeUndefined()
+    })
+  })
+
+  describe('whoami', () => {
+    it('reports both versions so drift is visible on demand, not only at startup', async () => {
+      const deps = { ...createMockDeps(), versionState: drifted }
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toEqual({ server: '3.5.0', skill: '3.4.0', status: 'drifted' })
+    })
+
+    it('omits the versions block when no handshake was performed', async () => {
+      const deps = createMockDeps()
+      await handleIdentityTool('introduce', { name: 'architect' }, deps)
+      const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+      expect(result.versions).toBeUndefined()
     })
   })
 })

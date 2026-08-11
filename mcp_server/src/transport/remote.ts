@@ -194,6 +194,15 @@ const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
 
 /**
+ * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
+ * so the backend can distinguish a live registration from a dead one
+ * (KAI-515). The mutation was already wired into `Refs` but never called;
+ * short enough that a session that crashes is flagged stale within a
+ * couple of minutes, long enough not to spam the backend.
+ */
+export const HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
  * Per-subscription cap on the message-id dedup set. Each `onUpdate` call
  * hands us the full set of rows matching the current `sinceTs` window, so
  * the dedup set grows as messages accumulate within the window. 10k entries
@@ -255,6 +264,11 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /** Why the last introduce's declared identity did not land on the
+   *  backend, or null if it landed (or none was declared). Surfaced by
+   *  `whoami` so a silently-dropped identity is inspectable rather than
+   *  buried in a stderr log line. */
+  private identityRejectedReason: string | null = null
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -294,6 +308,10 @@ export class RemoteTransport implements Transport {
    *  doesn't replay pre-subscribe broadcasts. */
   private readonly channelMaxTs = new Map<string, number>()
 
+  /** Handle for the periodic `updateLastSeen` ping started once `introduce`
+   *  sets `sessionId`. Cleared on `shutdown`. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+
   constructor(opts: { client: ConvexClient; source?: string; log?: (m: string) => void }) {
     this.client = opts.client
     this.source = opts.source ?? 'remote'
@@ -316,6 +334,16 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /**
+   * Human-readable reason the declared identity was not stored on this
+   * location, or null when it was stored / none was declared. Unlike
+   * `degradation` this does NOT disable the transport: the session is
+   * fully functional, it just isn't identifiable. Reported by `whoami`.
+   */
+  get identityRejected(): string | null {
+    return this.identityRejectedReason
   }
 
   /**
@@ -375,6 +403,7 @@ export class RemoteTransport implements Transport {
       }
       const id = (await this.introduceWithIdentityFallback(base, args.identity)) as string
       this.sessionId = id
+      this.startHeartbeat()
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
@@ -396,17 +425,39 @@ export class RemoteTransport implements Transport {
 
   /**
    * Call the introduce mutation with declared identity, auto-falling-back
-   * to a no-identity call if KAI's backend validator doesn't yet accept the
-   * `identity` arg (KAI-401 Option D).
+   * to a no-identity call when the backend won't accept the `identity` arg
+   * (KAI-401 Option D).
    *
-   * Convex validates mutation args strictly: an unknown field throws an
-   * `ArgumentValidationError`. If we let that propagate, `introduce`'s
-   * caller (`attach.ts`) aborts before registering the transport and the
-   * session goes silently local-only — the KAI-413 divergence this ticket
-   * exists to prevent. So on that SPECIFIC error we retry once without
-   * identity: no regression on a not-yet-updated backend, and identity
-   * flows automatically the moment the backend adds the optional arg. Any
-   * OTHER error is a genuine failure and rethrows as before.
+   * We deliberately do NOT try to recognise "backend doesn't know this
+   * field" by inspecting the error. That was the original design and it
+   * does not survive contact with a real deployment: production Convex
+   * redacts every backend-side rejection to an unnamed
+   * `Error: [CONVEX M(...)] [Request ID: ...] Server Error`. No
+   * `ArgumentValidationError` ever reaches the client, so a name/message
+   * matcher is calibrated against an error that only exists in tests — it
+   * never fires in production, the fallback never runs, and declaring
+   * identity turns introduce into a hard failure that leaves the session
+   * unregistered on remote (verified live, 2026-07-15).
+   *
+   * Instead the retry IS the discriminator: re-run the identical call
+   * minus identity. If that succeeds, identity is the LIKELY cause. Not a
+   * proven one — the experiment has exactly one trial and inspects the
+   * error not at all, so a first attempt that failed transiently and then
+   * healed produces the identical signature. `identityRejectedReason` is
+   * worded to stay inside that limit; making it conclusive needs a second
+   * trial WITH identity after the retry succeeds, which is deliberately
+   * not done here (an extra mutation on every introduce). If the retry
+   * fails too, this was never about identity: rethrow the ORIGINAL error
+   * so the failure-window/degradation logic sees the real cause unchanged.
+   *
+   * Safe to retry because `sessions:introduce` is an IDEMPOTENT UPSERT
+   * keyed by session name — running it twice converges on one row. It is
+   * NOT made safe by mutations being transactional: transactionality
+   * governs what happens inside a mutation and says nothing about a client
+   * that saw an error after the commit succeeded (dropped connection, lost
+   * acknowledgement). Do not carry this licence to a non-idempotent
+   * mutation such as `sendTopicMessage`, where attempt 1 commits, the ack
+   * is lost, and the retry posts a duplicate message.
    */
   private async introduceWithIdentityFallback(
     base: { sessionName: string; objective?: string; organizationId?: string },
@@ -414,17 +465,96 @@ export class RemoteTransport implements Transport {
   ): Promise<unknown> {
     const ref = fn<'mutation'>(this.refs.sessions.mutations.introduce)
     if (identity === undefined) {
+      // Nothing declared, so nothing can have been refused. Retract any
+      // reason left by an earlier introduce: `identityRejected` describes
+      // the CURRENT registration, and a stale one contradicts the very
+      // whoami payload it ships in (no top-level `identity`, yet a
+      // location claiming one was rejected).
+      this.identityRejectedReason = null
       return this.client.mutation(ref, base)
     }
     try {
-      return await this.client.mutation(ref, { ...base, identity })
+      const accepted = await this.client.mutation(ref, { ...base, identity })
+      this.identityRejectedReason = null
+      return accepted
     } catch (err) {
-      if (!isArgumentValidationError(err)) throw err
-      this.log(
-        `introduce: backend rejected the identity field (${err instanceof Error ? err.message : String(err)}); ` +
-          `retrying without it. Identity will flow once the backend accepts it.`,
-      )
-      return this.client.mutation(ref, base)
+      const withIdentityError = err instanceof Error ? err.message.split('\n')[0] : String(err)
+      let result: unknown
+      try {
+        result = await this.client.mutation(ref, base)
+      } catch {
+        // Fails with AND without identity → not an identity problem.
+        // Retract any earlier reason before propagating: this attempt
+        // proved the failure is not about identity, so leaving the old
+        // claim standing would point the operator at the wrong cause.
+        this.identityRejectedReason = null
+        // Propagate the original error untouched.
+        throw err
+      }
+      // Succeeded without identity, failed with it → identity is the LIKELY
+      // cause. Not the proven one: this branch never inspects the error and
+      // never reads back the backend's state, so a first attempt that failed
+      // transiently and then healed is indistinguishable from a refusal.
+      // The wording stays inside what was actually observed.
+      this.identityRejectedReason =
+        `Declared identity likely did not land at this location: introduce failed WITH identity and the ` +
+        `same call WITHOUT it succeeded, so identity is the likely cause. First attempt failed with: ${withIdentityError}. ` +
+        `The registration in place is the retry (no identity). Backend-stored grouping fields will be missing here ` +
+        `until the remote accepts the optional \`identity\` arg on sessions:introduce (KAI-430). ` +
+        `A one-off transient failure on the first attempt produces this same signature; client-side restart keys ` +
+        `are unaffected.`
+      this.log(this.identityRejectedReason)
+      return result
+    }
+  }
+
+  /**
+   * Start the periodic `updateLastSeen` ping (KAI-515). Idempotent: a
+   * second call replaces any prior timer rather than stacking intervals.
+   */
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    const timer = setInterval(() => {
+      void this.sendHeartbeat()
+    }, HEARTBEAT_INTERVAL_MS)
+    // Don't hold the process open on this timer alone.
+    if (typeof timer.unref === 'function') timer.unref()
+    this.heartbeatTimer = timer
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+  }
+
+  /**
+   * A transient heartbeat failure (a blip, a token refresh in flight) must
+   * not trip the degradation circuit the way a real operation failure
+   * does — losing liveness reporting for one tick is harmless. But a
+   * heartbeat is often the ONLY remote call a long-lived, mostly-idle
+   * session makes, so a structural failure (renamed/removed mutation) or
+   * an auth failure IS a real transport-health signal indistinguishable
+   * from any other operation's — swallowing those unconditionally would
+   * leave `enabled: true` forever while liveness silently never gets
+   * reported. Route those two cases through `registerFailure` like every
+   * other mutation in this class; only the generic-transient case stays
+   * swallowed here.
+   */
+  private async sendHeartbeat(): Promise<void> {
+    if (!this.enabled || this.sessionId === null) return
+    try {
+      await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.updateLastSeen), {
+        sessionId: this.sessionId,
+      })
+    } catch (err) {
+      if (isFunctionNotFoundError(err) || isAuthError(err)) {
+        this.registerFailure('heartbeat', err)
+        return
+      }
+      const msg = err instanceof Error ? err.message : String(err)
+      this.log(`heartbeat failed (non-fatal, transient): ${msg}`)
     }
   }
 
@@ -786,8 +916,15 @@ export class RemoteTransport implements Transport {
         machine?: string
         createdAt: number
         identity?: SessionIdentity
+        /** Backend field is `lastSeenAt` (see the cccollab Convex
+         *  sessions.listByChannel handler); we normalise it to `lastSeen`
+         *  on the transport-facing shape so the tool layer's staleness
+         *  filter has a signal to bite on. Optional because a session
+         *  pre-dating the field would have it null. */
+        lastSeenAt?: number
       }>
       return rows.map((r) => ({
+        id: r._id,
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
@@ -798,6 +935,7 @@ export class RemoteTransport implements Transport {
         // Only surface identity when the backend row carries it, so a row
         // without it serializes exactly as before (KAI-401 parity with local).
         ...(r.identity ? { identity: r.identity } : {}),
+        lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
@@ -1110,6 +1248,7 @@ export class RemoteTransport implements Transport {
     if (this.shutdownStarted) return
     this.shutdownStarted = true
     this.enabled = false
+    this.stopHeartbeat()
     for (const unsub of this.trackedUnsubscribes) {
       try {
         unsub()
@@ -1237,20 +1376,6 @@ function extractConvexErrorMessage(err: unknown): string {
     }
   }
   return err instanceof Error ? err.message : String(err)
-}
-
-/**
- * Detect Convex's strict-arg-validation rejection. When a mutation receives
- * a field its validator doesn't declare, Convex throws an
- * `ArgumentValidationError` whose message names the extra field. We match
- * the error name (the stable signal) and fall back to the message pattern.
- * Used to gate KAI-401's identity auto-fallback: only this specific error
- * triggers a retry-without-identity; anything else is a real failure.
- */
-function isArgumentValidationError(err: unknown): boolean {
-  if (err instanceof Error && err.name === 'ArgumentValidationError') return true
-  const msg = err instanceof Error ? err.message : String(err)
-  return /ArgumentValidationError|extra field .* (?:that is )?not in the validator/i.test(msg)
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {

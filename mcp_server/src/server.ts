@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync, statSync, mkdirSync } from 'node:fs'
+import { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -30,6 +30,8 @@ import { AttachDiagnostics } from './transport/diagnostics.js'
 import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
 import { handleIdentityTool } from './tools/identity.js'
+import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
+import { ownVersion } from './own-version.js'
 import { handleTopicTool } from './tools/topics.js'
 import { handleChannelTool } from './tools/channels.js'
 import { handleListOrganizations } from './tools/organizations.js'
@@ -166,7 +168,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // introduce inside their own attachLocation call.
   if (session.hasName()) {
     try {
-      await localTransport.introduce({ sessionName: session.displayName, objective: session.getObjective() })
+      await localTransport.introduce(session.introduceArgs())
     } catch {
       /* best-effort */
     }
@@ -421,7 +423,28 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     )
   }
 
+  // The plugin that spawned us ships the skill telling the model how to call
+  // these tools. Read once here rather than per call: CLAUDE_PLUGIN_ROOT is
+  // fixed for the life of the process, and a drifted skill is a property of
+  // this session, not of any one request.
+  const versionState = inspectVersions({
+    serverVersion: ownVersion(),
+    env,
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf-8')
+      } catch {
+        return undefined
+      }
+    },
+  })
+  const startupWarning = driftWarning(versionState)
+  if (startupWarning) {
+    for (const line of startupWarning.split('\n')) console.error(`[cccollab] ${line}`)
+  }
+
   registerTools(mcp, {
+    versionState,
     session,
     context,
     router,
@@ -515,6 +538,8 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
 }
 
 interface ToolDeps {
+  /** Plugin/binary version handshake, computed once at startup. */
+  versionState: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
@@ -646,16 +671,31 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
         // today's behavior exactly.
         identity: z
           .object({
-            company: z.string().optional().describe('Owning company / org, e.g. "flatout"'),
-            repo: z.string().optional().describe('Repository name, e.g. "cccollab"'),
-            worktree: z.string().optional().describe('Git worktree name, e.g. "KAI-401"'),
-            branch: z.string().optional().describe('Git branch'),
-            cwd: z.string().optional().describe('Absolute working directory'),
+            company: z.string().max(256).optional().describe('Owning company / org, e.g. "flatout"'),
+            repo: z.string().max(256).optional().describe('Repository name, e.g. "cccollab"'),
+            worktree: z.string().max(256).optional().describe('Git worktree name, e.g. "KAI-401"'),
+            branch: z.string().max(256).optional().describe('Git branch'),
+            cwd: z.string().max(1024).optional().describe('Absolute working directory'),
+            // Bounded and rejecting path separators / control characters
+            // (C5): this value is self-asserted by the caller, is republished
+            // to every other session through `whoami` and `GET /sessions`,
+            // and is what KAI-415 turns into a persisted-state file name.
+            // `sessionKey` enforces the same rule for callers that never
+            // reach this schema (the raw broker HTTP boundary); the schema
+            // exists so a bad value fails loudly here instead of being
+            // quietly ignored downstream.
             sessionId: z
               .string()
+              .min(1)
+              .max(200)
+              // eslint-disable-next-line no-control-regex -- control chars are exactly what this rejects
+              .regex(/^[^/\\\u0000-\u001f\u007f]+$/, 'must not contain path separators or control characters')
               .optional()
-              .describe('Claude Code session UUID — stable across restarts; the key persistence anchors on'),
-            pid: z.number().optional().describe('Process id of the Claude Code session'),
+              .describe(
+                'Claude Code session UUID — stable across restarts; the key persistence anchors on. ' +
+                  "Self-asserted: it is not verified, so never treat another session's value as proof of identity.",
+              ),
+            pid: z.number().int().nonnegative().optional().describe('Process id of the Claude Code session'),
           })
           .optional()
           .describe('Self-declared session identity for grouping and stable restart identity (all fields optional)'),
@@ -674,7 +714,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `identity` is present only when the session self-declared it at introduce. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, identityRejected?}>}. Top-level `identity` is what this session DECLARED (client-side), not proof every location stored it. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). `identityRejected` is set on a location that registered the session but did not store its declared `identity` — the location still works, but backend-stored grouping fields are missing there until that backend accepts the optional `identity` arg (KAI-430). Client-side restart keys are unaffected.',
       inputSchema: {},
     },
     async () => {
@@ -1011,7 +1051,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'list_sessions',
     {
       description:
-        'Return visible sessions as JSON array: [{name, objective?, channels: [{name, location}], registeredAt}]. Unions across every enabled transport, tagging each channel by the transport that reported it.',
+        'Return visible sessions as JSON array: [{id?, name, objective?, channels: [{name, location}], registeredAt, lastSeen?}]. Unions across every enabled transport, tagging each channel by the transport that reported it. `id` is a stable per-registration id when the transport provides one (use it to address a session unambiguously, since `name` can collide). Registrations with a known-stale `lastSeen` are dropped.',
       inputSchema: {
         channel: z.string().optional().describe('Channel to scope to. Defaults to all your subscribed channels.'),
         location: z

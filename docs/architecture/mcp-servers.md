@@ -45,6 +45,8 @@ mcp_server/
 │   │   └── attach.ts               # Cold-start + hot-attach of non-local locations
 │   ├── remote/                     # Remote-mode helpers: Convex client factory, auth flow
 │   ├── config/                     # Unified config loader (user + project + env)
+│   ├── plugin-version.ts           # Plugin-skill vs binary version handshake
+│   ├── doctor.ts                   # `cccollab doctor`: install report + cache prune
 │   └── tools/                      # Tool implementations, call through transports
 └── tests/
 ```
@@ -65,6 +67,15 @@ Runtime:
   unsubscribes fired, ConvexClient websocket closed) before the new one is
   swapped in.
 - When only local is available, behaviour is identical to pre-CCC-3.
+- **The binary and the plugin are two independently-installed artefacts.** The
+  binary is this package; the plugin is the Claude Code marketplace entry whose
+  `skills/cccollab/SKILL.md` tells the model how to call these tools. Release CI
+  bumps both in one commit, so any runtime difference is install skew. Claude
+  Code sets `CLAUDE_PLUGIN_ROOT` in the server's environment, pointing at the
+  cache directory the session actually loaded its skill from, so the server can
+  read the plugin manifest and compare. Nothing else surfaces this: MCP's
+  `initialize` carries no application version, and a stale skill fails by
+  describing tools whose shape has changed rather than by erroring (KAI-571).
 
 ### Hosted HTTP MCP server (future - NOT in this story)
 

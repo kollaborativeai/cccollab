@@ -19,10 +19,21 @@ PROJ  = os.path.expanduser("~/projects")
 CCLOG = os.path.expanduser("~/.cccollab/logs/default.log")
 BROKER = "http://localhost:50643"
 
-FRIENDLY = {"pitcrew": "Pit Crew", "kollaborativeai": "Kollaborative AI",
-            "tala": "tala", "tow123": "Tow123", "finance": "Finance",
-            "automation": "Automation", "cccollab": "cccollab",
-            "flatoutsolutions": "FlatOut Solutions", "travel": "Travel"}
+def _load_labels():
+    """Directory-name -> display-label overrides for the Company column.
+
+    Ships empty on purpose. The fallback in company() already turns
+    "my_repo" into "My Repo", so this is only needed for names that don't
+    title-case cleanly ("bbc" -> "BBC"). Put your own in
+    ~/.cccollab/cctree.json as {"labels": {"acme": "ACME Corp"}}.
+    """
+    try:
+        with open(os.path.expanduser("~/.cccollab/cctree.json")) as fh:
+            return dict(json.load(fh).get("labels", {}))
+    except Exception:
+        return {}
+
+FRIENDLY = _load_labels()
 # DERIVED status -> (label, ansi-color, group-priority). Groups: needs → working → idle.
 # working / subagent / monitor are all GREEN — the session is actively doing something and is
 # NOT blocked on you (executing a tool, running child agents, or watching for a background event).
@@ -618,7 +629,7 @@ def _claude_pids_on_tty(ptty):
 def kill_session(name="", tty="", pid=None):
     """Kill a session. Order:
     1) LIVE session — its iTerm pane (title 'NAME (node)') has a claude process → kill that claude.
-       Pane match requires the ' (node)' suffix so 'tala' can't hit 'tala Assessment'.
+       Pane match requires the ' (node)' suffix so 'api' can't hit 'api Assessment'.
     2) STALE/no-pane/orphaned — fall back to the row's pid + its descendants
        (clears lingering MCP leftovers of an exited session). This is what makes stale kills work.
     The pid comes from the row, i.e. `claude agents` when it knows the session (see session_pid) —
