@@ -142,10 +142,10 @@ export class ActiveContext {
    *
    *  KAI-413 followup: `location` MUST become REQUIRED when remote watch
    *  lands. The unqualified branch is a cross-org leak dressed up as a
-   *  convenience — today it is dead code (the sole caller passes
-   *  LOCAL_LOCATION and is pinned by a test), but the day a remote transport
-   *  can be watched it fires on the first same-named channel in a different
-   *  org. Drop the `?` and delete the fallback loop as part of that ticket. */
+   *  convenience — it is NOT dead code (tests exercise it, and any caller can
+   *  omit location), but the day a remote transport can be watched it fires on
+   *  the first same-named channel in a different org. Drop the `?` and delete
+   *  the fallback loop as part of that ticket. */
   isChannelWatched(name: string, location?: ChannelLocation): boolean {
     const channel = normalizeChannelName(name)
     if (location) return this.subscribed.get(channelKey(channel, location))?.watching === true

@@ -114,24 +114,46 @@ describe('Broker: replay capacity validation (KAI-414)', () => {
   // NaN capacity used to slip through: `Number('abc')` is NaN, `length > NaN` is
   // always false, eviction never fires, the buffer grows unbounded. Rejecting
   // at boot fails LOUD instead of degrading silently — the direction this
-  // feature must never fail.
-  it('refuses to boot with a non-numeric CCCOLLAB_REPLAY_CAPACITY', async () => {
+  // feature must never fail. Also refuse n < 1 (the capacity=0 hole).
+  async function bootRefused(capacity: string, profileSuffix: string): Promise<{ code: number; stderr: string }> {
     const tsxCli = resolveTsx(dirname(fileURLToPath(import.meta.url)))
     if (!tsxCli) throw new Error('tsx CLI module not resolvable from tests dir')
     const brokerPath = fileURLToPath(new URL('../src/broker.ts', import.meta.url))
-    const nanProfile = `nan-cap-${process.pid}`
-    const nanRendezvous = join(homedir(), '.cccollab', 'run', `${nanProfile}.json`)
+    const profile = `${profileSuffix}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    const rendezvous = join(homedir(), '.cccollab', 'run', `${profile}.json`)
     const child = spawn(process.execPath, [tsxCli, brokerPath], {
-      env: { ...process.env, CCCOLLAB_PROFILE: nanProfile, CCCOLLAB_REPLAY_CAPACITY: 'abc' },
-      stdio: 'ignore',
+      env: { ...process.env, CCCOLLAB_PROFILE: profile, CCCOLLAB_REPLAY_CAPACITY: capacity },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr?.on('data', (c: Buffer) => {
+      stderr += c.toString()
     })
     const code = await new Promise<number>((r) => child.on('exit', (c) => r(c ?? 0)))
-    expect(code).not.toBe(0)
     try {
-      unlinkSync(nanRendezvous)
+      unlinkSync(rendezvous)
     } catch {
       /* ignore */
     }
+    return { code, stderr }
+  }
+
+  it('refuses to boot with a non-numeric CCCOLLAB_REPLAY_CAPACITY', async () => {
+    const { code, stderr } = await bootRefused('abc', 'nan-cap')
+    expect(code).not.toBe(0)
+    expect(stderr).toMatch(/CCCOLLAB_REPLAY_CAPACITY/)
+  }, 15_000)
+
+  it('refuses to boot with CCCOLLAB_REPLAY_CAPACITY 0', async () => {
+    const { code, stderr } = await bootRefused('0', 'zero-cap')
+    expect(code).not.toBe(0)
+    expect(stderr).toMatch(/CCCOLLAB_REPLAY_CAPACITY/)
+  }, 15_000)
+
+  it('refuses to boot with a negative CCCOLLAB_REPLAY_CAPACITY', async () => {
+    const { code, stderr } = await bootRefused('-1', 'neg-cap')
+    expect(code).not.toBe(0)
+    expect(stderr).toMatch(/CCCOLLAB_REPLAY_CAPACITY/)
   }, 15_000)
 })
 
@@ -222,11 +244,16 @@ describe('Broker: SSE heartbeat (KAI-414)', () => {
     const badRendezvous = join(homedir(), '.cccollab', 'run', `${badProfile}.json`)
     const child = spawn(process.execPath, [tsxCli, brokerPath], {
       env: { ...process.env, CCCOLLAB_PROFILE: badProfile, CCCOLLAB_HEARTBEAT_MS: 'soon' },
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr?.on('data', (c: Buffer) => {
+      stderr += c.toString()
     })
     try {
       const code = await new Promise<number>((r) => child.on('exit', (c) => r(c ?? 0)))
       expect(code).not.toBe(0)
+      expect(stderr).toMatch(/CCCOLLAB_HEARTBEAT_MS/)
     } finally {
       // A broker that WRONGLY boots would otherwise outlive the failing test
       // and keep its rendezvous file, poisoning the next run.
@@ -240,13 +267,12 @@ describe('Broker: SSE heartbeat (KAI-414)', () => {
   }, 15_000)
 })
 
-describe('Broker: replay buffer capacity=0 (KAI-414 F1)', () => {
-  // The reviewer's smoking gun: with CCCOLLAB_REPLAY_CAPACITY=0 the buffer is
-  // always empty, so the old `oldest && ...` short-circuit never declared a
-  // gap — a client behind lastSeq got a silent zero-length replay. That is
-  // precisely the "confidently-blind" failure this ticket exists to kill; it
-  // is misconfig-gated but fails toward silence, the one direction it must
-  // never fail.
+describe('Broker: replay buffer capacity=1 eviction (KAI-414 F1)', () => {
+  // Boots with capacity 1 so a second event evicts the first. A client whose
+  // cursor is behind the held window gets a stream_gap. (The describe used to
+  // be titled capacity=0 while booting with '1' — capacity 0 cannot boot:
+  // positiveIntEnv refuses n < 1. The n < 1 refusal lives in the validation
+  // describe above.)
   const ZERO_PROFILE = `zerobuf-${process.pid}`
   const ZERO_RENDEZVOUS = join(homedir(), '.cccollab', 'run', `${ZERO_PROFILE}.json`)
   let broker: ChildProcess
@@ -350,11 +376,12 @@ describe('Broker: replay buffer overflow (KAI-414)', () => {
     }
   })
 
-  // A client that falls further behind than the buffer holds CANNOT be replayed.
-  // Silently resuming it from the oldest surviving event would hand it a
-  // plausible, incomplete history — the confidently-blind failure, dressed up as
-  // a successful reconnect. It must be told instead.
-  it('reports a gap rather than a partial replay when the client fell too far behind', async () => {
+  // A client that falls further behind than the buffer holds must hear a gap
+  // (so it does not treat the reconnect as complete history). It must ALSO
+  // receive whatever the buffer still holds — returning `replay: []` alone
+  // threw away up to REPLAY_CAPACITY events the client never saw, then
+  // stream_hello jumped the cursor to lastSeq and those events were gone forever.
+  it('reports a gap AND still replays the events the buffer still holds', async () => {
     const stream = openStream(port)
     await stream.ready
     const topicId = await seedTopic(port, 'evict-sender', 'evict-ch', 'evict-topic')
@@ -364,6 +391,7 @@ describe('Broker: replay buffer overflow (KAI-414)', () => {
     stream.close()
 
     // Publish more than the buffer can hold; the cursor's position is evicted.
+    // Capacity is 2, so after m2..m5 the buffer holds the last two of those.
     for (const text of ['m2', 'm3', 'm4', 'm5']) {
       await post(port, `/topics/${topicId}/messages`, { sender: 'evict-sender', text })
     }
@@ -373,6 +401,21 @@ describe('Broker: replay buffer overflow (KAI-414)', () => {
     await waitUntil(() => (resumed.events.some((e) => e.data.type === 'stream_gap') ? true : null), 5000)
     const gap = resumed.events.find((e) => e.data.type === 'stream_gap')!
     expect(String(gap.data.reason)).toMatch(/behind|evicted/i)
+
+    // The held tail must still arrive — not discarded because of the gap.
+    await waitUntil(
+      () =>
+        resumed.events.some((e) => e.data.text === 'm4') && resumed.events.some((e) => e.data.text === 'm5')
+          ? true
+          : null,
+      5000,
+    )
+    const texts = resumed.events.filter((e) => e.data.type === 'message').map((e) => e.data.text)
+    expect(texts).toContain('m4')
+    expect(texts).toContain('m5')
+    // m1 was already seen; m2/m3 were evicted. Neither should appear as a
+    // "complete" history that pretends the gap was filled.
+    expect(texts).not.toContain('m1')
     resumed.close()
   })
 })
@@ -511,5 +554,24 @@ describe('Broker: SSE replay cursor (KAI-414)', () => {
     await new Promise<void>((r) => setTimeout(r, 300))
     expect(resumed.events.some((e) => e.data.type === 'stream_gap')).toBe(false)
     resumed.close()
+  })
+
+  it('reports a gap for a malformed cursor (empty seq / scientific / extra segments)', async () => {
+    // Number('') is 0, Number('1e2') is 100, split(':') discards extra segments —
+    // any of those used to resume incorrectly. Only non-negative integers with
+    // exactly one colon separator are positions this broker ever issued.
+    for (const bad of [
+      `${'0'.repeat(8)}-${'0'.repeat(4)}-4000-8000-${'0'.repeat(12)}:`,
+      'not-a-uuid:1',
+      'a:b:c',
+      'x:1e2',
+    ]) {
+      const resumed = openStream(port, bad)
+      await resumed.ready
+      await waitUntil(() => (resumed.events.some((e) => e.data.type === 'stream_gap') ? true : null), 5000)
+      const gap = resumed.events.find((e) => e.data.type === 'stream_gap')!
+      expect(String(gap.data.reason)).toMatch(/not a position|previous broker/i)
+      resumed.close()
+    }
   })
 })

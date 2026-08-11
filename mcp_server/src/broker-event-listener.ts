@@ -187,36 +187,46 @@ export class BrokerEventListener {
       this.connected = true
       this.armReadDeadline()
 
-      res.on('data', (chunk: Buffer) => {
+      // Decode as UTF-8 across chunk boundaries. `chunk.toString()` per Buffer
+      // splits multi-byte characters at the seam into U+FFFD, which is still
+      // legal JSON so nothing errors — and a resume replay can dump up to
+      // REPLAY_CAPACITY frames in one synchronous write, making the seam
+      // materially likely.
+      res.setEncoding('utf8')
+
+      res.on('data', (chunk: string | Buffer) => {
         // Any byte proves the stream is alive — including a heartbeat comment
         // frame, which is the only thing that arrives on an idle channel.
         this.armReadDeadline()
-        buffer += chunk.toString()
+        buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) {
-          if (line.startsWith('id: ')) {
-            pendingId = line.slice(4).trim()
+          // SSE allows optional space after the colon (`id:1` and `id: 1`).
+          if (line.startsWith('id:')) {
+            pendingId = line.slice(3).replace(/^\s*/, '').trim()
             continue
           }
-          if (line.startsWith('data: ')) {
-            const json = line.slice(6)
+          if (line.startsWith('data:')) {
+            const json = line.slice(5).replace(/^\s*/, '')
             try {
               const parsed = JSON.parse(json) as Record<string, unknown>
               if (isLocalEvent(parsed)) {
                 this.processLocalEvent(parsed)
+                // Advance only after a frame we actually examined. An
+                // unparseable frame must stay at the cursor so reconnect
+                // re-offers it from the replay buffer — advancing past it
+                // marked it consumed forever. Deliberate DROPPED non-local
+                // events still advance: they were examined and rejected.
+                if (pendingId) this.lastEventId = pendingId
               } else {
                 this.log(`DROPPED: non-local event ignored: ${json.slice(0, 120)}`)
+                if (pendingId) this.lastEventId = pendingId
               }
             } catch {
               this.log(`SSE parse error: ${json}`)
+              // Do NOT advance lastEventId — the frame was never dispatched.
             }
-            // Advance the cursor after dispatching. `processLocalEvent` is
-            // fire-and-forget (the handler runs async and its errors are
-            // logged, not awaited) so this is dispatch-not-handling: on the
-            // next reconnect we will not re-read an event we already dispatched
-            // even if its async handler had not yet finished.
-            if (pendingId) this.lastEventId = pendingId
             pendingId = undefined
           }
         }
@@ -299,10 +309,11 @@ export class BrokerEventListener {
     appendFileSync(LOG_FILE, line)
   }
 
-  // Both gates are qualified with LOCAL_LOCATION: this listener only ever
+  // Channel gates are qualified with LOCAL_LOCATION: this listener only ever
   // handles local broker events, and an unqualified lookup matches a
   // same-named channel at ANY location — a cross-org leak once remote watch
-  // lands (KAI-413).
+  // lands (KAI-413). `isTopicJoined` takes no location (topics are keyed by
+  // threadTs alone today); only the channel half is location-qualified.
   private channelSubscribed(channel: string | undefined): boolean {
     if (!channel) return false
     return this.context.isChannelSubscribed(channel, LOCAL_LOCATION)
@@ -337,14 +348,18 @@ export class BrokerEventListener {
         // to; whoami still reports mayHaveMissedMessages, so no info is lost.
         this.missedEvents = true
         this.log(`STREAM GAP: ${event.reason ?? 'unknown reason'}`)
-        const localChannels = this.context.getSubscribedChannels().filter((c) => c.location === 'local')
+        // LOCAL_LOCATION, not the bare literal — the one proactive alarm path
+        // must not drift from every other local gate in this file.
+        const localChannels = this.context.getSubscribedChannels().filter((c) => c.location === LOCAL_LOCATION)
         for (const channel of localChannels) {
           await this.bus.push({
             sender: 'cccollab',
             text:
               `WARNING: the event stream reconnected with a gap (${event.reason ?? 'reason unknown'}). ` +
-              `Messages published while it was down were NOT delivered. ` +
-              `Use read_topic_messages / read_channel_messages to backfill.`,
+              `Messages published while it was down were NOT delivered to this session. ` +
+              `Local channel broadcasts cannot be reconstructed after a gap — re-read any ` +
+              `topics you care about with read_topic_messages (joined topics only). ` +
+              `whoami.eventStream.mayHaveMissedMessages stays true for this session.`,
             ts: new Date().toISOString(),
             channel: channel.name,
             channelName: channel.name,
@@ -367,13 +382,16 @@ export class BrokerEventListener {
           this.log(`DROPPED: self topic_created from ${event.topic.creator}`)
           return
         }
+        // Carries the topic id so a channel watcher can act on the
+        // notification (join, read, archive) without guessing from the title.
         const msg: ParsedMessage = {
           sender: event.topic.creator,
           text: `New topic in "${channel}": "${event.topic.topic}"`,
           ts: event.topic.createdAt ?? new Date().toISOString(),
           channel,
           channelName: channel,
-          threadTs: undefined,
+          threadTs: event.topic.id,
+          topicName: event.topic.topic,
         }
         this.log(`PUSHING topic_created to Claude: "${event.topic.topic}"`)
         await this.bus.push(msg)
@@ -480,6 +498,13 @@ export class BrokerEventListener {
         }
         this.log(`PUSHING broadcast to Claude: sender=${msg.sender} text="${msg.text.slice(0, 80)}"`)
         await this.bus.push(msg)
+        return
+      }
+      default: {
+        // Without this arm an unknown type is swallowed with no log line —
+        // and isLocalEvent already accepted it because it only checks source.
+        const unknownType = (event as { type?: string }).type ?? 'undefined'
+        this.log(`DROPPED: unknown local event type "${unknownType}"`)
         return
       }
     }

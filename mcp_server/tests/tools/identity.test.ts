@@ -43,6 +43,7 @@ function createMockDeps(): IdentityToolDeps {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
     router: new TransportRouter([transport]),
+    localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }),
   }
 }
 
@@ -86,6 +87,7 @@ function makeDepsWithRemote(
       localTransport,
       fakeRemote as unknown as import('../../src/transport/index.js').Transport,
     ]),
+    localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }),
   }
 }
 
@@ -98,6 +100,7 @@ function makeLocalOnlyDeps(): IdentityToolDeps {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
     router: new TransportRouter([transport]),
+    localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }),
   }
 }
 
@@ -535,6 +538,7 @@ describe('Identity Tools', () => {
           router,
           locations: [dormant],
           ensureAttached,
+          localEventStream: () => ({ connected: false, mayHaveMissedMessages: false }),
         }
 
         const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)

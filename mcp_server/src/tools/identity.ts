@@ -44,10 +44,14 @@ export interface IdentityToolDeps {
    *  traffic. `connected` answers "is a watch in effect RIGHT NOW";
    *  `mayHaveMissedMessages` answers the question a socket cannot: "is there a
    *  hole in what I heard?". Both are needed: an open socket says nothing about
-   *  what was published while it was closed. Optional: absent means unknown,
-   *  which reports as not-active (under-claiming is recoverable; over-claiming
-   *  is the bug). */
-  localEventStream?: () => { connected: boolean; mayHaveMissedMessages: boolean }
+   *  what was published while it was closed.
+   *
+   *  Required (not optional): a missing dep used to fall back to
+   *  `{connected:false, mayHaveMissedMessages:false}`, which positively asserts
+   *  "your history is complete" when the code has no idea. Production always
+   *  supplies this (`server.ts`); tests must too. The full sum-type with an
+   *  `unknown` member is a product decision (whoami JSON contract). */
+  localEventStream: () => { connected: boolean; mayHaveMissedMessages: boolean }
   /** cwd used when re-resolving config on a hot-attach. Defaults to
    *  `process.cwd()` but injectable for tests. */
   cwd?: string
@@ -155,7 +159,7 @@ export async function handleIdentityTool(
       // `watching: true` that ignores that is exactly the confidently-blind
       // report KAI-414 exists to eliminate. Unknown liveness reads as NOT
       // active: under-claiming is recoverable, over-claiming is the bug.
-      const stream = deps.localEventStream?.() ?? { connected: false, mayHaveMissedMessages: false }
+      const stream = deps.localEventStream()
       const localEventsLive = stream.connected
       const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
         name: c.name,
