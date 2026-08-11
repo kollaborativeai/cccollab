@@ -197,10 +197,17 @@ async function handleJoinChannel(deps: ChannelToolDeps, rawName: string, locatio
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
 
-  const { subscriberCount } = await transport.joinChannel({
-    sessionName: deps.session.displayName,
-    channel: normalized,
-  })
+  let subscriberCount: number
+  try {
+    ;({ subscriberCount } = await transport.joinChannel({
+      sessionName: deps.session.displayName,
+      channel: normalized,
+    }))
+  } catch (err) {
+    // Permanent per-op skip throws so we never report a remote join that
+    // did not form (cc#30 C1).
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   const { becameActive } = deps.context.joinChannel(normalized, 'manual', location)
   if (deps.messageBus && deps.remoteChannelUnsubscribes) {
     ensureChannelSubscription({
@@ -228,7 +235,11 @@ async function handleLeaveChannel(deps: ChannelToolDeps, rawName: string, locati
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
 
-  await transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
+  try {
+    await transport.leaveChannel({ sessionName: deps.session.displayName, channel: normalized })
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   const { removed, newActive } = deps.context.leaveChannel(normalized, location)
   if (deps.remoteChannelUnsubscribes) {
     teardownChannelSubscription({
@@ -307,6 +318,12 @@ async function handleSendMessageToChannel(
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
 
-  await transport.broadcast({ sessionName: deps.session.displayName, channel: targetName, text })
+  try {
+    await transport.broadcast({ sessionName: deps.session.displayName, channel: targetName, text })
+  } catch (err) {
+    // Skipped write ops throw; map to an error so the agent does not think
+    // the message landed while peers never see it (cc#30 C1).
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   return JSON.stringify({ channel: targetName, location: targetLocation })
 }

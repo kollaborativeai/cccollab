@@ -92,15 +92,19 @@ export async function handleIdentityTool(
       deps.session.setObjective(objective)
 
       // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
+      // it can attribute messages and list us in `list_sessions`. Local
+      // failures stay non-fatal. A remote introduce failure (including a
+      // permanent per-op skip) is surfaced so the agent does not believe
+      // it is bound when sessionId is still null (cc#30 C2).
+      const remoteIntroduceErrors: string[] = []
       for (const transport of deps.router.enabled()) {
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (transport.source !== LOCAL_LOCATION) {
+            remoteIntroduceErrors.push(`${transport.source}: ${msg}`)
+          }
         }
       }
 
@@ -113,6 +117,14 @@ export async function handleIdentityTool(
         } catch {
           // Non-fatal.
         }
+      }
+
+      if (remoteIntroduceErrors.length > 0) {
+        return JSON.stringify({
+          error: `Remote introduce failed (${remoteIntroduceErrors.join('; ')}). Local name is set; remote session is not bound.`,
+          name: displayName,
+          ...(objective ? { objective } : {}),
+        })
       }
 
       return JSON.stringify({ name: displayName, ...(objective ? { objective } : {}) })
@@ -189,11 +201,25 @@ export async function handleIdentityTool(
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<
+  Record<
+    string,
+    {
+      enabled: boolean
+      degradation?: string
+      organization?: string
+      skippedOps?: Array<{ op: string; reason: string }>
+    }
+  >
+> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
+      const skippedOps =
+        Array.isArray(maybeDegraded.skippedOps) && maybeDegraded.skippedOps.length > 0
+          ? [...maybeDegraded.skippedOps]
+          : undefined
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -202,16 +228,29 @@ async function buildLocationStates(
         organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: {
+        enabled: boolean
+        degradation?: string
+        organization?: string
+        skippedOps?: Array<{ op: string; reason: string }>
+      } = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
+        ...(skippedOps ? { skippedOps } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<
+    string,
+    {
+      enabled: boolean
+      degradation?: string
+      organization?: string
+      skippedOps?: Array<{ op: string; reason: string }>
+    }
+  > = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

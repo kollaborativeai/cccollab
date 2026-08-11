@@ -110,22 +110,21 @@ backwards-stable once published.
 
 ### 3. Graceful degradation in the local server's remote transport
 
-If the remote transport receives an authentication error, a
-`FunctionNotFoundError`, or accumulates three failures within a minute:
+Degradation is two-level (KAI-333 / KAI-439):
 
-- Log a warning to stderr (surfaced into `~/.cccollab/logs/<profile>.log`
-  when the harness is configured to capture it).
-- Flip the transport's `enabled` flag to `false` for the remainder of the
-  session; subsequent tool calls routed to that location return a
-  "degraded" error instead of dispatching.
-- Keep the local broker transport (and any other remote transports)
-  running normally.
-- Surface the degraded state in `whoami`'s `locations` map so the user
-  sees it immediately and can re-authenticate or restart.
+1. **Transport-wide** (`enabled = false`): structured auth failure, or
+   `FunctionNotFoundError` on a long-lived subscription (core reactive feed,
+   including channel-subscribe bootstrap FNF). Log to stderr; keep other
+   transports running; surface `whoami.locations.*.degradation`.
+2. **Per-op skip**: three failures of the _same_ one-shot op within a minute
+   (including one-shot FNF) permanently short-circuit **only that op**. The
+   transport stays enabled. User write/join ops throw when skipped (tools
+   return `{ error }`). Surface `whoami.locations.*.skippedOps`. Recovery:
+   successful re-`introduce`, or `authenticate` with `{ force: true }`.
 
 A misbehaving backend never crashes the user's Claude Code session; at
-worst, the affected remote location silently falls back and local mode
-keeps working.
+worst, one op is muted (visibly) or one remote location disables while local
+mode keeps working.
 
 ### 4. Where a new Convex function goes
 

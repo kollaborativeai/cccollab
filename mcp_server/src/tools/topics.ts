@@ -453,14 +453,18 @@ async function joinTopicByData(
   topic: LocatedTopic | (TransportTopic & { location?: ChannelLocation }),
   transport: Transport,
 ): Promise<string> {
-  const { location, history } = await registerTopicMembership(deps, topic, transport)
-  return JSON.stringify({
-    id: topic.id,
-    name: topic.topic,
-    channel: topic.channel,
-    location,
-    history,
-  })
+  try {
+    const { location, history } = await registerTopicMembership(deps, topic, transport)
+    return JSON.stringify({
+      id: topic.id,
+      name: topic.topic,
+      channel: topic.channel,
+      location,
+      history,
+    })
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
 }
 
 async function handleSendMessage(deps: TopicToolDeps, text: string, topicId: string): Promise<string> {
@@ -470,7 +474,11 @@ async function handleSendMessage(deps: TopicToolDeps, text: string, topicId: str
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
-  await transport.sendTopicMessage({ sessionName: deps.session.displayName, topicId, text })
+  try {
+    await transport.sendTopicMessage({ sessionName: deps.session.displayName, topicId, text })
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   return JSON.stringify({ topicId })
 }
 
@@ -482,7 +490,11 @@ async function handleArchiveTopic(deps: TopicToolDeps, topicId: string): Promise
   } catch (err) {
     return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
-  await transport.archiveTopic({ sessionName: deps.session.displayName, topicId })
+  try {
+    await transport.archiveTopic({ sessionName: deps.session.displayName, topicId })
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   // Keep the archiver's membership and live subscription: the peer stays a
   // member, so dropping only the archiver's was asymmetric — and it must stay
   // subscribed to receive the topic's own unarchive event (KAI-373).
@@ -493,7 +505,11 @@ async function handleArchiveTopicByName(deps: TopicToolDeps, name: string): Prom
   const resolved = await resolveTopicIdInSubscribedChannels(deps, name)
   if ('error' in resolved) return JSON.stringify(resolved)
   const transport = deps.router.get(resolved.location)
-  await transport.archiveTopic({ sessionName: deps.session.displayName, topicId: resolved.id })
+  try {
+    await transport.archiveTopic({ sessionName: deps.session.displayName, topicId: resolved.id })
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+  }
   // Archiving never drops membership (KAI-373); this by-name path only runs for
   // topics the session hasn't joined, so there's nothing to leave anyway.
   return JSON.stringify({ id: resolved.id, name: resolved.topicName })

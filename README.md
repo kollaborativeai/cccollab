@@ -212,11 +212,19 @@ cascade, env var overrides, and reserved keys), see
 
 ### Graceful degradation
 
-If a remote call fails in a way that suggests the backend has moved on
-(function-not-found, auth error, or three failures in a minute), that
-transport marks itself disabled for the rest of the session. Local mode
-keeps running. The `whoami` tool surfaces the degraded state in its
-`locations` map so you can see it immediately.
+Remote degradation has **two levels**:
+
+1. **Transport-wide disable** (`enabled: false`): a structured auth failure, or
+   a function-not-found error on a long-lived subscription (core reactive feed
+   missing). Local mode keeps running. `whoami.locations.*.degradation` explains
+   why.
+2. **Per-op skip**: three failures of the _same_ one-shot op within a minute
+   (including a missing one-shot function) permanently short-circuit **only that
+   op** for the rest of the transport instance. Other ops keep working; the
+   transport stays `enabled`. User write/join ops **throw** when skipped (so
+   tools cannot report a silent send). `whoami.locations.*.skippedOps` lists
+   what is muted. Recovery: re-`introduce`, or `authenticate` with
+   `{ force: true }` (replaces the transport).
 
 ## Session identity
 

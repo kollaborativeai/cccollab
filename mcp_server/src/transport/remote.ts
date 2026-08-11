@@ -257,9 +257,14 @@ class BoundedIdSet {
  *   normally. One dead/misbehaving tool, or one a caller keeps retrying,
  *   can no longer brick the whole remote transport (KAI-333).
  *
- * Callers in `server.ts` check `enabled` before dispatching. Neither the
- * transport nor an individual skipped op auto-recovers; a session restart
- * or successful `authenticate` is required.
+ * Callers in `server.ts` check `enabled` before dispatching. Skipped ops do
+ * not auto-recover on a plain "already authenticated" short-circuit — a
+ * successful `introduce` clears skip state, and `authenticate` with
+ * `force: true` (which replaces this transport instance) also recovers.
+ * User-initiated write/join ops **throw** when skipped so the tool layer
+ * cannot report success for a mutation that never ran; status surfaces
+ * expose `skippedOps` so whoami is not a lie while the transport is still
+ * `enabled`.
  */
 export class RemoteTransport implements Transport {
   readonly source: string
@@ -276,10 +281,11 @@ export class RemoteTransport implements Transport {
    *  string passed to `registerFailure` / `registerSubscriptionFailure`. */
   private readonly opFailures = new Map<string, number[]>()
   /** Ops that crossed the per-op failure threshold and are now skipped
-   *  for the remaining lifetime of this transport instance: future calls
-   *  short-circuit with the op's usual fallback instead of reaching the
-   *  backend. Keyed by `op`; value is the log-friendly reason. */
-  private readonly skippedOps = new Map<string, string>()
+   *  for the remaining lifetime of this transport instance (unless
+   *  `clearSkippedOps` runs after a successful introduce). Keyed by `op`;
+   *  value is the log-friendly reason. Named `skippedOpsMap` so the public
+   *  `skippedOps` getter can expose a stable array without clashing. */
+  private readonly skippedOpsMap = new Map<string, string>()
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
   private shutdownStarted = false
@@ -343,6 +349,26 @@ export class RemoteTransport implements Transport {
   }
 
   /**
+   * Ops permanently short-circuited for this transport instance after
+   * crossing the per-op failure threshold. Empty when nothing is skipped.
+   * Surfaced on whoami so a "healthy" remote with a muted write path is
+   * visible (KAI-333 / cc#30 C1).
+   */
+  get skippedOps(): ReadonlyArray<{ op: string; reason: string }> {
+    return [...this.skippedOpsMap.entries()].map(([op, reason]) => ({ op, reason }))
+  }
+
+  /**
+   * Clear per-op failure windows and permanent skips. Called after a
+   * successful introduce (re-bind is a recovery signal). Force re-auth
+   * recovers by replacing the whole transport instance.
+   */
+  clearSkippedOps(): void {
+    this.opFailures.clear()
+    this.skippedOpsMap.clear()
+  }
+
+  /**
    * Seed the per-topic `sinceTs` cursor so the next `subscribeTopicMessages`
    * call starts the reactive query past this ts.
    *
@@ -371,16 +397,14 @@ export class RemoteTransport implements Transport {
 
   // ─── Identity ─────────────────────────────────────────────────────────
   /**
-   * Register the session with the remote backend. Unlike the tool-dispatch
-   * mutations below (joinChannel, leaveTopic, sendTopicMessage, ...) which
-   * swallow errors and degrade the transport silently, `introduce` RETHROWS
-   * on failure so `attach.ts`'s "abort before registering" safety contract
-   * holds. Callers that need a best-effort introduce should catch the
-   * rethrow themselves.
+   * Register the session with the remote backend. Unlike soft-fallback reads,
+   * `introduce` RETHROWS on failure so `attach.ts`'s "abort before registering"
+   * safety contract holds. Callers that need a best-effort introduce should
+   * catch the rethrow themselves.
    *
-   * `registerFailure` still runs on the way out so the circuit breaker
-   * counts this against the failure window — a transient blip at startup
-   * is a failure just like one mid-session.
+   * `registerFailure` still runs on the way out so the per-op skip window
+   * counts this failure — a transient blip at startup is a failure just like
+   * one mid-session. A successful introduce clears all skip state (recovery).
    */
   async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     if (!this.enabled) {
@@ -394,6 +418,9 @@ export class RemoteTransport implements Transport {
         organizationId: args.organizationId,
       })) as string
       this.sessionId = id
+      // Successful re-bind is a recovery signal: clear permanent mutes so the
+      // session is not stuck after the user fixed network / org and re-introduced.
+      this.clearSkippedOps()
       // Preload the topic-id cache so `hasTopic` answers correctly on
       // subsequent tool dispatches for topics we previously joined.
       try {
@@ -416,7 +443,10 @@ export class RemoteTransport implements Transport {
   // ─── Channels ─────────────────────────────────────────────────────────
   async joinChannel(args: { sessionName: string; channel: string }): Promise<{ subscriberCount: number }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('joinChannel')) return { subscriberCount: 0 }
+    if (!this.enabled || this.sessionId === null) return { subscriberCount: 0 }
+    // User-initiated join: throw when permanently skipped so the tool cannot
+    // report success for a remote membership that never formed (cc#30 C1).
+    this.assertNotSkipped('joinChannel')
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.join), {
         sessionId: this.sessionId,
@@ -433,6 +463,7 @@ export class RemoteTransport implements Transport {
           if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
         }
       }
+      this.recordOpSuccess('joinChannel')
       return { subscriberCount: 0 }
     } catch (err) {
       this.registerFailure('joinChannel', err)
@@ -442,12 +473,14 @@ export class RemoteTransport implements Transport {
 
   async leaveChannel(args: { sessionName: string; channel: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('leaveChannel')) return
+    if (!this.enabled || this.sessionId === null) return
+    this.assertNotSkipped('leaveChannel')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.channels.mutations.leave), {
         sessionId: this.sessionId,
         channel: args.channel,
       })
+      this.recordOpSuccess('leaveChannel')
     } catch (err) {
       this.registerFailure('leaveChannel', err)
     }
@@ -466,7 +499,7 @@ export class RemoteTransport implements Transport {
         presentSessionCount?: number
         messageCount?: number
       }>
-      return rows.map((r) => ({
+      const mapped = rows.map((r) => ({
         name: r.name,
         subscriberCount: r.subscriberCount,
         // The backend's `listAll` reports `presentSessionCount` — the count of
@@ -475,6 +508,8 @@ export class RemoteTransport implements Transport {
         sessionCount: r.presentSessionCount,
         messageCount: r.messageCount,
       }))
+      this.recordOpSuccess('listChannels')
+      return mapped
     } catch (err) {
       this.registerFailure('listChannels', err)
       return []
@@ -488,10 +523,12 @@ export class RemoteTransport implements Transport {
   async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
     if (!this.enabled || this.isSkipped('listOrganizations')) return []
     try {
-      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+      const rows = (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
       }>
+      this.recordOpSuccess('listOrganizations')
+      return rows
     } catch (err) {
       this.registerFailure('listOrganizations', err)
       return []
@@ -522,13 +559,17 @@ export class RemoteTransport implements Transport {
 
   async broadcast(args: { sessionName: string; channel: string; text: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('broadcast')) return
+    if (!this.enabled || this.sessionId === null) return
+    // User write path: throw when skipped so tools cannot report a send that
+    // never reached the backend while whoami still looks healthy (cc#30 C1).
+    this.assertNotSkipped('broadcast')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToChannel), {
         sessionId: this.sessionId,
         channel: args.channel,
         text: args.text,
       })
+      this.recordOpSuccess('broadcast')
     } catch (err) {
       this.registerFailure('broadcast', err)
     }
@@ -548,6 +589,7 @@ export class RemoteTransport implements Transport {
         topic: args.topic,
       })) as { topicId: string; name: string; state: 'active' }
       this.knownTopicIds.add(res.topicId)
+      this.recordOpSuccess('createTopic')
       return {
         id: res.topicId,
         topic: res.name,
@@ -668,23 +710,31 @@ export class RemoteTransport implements Transport {
     topicId: string
   }): Promise<{ channel?: string; history: TransportTopicMessage[] }> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('joinTopic')) return { history: [] }
+    if (!this.enabled || this.sessionId === null) return { history: [] }
+    this.assertNotSkipped('joinTopic')
     try {
       const res = (await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.join), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })) as { topicId: string; channelId: string; name: string }
       this.knownTopicIds.add(res.topicId)
-      const rows = (await this.client.query(
-        fn<'query'>(this.refs.messages.queries.listByTopic),
-        this.orgScopedArgs({ topicId: args.topicId }),
-      )) as Array<{ fromSessionId: string; text: string; ts: number }>
-      return {
-        history: rows.map((r) => ({
-          sender: r.fromSessionId,
-          text: r.text,
-          ts: new Date(r.ts).toISOString(),
-        })),
+      // Join succeeded — do not let a best-effort history query failure
+      // permanent-mute future joins (cc#30 I6).
+      this.recordOpSuccess('joinTopic')
+      try {
+        const rows = (await this.client.query(
+          fn<'query'>(this.refs.messages.queries.listByTopic),
+          this.orgScopedArgs({ topicId: args.topicId }),
+        )) as Array<{ fromSessionId: string; text: string; ts: number }>
+        return {
+          history: rows.map((r) => ({
+            sender: r.fromSessionId,
+            text: r.text,
+            ts: new Date(r.ts).toISOString(),
+          })),
+        }
+      } catch {
+        return { history: [] }
       }
     } catch (err) {
       this.registerFailure('joinTopic', err)
@@ -694,12 +744,14 @@ export class RemoteTransport implements Transport {
 
   async leaveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('leaveTopic')) return
+    if (!this.enabled || this.sessionId === null) return
+    this.assertNotSkipped('leaveTopic')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.leave), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
+      this.recordOpSuccess('leaveTopic')
     } catch (err) {
       this.registerFailure('leaveTopic', err)
     }
@@ -707,12 +759,14 @@ export class RemoteTransport implements Transport {
 
   async archiveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('archiveTopic')) return
+    if (!this.enabled || this.sessionId === null) return
+    this.assertNotSkipped('archiveTopic')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.archive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
+      this.recordOpSuccess('archiveTopic')
     } catch (err) {
       this.registerFailure('archiveTopic', err)
     }
@@ -720,12 +774,14 @@ export class RemoteTransport implements Transport {
 
   async unarchiveTopic(args: { sessionName: string; topicId: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('unarchiveTopic')) return
+    if (!this.enabled || this.sessionId === null) return
+    this.assertNotSkipped('unarchiveTopic')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.topics.mutations.unarchive), {
         sessionId: this.sessionId,
         topicId: args.topicId,
       })
+      this.recordOpSuccess('unarchiveTopic')
     } catch (err) {
       const code = extractConvexErrorCode(err)
       if (code === 'TOPIC_NAME_CONFLICT') {
@@ -737,13 +793,15 @@ export class RemoteTransport implements Transport {
 
   async sendTopicMessage(args: { sessionName: string; topicId: string; text: string }): Promise<void> {
     void args.sessionName
-    if (!this.enabled || this.sessionId === null || this.isSkipped('sendTopicMessage')) return
+    if (!this.enabled || this.sessionId === null) return
+    this.assertNotSkipped('sendTopicMessage')
     try {
       await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.sendToTopic), {
         sessionId: this.sessionId,
         topicId: args.topicId,
         text: args.text,
       })
+      this.recordOpSuccess('sendTopicMessage')
     } catch (err) {
       this.registerFailure('sendTopicMessage', err)
     }
@@ -934,7 +992,7 @@ export class RemoteTransport implements Transport {
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
   subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
-    if (!this.enabled || this.shutdownStarted || this.isSkipped('subscribeChannelMessages')) return () => {}
+    if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
 
     // Resolve the channel id. If we have it cached from a prior
@@ -942,11 +1000,18 @@ export class RemoteTransport implements Transport {
     // listAll lookup, then register the subscription once the id lands.
     // The outer return type stays synchronous so callers can treat this
     // identically to subscribeTopicMessages.
+    //
+    // Bootstrap vs reactive use SEPARATE op keys (cc#30 I4): three flaky
+    // listAll bootstrap blips must not permanent-mute the cached-id path
+    // that never needs listAll. Function-not-found on either path still
+    // trips transport-wide via `registerSubscriptionFailure`.
     let innerUnsubscribe: (() => void) | null = null
     let unsubscribed = false
 
     const register = (channelId: string): void => {
       if (unsubscribed) return
+      // Reactive feed skip only — not the bootstrap op.
+      if (this.isSkipped('subscribeChannelMessages')) return
       const sessionId = this.sessionId
       // Without a sessionId we can't use the server-side cursor; fall
       // back to no filtering. Practically attachLocation introduces
@@ -1021,6 +1086,8 @@ export class RemoteTransport implements Transport {
     const cached = this.channelIdsByName.get(args.channelName)
     if (cached !== undefined) {
       register(cached)
+    } else if (this.isSkipped('bootstrapChannelSubscribe')) {
+      // Bootstrap permanently muted; cached path above is unaffected.
     } else {
       void (async () => {
         try {
@@ -1034,19 +1101,19 @@ export class RemoteTransport implements Transport {
           const match = rows.find((r) => r.name.toLowerCase() === args.channelName.toLowerCase())
           if (match !== undefined) {
             this.channelIdsByName.set(args.channelName, match.channelId)
+            this.recordOpSuccess('bootstrapChannelSubscribe')
             register(match.channelId)
           }
         } catch (err) {
-          // KAI-333 finding #3: route through the SAME subscription-aware
-          // mechanism (and the SAME op name) as the reactive `listByChannel`
-          // subscription below, not the lenient one-shot-op path. This
-          // bootstrap lookup is part of the same "subscribe to channel
-          // messages" capability, so a genuinely removed `listAll`
-          // function must get the same structural-drift severity as a
-          // removed `listByChannel` — not silently degrade to "just count
-          // toward a window" while the reactive path would have tripped
-          // immediately for the equivalent drift.
-          this.registerSubscriptionFailure('subscribeChannelMessages', err)
+          // FNF on bootstrap is still transport-wide structural drift
+          // (same severity as a missing listByChannel). Transient blips
+          // count only against the bootstrap op so the cached-id path
+          // stays available after joinChannel fills the cache (cc#30 I4).
+          if (isFunctionNotFoundError(err)) {
+            this.registerSubscriptionFailure('bootstrapChannelSubscribe', err)
+          } else {
+            this.registerFailure('bootstrapChannelSubscribe', err)
+          }
         }
       })()
     }
@@ -1190,7 +1257,7 @@ export class RemoteTransport implements Transport {
    * this is the per-tool half of the KAI-333 degradation policy.
    */
   private recordOpFailure(op: string, msg: string): void {
-    if (this.skippedOps.has(op)) return
+    if (this.skippedOpsMap.has(op)) return
     const now = Date.now()
     const failures = this.opFailures.get(op) ?? []
     failures.push(now)
@@ -1200,21 +1267,31 @@ export class RemoteTransport implements Transport {
     this.opFailures.set(op, failures)
     if (failures.length >= DEGRADATION_THRESHOLD) {
       const reason = `"${op}" skipped: ${failures.length} failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
-      this.skippedOps.set(op, reason)
+      this.skippedOpsMap.set(op, reason)
       this.log(`Remote sync: ${reason}`)
     }
+  }
+
+  /**
+   * A successful call to `op` clears its rolling failure window so
+   * intermittent blips cannot permanent-mute after a good call in the
+   * middle (cc#30 I3). Does not un-skip an already-skipped op — once
+   * skipped, recovery is introduce / force re-auth.
+   */
+  private recordOpSuccess(op: string): void {
+    this.opFailures.delete(op)
   }
 
   /** True once `op` has crossed its own failure threshold and is being
    *  short-circuited. Used by fallback-returning call sites. */
   private isSkipped(op: string): boolean {
-    return this.skippedOps.has(op)
+    return this.skippedOpsMap.has(op)
   }
 
   /** Throws if `op` has been skipped. Used by call sites (like `introduce`)
    *  whose contract is to throw rather than silently return a fallback. */
   private assertNotSkipped(op: string): void {
-    const reason = this.skippedOps.get(op)
+    const reason = this.skippedOpsMap.get(op)
     if (reason !== undefined) {
       throw new Error(`remote transport op "${op}" is skipped (${reason})`)
     }
