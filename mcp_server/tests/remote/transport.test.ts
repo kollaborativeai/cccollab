@@ -1113,6 +1113,63 @@ describe('RemoteTransport feed restore on a transport that degraded mid-join', (
     expect(onUpdateCount()).toBe(1)
     expect(transport.hasLiveTopicFeed('t1')).toBe(false)
   })
+
+  /**
+   * I2 (KAI-418 review): joinTopic must prime the exclusive cursor past the
+   * history it returns BEFORE restoring a suspended feed. Restoring first
+   * re-attached under the stale cursor and re-delivered that history as
+   * inbound notifications.
+   */
+  it('joinTopic primes the topic cursor from history before restoring a suspended feed', async () => {
+    const historyTs = Date.parse('2026-05-01T12:00:00.000Z')
+    let lastOnUpdateArgs: Record<string, unknown> | undefined
+    const queryMock = vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+      // listByTopic history for join
+      if ('topicId' in args && !('channelId' in args)) {
+        return [
+          {
+            _id: 'msg1',
+            fromSessionId: 'peer',
+            text: 'already returned as history',
+            ts: historyTs,
+          },
+        ]
+      }
+      return []
+    })
+    const mutationMock = vi.fn(async (_ref: unknown, args: Record<string, unknown>) => {
+      if ('sessionName' in args) return 'session_1'
+      if ('channel' in args && 'sessionId' in args) {
+        return { channelId: 'chan_dev', latestTs: historyTs }
+      }
+      if ('topicId' in args && 'sessionId' in args) {
+        return { topicId: args.topicId, channelId: 'chan_dev', name: 'Auth' }
+      }
+      return undefined
+    })
+    const onUpdateMock = vi.fn((_ref: unknown, args: Record<string, unknown>, _cb: unknown, _err: unknown) => {
+      lastOnUpdateArgs = args
+      return () => {}
+    })
+    const stub = {
+      query: queryMock,
+      mutation: mutationMock,
+      onUpdate: onUpdateMock,
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+    await transport.joinChannel({ sessionName: 'laptop', channel: 'dev' })
+    transport.subscribeTopicMessages({ topicId: 't1', channelName: 'dev' }, () => {})
+    await transport.leaveTopic({ sessionName: 'laptop', topicId: 't1' })
+    expect(transport.hasLiveTopicFeed('t1')).toBe(false)
+
+    const result = await transport.joinTopic({ sessionName: 'laptop', topicId: 't1' })
+    expect(result.history).toHaveLength(1)
+    expect(transport.hasLiveTopicFeed('t1')).toBe(true)
+    // Restored onUpdate must carry sinceTs past the history we returned.
+    expect(lastOnUpdateArgs?.sinceTs).toBe(historyTs)
+  })
 })
 
 /**

@@ -130,12 +130,14 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
   } else {
     const displayName = ctx.session.displayName
     const objective = ctx.session.getObjective()
-    // Introduce INTO the organization this location is already bound to. Passing
-    // none let the backend pick, and since nothing recorded the result the
-    // session's per-location org binding stayed permanently undefined — which
-    // silently disarmed org-change detection for the rest of the process (both
-    // detectors are gated on a KNOWN previous org). A re-attach must preserve the
-    // binding, not forget it.
+    // Introduce INTO the organization this location is already bound to when we
+    // know one. When we do not, the backend may pick an org — but `introduce`
+    // returns only a session id (`Promise<void>` / string id), so we cannot
+    // record that choice (orchestrator-verified IMPORTANT, KAI-418 review).
+    // Writing back `organizationId` when defined is a deliberate preserve of a
+    // known binding after a successful introduce; it is not a fix for the
+    // unknown-org case. A backend that returns the bound org id is required to
+    // close the cold-start detector gap.
     const organizationId = ctx.session.getOrganizationFor(name)
     try {
       await transport.introduce({ sessionName: displayName, objective, organizationId })
@@ -639,7 +641,6 @@ export function ensureChannelSubscription(args: {
 }
 
 /**
-/**
  * CREATE a topic-message feed on a remote transport. See
  * `ensureChannelSubscription` — creation here, lifecycle in the transport.
  *
@@ -656,6 +657,13 @@ export function ensureTopicSubscription(args: {
   messageBus: MessageBus
 }): void {
   if (!hasTopicSubscription(args.transport)) return
+  // If a feed is already live, leave it alone — including its cursor.
+  // `reconcileFeeds` passes sinceTs=now for transport-swap; without this
+  // guard it would stomp a tighter history cursor that auto-subscribe just
+  // primed from joinTopic.
+  if (hasFeedRegistry(args.transport) && args.transport.hasLiveTopicFeed(args.topicId)) {
+    return
+  }
   if (args.sinceTs !== undefined) {
     args.transport.primeTopicCursor(args.topicId, args.sinceTs)
   }
@@ -698,18 +706,43 @@ export function reconcileFeeds(args: {
   messageBus: MessageBus
 }): void {
   if (args.location === LOCAL_LOCATION) return
+  // C1 (KAI-418 review): a brand-new transport after force re-auth has empty
+  // cursors. Creating topic feeds without `sinceTs` replays every joined
+  // topic's entire history as fresh inbound. Prime to "now" so only future
+  // messages arrive — same exclusive-cursor contract as first join.
+  const swapCursor = Date.now()
   for (const ch of args.context.getSubscribedChannels()) {
     if (ch.location !== args.location) continue
-    ensureChannelSubscription({ transport: args.transport, channelName: ch.name, messageBus: args.messageBus })
+    try {
+      // Channel feeds seed from channelMaxTs; prime via join-time path when
+      // the transport exposes it so swap does not flood channel history either.
+      const maybePrime = args.transport as { primeChannelCursor?: (name: string, ts: number) => void }
+      if (typeof maybePrime.primeChannelCursor === 'function') {
+        maybePrime.primeChannelCursor(ch.name, swapCursor)
+      }
+      ensureChannelSubscription({ transport: args.transport, channelName: ch.name, messageBus: args.messageBus })
+    } catch (err) {
+      // Per-feed isolation: one membership must not abort the whole location.
+      logError(
+        `reconcileFeeds: channel "${ch.name}" at "${args.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
   for (const topic of args.context.getJoinedTopics()) {
     if (topic.location !== args.location) continue
-    ensureTopicSubscription({
-      transport: args.transport,
-      topicId: topic.threadTs,
-      channelName: topic.channel,
-      messageBus: args.messageBus,
-    })
+    try {
+      ensureTopicSubscription({
+        transport: args.transport,
+        topicId: topic.threadTs,
+        channelName: topic.channel,
+        sinceTs: swapCursor,
+        messageBus: args.messageBus,
+      })
+    } catch (err) {
+      logError(
+        `reconcileFeeds: topic "${topic.threadTs}" at "${args.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
 }
 

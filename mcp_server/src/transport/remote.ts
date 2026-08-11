@@ -840,6 +840,15 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.listByTopic),
         this.orgScopedArgs({ topicId: args.topicId }),
       )) as Array<{ fromSessionId: string; text: string; ts: number }>
+      // I2 (KAI-418 review): prime the exclusive cursor PAST the history we
+      // are about to return BEFORE restoring a suspended feed. Restoring first
+      // re-attached under the stale cursor and re-delivered that same history
+      // as inbound notifications; the tool-layer ensureTopicSubscription then
+      // found the feed already registered and could not re-prime it.
+      for (const row of rows) {
+        const prior = this.topicMaxTs.get(args.topicId) ?? 0
+        if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
+      }
       // Topic membership is back ⇒ a feed suspended by a leave or a rebind can
       // go live again, under the CURRENT sessionId and the preserved cursor.
       this.restoreTopicFeed(args.topicId)

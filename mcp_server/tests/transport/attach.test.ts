@@ -138,10 +138,9 @@ class FakeRemoteTransport implements Transport {
     return this.topicIds.has(topicId)
   }
 
-  subscribeTopicMessages(
-    args: { topicId: string; channelName: string },
-    onEvent: (msg: ParsedMessage) => void,
-  ): () => void {
+  subscribeTopicMessages(args: { topicId: string; channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    // Match real RemoteTransport: first-call wins, later calls are no-ops.
+    if (this.subscribedTopics.has(args.topicId)) return
     const entry = {
       channelName: args.channelName,
       onEvent,
@@ -149,11 +148,6 @@ class FakeRemoteTransport implements Transport {
       unsubscribeCalled: false,
     }
     this.subscribedTopics.set(args.topicId, entry)
-    return () => {
-      entry.unsubscribeCalled = true
-      // Match real behaviour: first-call wins, subsequent invocations
-      // are no-ops. We keep the entry in the map so tests can inspect it.
-    }
   }
 
   primeTopicCursor(topicId: string, ts: number): void {
@@ -161,12 +155,29 @@ class FakeRemoteTransport implements Transport {
     if (ts > prior) this.primedCursors.set(topicId, ts)
   }
 
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  /** Feed-registry surface so ensure* can skip already-live feeds (KAI-418). */
+  hasLiveTopicFeed(topicId: string): boolean {
+    const sub = this.subscribedTopics.get(topicId)
+    return sub !== undefined && !sub.unsubscribeCalled
+  }
+  hasLiveChannelFeed(name: string): boolean {
+    const sub = this.subscribedChannels.get(name)
+    return sub !== undefined && !sub.unsubscribeCalled
+  }
+  forgetTopicFeed(topicId: string): void {
+    this.subscribedTopics.delete(topicId)
+  }
+  forgetChannelFeed(name: string): void {
+    this.subscribedChannels.delete(name)
+  }
+  suspendedFeeds(): string[] {
+    return []
+  }
+
+  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    if (this.subscribedChannels.has(args.channelName)) return
     const entry = { onEvent, unsubscribeCalled: false }
     this.subscribedChannels.set(args.channelName, entry)
-    return () => {
-      entry.unsubscribeCalled = true
-    }
   }
 
   /** Expose the topic cache so tests can pre-populate for listTopics. */
@@ -532,6 +543,38 @@ describe('attachLocation', () => {
     expect(priorSub.unsubscribeCalled).toBe(true)
     expect(originalTransport.shutdownCalled).toBe(true)
     expect(replacement.subscribedTopics.size).toBe(1)
+  })
+
+  /**
+   * C1 (KAI-418 review): reconcileFeeds after a transport swap must prime
+   * topic cursors. Without sinceTs, a runtime-joined topic replays its whole
+   * history as fresh inbound. Config-only topics are primed on the other path
+   * and hid this for the test above.
+   */
+  it('reconcileFeeds after swap primes a runtime-joined topic cursor (no history flood)', async () => {
+    const ctx = makeCtx(location)
+    const first = await attachLocation('acme', ctx)
+    expect(first.ok).toBe(true)
+    const original = ctx.router.get('acme') as FakeRemoteTransport
+
+    // Runtime join: in context, not in cccollab.json.
+    const runtimeTopicId = 'topic-runtime-joined'
+    ctx.context.joinTopic(runtimeTopicId, 'RuntimeAuth', 'dev', 'acme')
+    // Simulate tool path creating a feed on the original transport.
+    original.subscribeTopicMessages({ topicId: runtimeTopicId, channelName: 'dev' }, () => {})
+
+    const before = Date.now()
+    const replacement = new FakeRemoteTransport('acme')
+    ctx.transportFactory = () => replacement
+    const second = await attachLocation('acme', ctx)
+    expect(second.ok).toBe(true)
+
+    // Config topic + runtime topic should both be on the replacement.
+    expect(replacement.subscribedTopics.has(runtimeTopicId)).toBe(true)
+    const primed = replacement.primedCursors.get(runtimeTopicId)
+    expect(primed).toBeDefined()
+    // Cursor must be at-or-after swap time — not undefined (history flood).
+    expect(primed!).toBeGreaterThanOrEqual(before - 1000)
   })
 })
 
