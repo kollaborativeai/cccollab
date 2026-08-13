@@ -239,12 +239,14 @@ export async function handleIdentityTool(
  * transport carries it for auth / function-not-found / repeated-failure
  * cases). The local transport has no degradation surface.
  *
- * `identityRejected` is set on a location that accepted the session but
- * refused its declared identity (KAI-401). It is deliberately distinct
- * from `degradation`: the transport is healthy and `enabled` stays true —
- * the session simply isn't identifiable there. Without this the drop is
- * invisible, which is the failure mode that let a broken identity path
- * pass review: the fallback swallowed it and nothing ever said so.
+ * `identityRejected` is set on a location that registered the session
+ * without its declared identity (KAI-401) — see
+ * `IDENTITY_REJECTED_FIELD_DOC` for what that does and does not prove.
+ * It is deliberately distinct from `degradation`: the transport is
+ * healthy and `enabled` stays true — the session simply isn't
+ * identifiable there. Without this the drop is invisible, which is the
+ * failure mode that let a broken identity path pass review: the fallback
+ * swallowed it and nothing ever said so.
  *
  * `organization` is `"local"` for the local broker, the bound
  * organization name for a remote transport (via `getBoundOrganizationName`),
@@ -256,6 +258,27 @@ export async function handleIdentityTool(
  * A location that is live in the router takes precedence over a stale
  * diagnostics entry for the same name.
  */
+/**
+ * What `identityRejected` means, for every surface that documents it —
+ * the `whoami` tool description interpolates this rather than keeping a
+ * second copy, which is how the two drifted apart in the first place
+ * (the reason string hedges, the description asserted).
+ *
+ * The wording has to stay inside what the fallback in
+ * `RemoteTransport.introduceWithIdentityFallback` actually observed: one
+ * trial, the error never inspected, the backend's state never read back.
+ * "Refused" and "did not store" are unknowable from that evidence, and
+ * telling an operator the backend refused an identity it may well hold
+ * sends them to KAI-430 for what was a network blip.
+ */
+export const IDENTITY_REJECTED_FIELD_DOC =
+  '`identityRejected` is set on a location that registered the session WITHOUT its declared `identity`: introduce ' +
+  'failed with the identity and the same call without it succeeded. That is a single trial that never inspects the ' +
+  'error and never reads the backend back, so identity is the LIKELY cause, not a proven one — a transient ' +
+  'first-attempt failure produces the same signature, as does one that committed before its acknowledgement was ' +
+  'lost. The location still works; backend-stored grouping fields are probably missing there until that backend ' +
+  'accepts the optional `identity` arg (KAI-430). Client-side restart keys are unaffected.'
+
 /** Per-location state as reported by `whoami`. */
 interface LocationState {
   enabled: boolean

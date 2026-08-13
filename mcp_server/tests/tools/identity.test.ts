@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { handleIdentityTool, IDENTITY_REJECTED_FIELD_DOC, type IdentityToolDeps } from '../../src/tools/identity.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
@@ -779,5 +781,38 @@ describe('version handshake surfacing', () => {
       const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
       expect(result.versions).toBeUndefined()
     })
+  })
+})
+
+/**
+ * I1 residue. `RemoteTransport.introduceWithIdentityFallback` runs ONE
+ * trial, never inspects the error and never reads the backend back, and
+ * its reason string is hedged accordingly — two tests in
+ * `tests/remote/transport.test.ts` hold it there. The prose that DEFINES
+ * the field for the reader was not: the `whoami` tool description said
+ * the location "did not store" the identity and this module's own jsdoc
+ * said it "refused" it, both of which the experiment cannot know. An
+ * agent reads the description, not the transport internals, so the
+ * certainty came back on the surface that matters.
+ */
+describe('identityRejected field documentation (I1)', () => {
+  it('documents identityRejected as the fallback inference it is, not confirmed backend state', () => {
+    expect(IDENTITY_REJECTED_FIELD_DOC).not.toMatch(/did not store|was not stored|refused/i)
+    expect(IDENTITY_REJECTED_FIELD_DOC).toMatch(/likely/i)
+    // The transient case is the whole reason the claim cannot be certain.
+    expect(IDENTITY_REJECTED_FIELD_DOC).toMatch(/transient/i)
+  })
+
+  it('keeps every surface that documents identityRejected on that one wording', () => {
+    const srcDir = resolve(__dirname, '..', '..', 'src')
+    for (const file of ['server.ts', join('tools', 'identity.ts')]) {
+      const source = readFileSync(join(srcDir, file), 'utf8')
+      // The jsdoc that names what the certainty claims WERE is the one
+      // place they may appear; it lives beside the constant.
+      const prose = source.replace(IDENTITY_REJECTED_FIELD_DOC, '').replace(/"Refused" and "did not store"/g, '')
+      expect(prose, `${file} re-asserts a storage outcome the fallback never observed`).not.toMatch(
+        /did not store its declared|refused its declared/i,
+      )
+    }
   })
 })

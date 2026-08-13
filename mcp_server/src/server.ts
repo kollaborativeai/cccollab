@@ -22,7 +22,7 @@ import { attachLocation, ensureLazyAttach, planStartupAttachments } from './tran
 import { AttachDiagnostics } from './transport/diagnostics.js'
 import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
-import { handleIdentityTool } from './tools/identity.js'
+import { handleIdentityTool, IDENTITY_REJECTED_FIELD_DOC } from './tools/identity.js'
 import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
 import { ownVersion } from './own-version.js'
 import { handleTopicTool } from './tools/topics.js'
@@ -581,7 +581,8 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, identityRejected?}>}. Top-level `identity` is what this session DECLARED (client-side), not proof every location stored it. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). `identityRejected` is set on a location that registered the session but did not store its declared `identity` — the location still works, but backend-stored grouping fields are missing there until that backend accepts the optional `identity` arg (KAI-430). Client-side restart keys are unaffected.',
+        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, identityRejected?}>}. Top-level `identity` is what this session DECLARED (client-side), not proof every location stored it. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). ' +
+        IDENTITY_REJECTED_FIELD_DOC,
       inputSchema: {},
     },
     async () => {
