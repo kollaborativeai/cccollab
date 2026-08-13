@@ -625,9 +625,28 @@ export function ensureChannelSubscription(args: {
   const key = `${args.locationName}::${args.channelName}`
   if (args.map.has(key)) return
   if (!hasChannelSubscription(args.transport)) return
-  const unsub = args.transport.subscribeChannelMessages({ channelName: args.channelName }, (msg: ParsedMessage) => {
-    void args.messageBus.push(msg, args.transport.source)
-  })
+  // Optimistic map entry so concurrent ensure calls dedupe. C3: if the
+  // remote async lookup finds no channel, onLookupMiss drops the entry so
+  // a later ensure can retry instead of caching permanent silence.
+  const unsub = args.transport.subscribeChannelMessages(
+    {
+      channelName: args.channelName,
+      onLookupMiss: () => {
+        const held = args.map.get(key)
+        if (held === unsub) {
+          args.map.delete(key)
+          try {
+            unsub()
+          } catch {
+            /* best-effort */
+          }
+        }
+      },
+    },
+    (msg: ParsedMessage) => {
+      void args.messageBus.push(msg, args.transport.source)
+    },
+  )
   args.map.set(key, unsub)
 }
 

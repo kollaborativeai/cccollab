@@ -193,6 +193,36 @@ const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
 
 /**
+ * Backoff schedule for replacing a subscription whose `onError` fired.
+ * One entry per re-subscribe attempt; when the list is exhausted and every
+ * attempt has errored, the transport degrades loudly (see
+ * `subscribeResilient`).
+ *
+ * ~21s of total patience: long enough that a network blip or a deploy
+ * rollover rides through without disabling anything, short enough that a
+ * genuinely missing function surfaces to the user quickly rather than
+ * decaying into silence.
+ *
+ * Exported so the counter-reset test derives its cycle count from the
+ * schedule instead of hardcoding today's length: without `onHealthy`'s
+ * reset, exactly `length + 1` blips disable the transport, so a test
+ * pinned to a literal 4 stops guarding anything the moment a fourth
+ * delay is added.
+ */
+// S7: immutable schedule — consumers must not push/splice process-wide.
+export const RESUBSCRIBE_DELAYS_MS = [1_000, 5_000, 15_000] as const
+
+/** Resource-scoped Convex errors that kill ONE subscription, not the whole
+ *  transport (KAI-438 C1). Retrying them re-issues identical args and burns
+ *  the backoff into a false "schema drift" disable. */
+const SUBSCRIPTION_RETIRE_CODES = new Set([
+  'NOT_SUBSCRIBED_TO_CHANNEL',
+  'TOPIC_NOT_FOUND',
+  'CHANNEL_NOT_FOUND',
+  'ORG_MISMATCH',
+])
+
+/**
  * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
  * so the backend can distinguish a live registration from a dead one
  * (KAI-515). The mutation was already wired into `Refs` but never called;
@@ -248,11 +278,20 @@ class BoundedIdSet {
  * ids are Convex `Id<'topics'>` strings (base32-ish). `hasTopic` uses
  * that shape distinction to dispatch topic-addressed tools.
  *
- * Graceful degradation: on a `FunctionNotFoundError` or 3+ failed
- * operations within `DEGRADATION_WINDOW_MS` we set `enabled = false`
- * and record the reason. Callers in `server.ts` check `enabled`
- * before dispatching. The transport does NOT auto-recover; a session
- * restart or successful `authenticate` is required.
+ * Graceful degradation, one-shot ops (`registerFailure`): on a
+ * `FunctionNotFoundError` or 3+ failed operations within
+ * `DEGRADATION_WINDOW_MS` we set `enabled = false` and record the reason.
+ * Callers in `server.ts` check `enabled` before dispatching.
+ *
+ * Long-lived subscriptions (`subscribeResilient`) do NOT use that
+ * classifier. A subscription's `onError` fires once and kills only that
+ * subscription, and production masks the error, so there is nothing
+ * reliable to classify — the transport replaces the subscription and lets
+ * the outcome do the discriminating. See `subscribeResilient` (KAI-438).
+ * Only exhausted re-subscribes degrade the transport from that path.
+ *
+ * Neither path auto-recovers once `enabled` is false; a session restart or
+ * successful `authenticate` is required.
  */
 export class RemoteTransport implements Transport {
   readonly source: string
@@ -263,6 +302,14 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /**
+   * I1 (KAI-438): surface in-flight reconnects and lifetime replacement
+   * count so whoami can distinguish "never wrong" from "flapping" without
+   * changing the flap-forever retry policy (product decision — see
+   * cc40-product-decisions.md / sibling KAI-438-degradation-policy).
+   */
+  private reconnectingSubscriptions = 0
+  private subscriptionReplacements = 0
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -328,6 +375,14 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /** Live subscription-replacement stats for whoami (KAI-438 I1). */
+  get subscriptionHealth(): { reconnecting: boolean; replacements: number } {
+    return {
+      reconnecting: this.reconnectingSubscriptions > 0,
+      replacements: this.subscriptionReplacements,
+    }
   }
 
   /**
@@ -921,48 +976,53 @@ export class RemoteTransport implements Transport {
     onEvent: (msg: ParsedMessage) => void,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
-    // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
-    // cursor: the backend returns messages strictly after it. `topicMaxTs`
-    // is primed (via primeTopicCursor) to the last history ts already shown
-    // to the user on join, so that boundary message is not replayed. The
-    // `_id` dedup below still guards against the same row appearing in
-    // successive onUpdate batches within one subscription.
-    const startingTs = this.topicMaxTs.get(args.topicId)
-    const baseArgs: Record<string, unknown> =
-      startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
-    const queryArgs = this.orgScopedArgs(baseArgs)
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
-    const ownSessionId = this.sessionId
-    const rawUnsubscribe = this.client.onUpdate(
-      fn<'query'>(this.refs.messages.queries.listByTopic),
-      queryArgs,
-      (rows) => {
-        const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
-        for (const row of arr) {
-          if (seen.has(row._id)) continue
-          seen.add(row._id)
-          const prior = this.topicMaxTs.get(args.topicId) ?? 0
-          if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
-          // Skip self-echo: messages this session just sent shouldn't push
-          // back into our own Claude. The cursor advance above still
-          // happens so the next reconnect doesn't re-deliver our own row.
-          // Mirrors the local broker's `isExactSelf` drop.
-          if (row.fromSessionId === ownSessionId) continue
-          onEvent({
-            sender: row.fromSessionId,
-            text: row.text,
-            ts: new Date(row.ts).toISOString(),
-            channel: args.channelName,
-            channelName: args.channelName,
-            threadTs: args.topicId,
-          })
-        }
-      },
-      (err) => {
-        this.registerSubscriptionFailure('subscribeTopicMessages', err)
-      },
-    )
-    return this.trackUnsubscribe(() => rawUnsubscribe())
+    return this.subscribeResilient('subscribeTopicMessages', ({ onHealthy, onError }) => {
+      // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
+      // cursor: the backend returns messages strictly after it. `topicMaxTs`
+      // is primed (via primeTopicCursor) to the last history ts already shown
+      // to the user on join, so that boundary message is not replayed. The
+      // `_id` dedup below still guards against the same row appearing in
+      // successive onUpdate batches within one subscription.
+      //
+      // Read inside the attempt, not outside: an automatic re-subscribe must
+      // resume from the watermark reached by the subscription it replaces.
+      const startingTs = this.topicMaxTs.get(args.topicId)
+      const baseArgs: Record<string, unknown> =
+        startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
+      const queryArgs = this.orgScopedArgs(baseArgs)
+      // S6: re-read sessionId every attempt so a pre-introduce subscribe
+      // does not freeze ownSessionId === null across every replacement.
+      const ownSessionId = this.sessionId
+      return this.client.onUpdate(
+        fn<'query'>(this.refs.messages.queries.listByTopic),
+        queryArgs,
+        (rows) => {
+          onHealthy()
+          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+          for (const row of arr) {
+            if (seen.has(row._id)) continue
+            seen.add(row._id)
+            const prior = this.topicMaxTs.get(args.topicId) ?? 0
+            if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
+            // Skip self-echo: messages this session just sent shouldn't push
+            // back into our own Claude. The cursor advance above still
+            // happens so the next reconnect doesn't re-deliver our own row.
+            // Mirrors the local broker's `isExactSelf` drop.
+            if (row.fromSessionId === ownSessionId) continue
+            onEvent({
+              sender: row.fromSessionId,
+              text: row.text,
+              ts: new Date(row.ts).toISOString(),
+              channel: args.channelName,
+              channelName: args.channelName,
+              threadTs: args.topicId,
+            })
+          }
+        },
+        onError,
+      )
+    })
   }
 
   /**
@@ -977,9 +1037,22 @@ export class RemoteTransport implements Transport {
    * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  subscribeChannelMessages(
+    args: {
+      channelName: string
+      /**
+       * C3: called when the async listAll lookup finds no matching channel
+       * (or the lookup itself fails). ensureChannelSubscription uses this
+       * to drop its map entry so the next call retries instead of caching
+       * a permanent no-op as "subscribed".
+       */
+      onLookupMiss?: (channelName: string) => void
+    },
+    onEvent: (msg: ParsedMessage) => void,
+  ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
+    const onChannelLookupMiss = args.onLookupMiss
 
     // Resolve the channel id. If we have it cached from a prior
     // joinChannel, use it synchronously; otherwise kick off an async
@@ -991,75 +1064,79 @@ export class RemoteTransport implements Transport {
 
     const register = (channelId: string): void => {
       if (unsubscribed) return
-      const sessionId = this.sessionId
-      // Without a sessionId we can't use the server-side cursor; fall
-      // back to no filtering. Practically attachLocation introduces
-      // before subscribing, so sessionId is always set here - but we
-      // don't want to hard-fail if the order is ever violated.
-      const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
-        sessionId !== null ? { channelId, sessionId } : { channelId }
-      // Narrow the initial reactive batch past the channel's join-time
-      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
-      // this callback). An explicit `sinceTs` overrides the server-side
-      // read cursor, so a first-ever join — which has no cursor yet — does
-      // not replay the channel's whole broadcast history.
-      const startingTs = this.channelMaxTs.get(channelId)
-      if (startingTs !== undefined) queryArgs.sinceTs = startingTs
-      innerUnsubscribe = this.client.onUpdate(
-        fn<'query'>(this.refs.messages.queries.listByChannel),
-        queryArgs,
-        (rows) => {
-          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
-          let highestTsInBatch = 0
-          for (const row of arr) {
-            if (seen.has(row._id)) continue
-            seen.add(row._id)
-            const prior = this.channelMaxTs.get(channelId) ?? 0
-            if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
-            if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
-            // Skip self-echo: own broadcasts shouldn't push back to our
-            // own Claude. Cursor + ack advance above still happens so
-            // we don't re-deliver our own row on reconnect. Mirrors the
-            // local broker's self-broadcast drop.
-            if (sessionId !== null && row.fromSessionId === sessionId) continue
-            onEvent({
-              sender: row.fromSessionId,
-              text: row.text,
-              ts: new Date(row.ts).toISOString(),
-              channel: args.channelName,
-              channelName: args.channelName,
-              threadTs: undefined,
-            })
-          }
-          // Ack the batch's highest ts so subsequent subscribes (incl.
-          // MCP restarts) skip re-delivering it. Fire-and-forget; a
-          // failure here is non-fatal - the NEXT successful ack bumps
-          // the cursor to cover this batch's ts too (acks are monotonic
-          // and idempotent).
-          //
-          // Critically: ack failures MUST NOT trip the degradation
-          // circuit. A transient UNAUTHENTICATED during auth-refresh or
-          // a server hiccup on a fire-and-forget call would otherwise
-          // kill the whole transport for the session. The reactive
-          // listByChannel subscription's own error path still degrades
-          // on persistent failure, which is the right signal.
-          if (highestTsInBatch > 0 && sessionId !== null) {
-            void this.client
-              .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
-                sessionId,
-                channelId,
-                ts: highestTsInBatch,
+      innerUnsubscribe = this.subscribeResilient('subscribeChannelMessages', ({ onHealthy, onError }) => {
+        const sessionId = this.sessionId
+        // Without a sessionId we can't use the server-side cursor; fall
+        // back to no filtering. Practically attachLocation introduces
+        // before subscribing, so sessionId is always set here - but we
+        // don't want to hard-fail if the order is ever violated.
+        const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
+          sessionId !== null ? { channelId, sessionId } : { channelId }
+        // Narrow the initial reactive batch past the channel's join-time
+        // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
+        // this callback). An explicit `sinceTs` overrides the server-side
+        // read cursor, so a first-ever join — which has no cursor yet — does
+        // not replay the channel's whole broadcast history.
+        //
+        // Read inside the attempt, not outside: an automatic re-subscribe
+        // must resume from the watermark reached by the one it replaces.
+        const startingTs = this.channelMaxTs.get(channelId)
+        if (startingTs !== undefined) queryArgs.sinceTs = startingTs
+        return this.client.onUpdate(
+          fn<'query'>(this.refs.messages.queries.listByChannel),
+          queryArgs,
+          (rows) => {
+            onHealthy()
+            const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+            let highestTsInBatch = 0
+            for (const row of arr) {
+              if (seen.has(row._id)) continue
+              seen.add(row._id)
+              const prior = this.channelMaxTs.get(channelId) ?? 0
+              if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
+              if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
+              // Skip self-echo: own broadcasts shouldn't push back to our
+              // own Claude. Cursor + ack advance above still happens so
+              // we don't re-deliver our own row on reconnect. Mirrors the
+              // local broker's self-broadcast drop.
+              if (sessionId !== null && row.fromSessionId === sessionId) continue
+              onEvent({
+                sender: row.fromSessionId,
+                text: row.text,
+                ts: new Date(row.ts).toISOString(),
+                channel: args.channelName,
+                channelName: args.channelName,
+                threadTs: undefined,
               })
-              .catch((err: unknown) => {
-                const msg = err instanceof Error ? err.message : String(err)
-                this.log(`ackChannel failed (non-fatal, cursor will advance on next ack): ${msg}`)
-              })
-          }
-        },
-        (err) => {
-          this.registerSubscriptionFailure('subscribeChannelMessages', err)
-        },
-      )
+            }
+            // Ack the batch's highest ts so subsequent subscribes (incl.
+            // MCP restarts) skip re-delivering it. Fire-and-forget; a
+            // failure here is non-fatal - the NEXT successful ack bumps
+            // the cursor to cover this batch's ts too (acks are monotonic
+            // and idempotent).
+            //
+            // Critically: ack failures MUST NOT trip the degradation
+            // circuit. A transient UNAUTHENTICATED during auth-refresh or
+            // a server hiccup on a fire-and-forget call would otherwise
+            // kill the whole transport for the session. The reactive
+            // listByChannel subscription's own error path still surfaces a
+            // persistent failure, which is the right signal.
+            if (highestTsInBatch > 0 && sessionId !== null) {
+              void this.client
+                .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
+                  sessionId,
+                  channelId,
+                  ts: highestTsInBatch,
+                })
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err)
+                  this.log(`ackChannel failed (non-fatal, cursor will advance on next ack): ${msg}`)
+                })
+            }
+          },
+          onError,
+        )
+      })
     }
 
     const cached = this.channelIdsByName.get(args.channelName)
@@ -1079,9 +1156,19 @@ export class RemoteTransport implements Transport {
           if (match !== undefined) {
             this.channelIdsByName.set(args.channelName, match.channelId)
             register(match.channelId)
+          } else {
+            // C3 (KAI-438): lookup succeeded but the channel is missing
+            // (renamed, revoked, or org-scoped out). Falling off the if
+            // used to leave no subscription, no log, and a permanent map
+            // entry in ensureChannelSubscription that never retried.
+            this.log(
+              `subscribeChannelMessages: channel "${args.channelName}" not found on backend — no live feed opened`,
+            )
+            onChannelLookupMiss?.(args.channelName)
           }
         } catch (err) {
           this.registerFailure('subscribeChannelMessages.lookup', err)
+          onChannelLookupMiss?.(args.channelName)
         }
       })()
     }
@@ -1170,37 +1257,155 @@ export class RemoteTransport implements Transport {
   // ─── internals ────────────────────────────────────────────────────────
 
   /**
-   * Register a transient failure from a long-lived reactive subscription
-   * error callback. Unlike `registerFailure`, this variant does NOT
-   * immediately disable the transport on UNAUTHENTICATED because the
-   * underlying `ConvexClient` routinely retries with a refreshed token
-   * during the auth handshake window at startup. Only
-   * function-not-found (structural schema drift) and the sustained
-   * count-in-window path trip the breaker here.
+   * Register a reactive subscription that survives its own error callback.
+   *
+   * A Convex subscription's `onError` fires at most ONCE, and the
+   * subscription is dead afterwards — it never recovers by itself
+   * (verified live against production, KAI-438). An error is therefore
+   * terminal FOR THAT SUBSCRIPTION whatever caused it, and leaving the
+   * dead handle in place means the session goes silent while `enabled`
+   * still cheerfully reports `true`.
+   *
+   * We deliberately do NOT classify the error. Production masks every
+   * backend error to a generic `[CONVEX Q(...)] Server Error`, so a
+   * matcher either misses it (exactly the KAI-438 defect: the old strict
+   * branch could not fire in production) or, if widened to catch it,
+   * matches every backend hiccup and disables the transport on noise.
+   * Instead we discriminate BY EXPERIMENT, in the spirit of KAI-401:
+   * replace the subscription and see what happens.
+   *
+   *   - transient fault  → the replacement streams fine; `onHealthy`
+   *                        resets the counter and nothing is disabled.
+   *   - structural drift → every replacement errors too; once the backoff
+   *                        schedule is exhausted we disable with a reason
+   *                        that names schema drift.
+   *
+   * `open` is re-invoked per attempt rather than reused, so each
+   * replacement re-reads the advanced cursor and resumes from the
+   * watermark instead of replaying history.
    */
-  private registerSubscriptionFailure(op: string, err: unknown): void {
-    const msg = err instanceof Error ? err.message : String(err)
-    this.log(`subscription ${op} error (transient): ${msg}`)
-    if (isFunctionNotFoundError(err)) {
-      this.enabled = false
-      this.degradationReason = `Remote sync disabled: function not found on deployment (${msg})`
-      this.log(this.degradationReason)
-      return
+  private subscribeResilient(
+    op: string,
+    open: (hooks: { onHealthy: () => void; onError: (err: unknown) => void }) => (() => void) | null,
+  ): () => void {
+    let inner: (() => void) | null = null
+    let disposed = false
+    let failures = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    // S5 / I3: each attempt gets a generation; stale onError/onHealthy
+    // from a superseded subscription must not tear down its replacement
+    // or double-schedule timers.
+    let generation = 0
+
+    const closeInner = (): void => {
+      if (inner === null) return
+      try {
+        inner()
+      } catch (err) {
+        // S1: same signal trackUnsubscribe logs — empty catch hid dual-stream.
+        this.log(`unsubscribe failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      inner = null
     }
-    // Intentionally NOT tripping on isAuthError: a single
-    // UNAUTHENTICATED during startup auth-refresh must not kill the
-    // whole transport. Persistent auth failures still surface via the
-    // mutation/query paths which use `registerFailure`.
-    const now = Date.now()
-    this.recentFailures.push(now)
-    while (this.recentFailures.length > 0 && now - this.recentFailures[0]! > DEGRADATION_WINDOW_MS) {
-      this.recentFailures.shift()
+
+    const attempt = (): void => {
+      timer = null
+      if (disposed || this.shutdownStarted || !this.enabled) return
+      // Clear reconnecting flag for the timer that just fired.
+      if (this.reconnectingSubscriptions > 0) this.reconnectingSubscriptions -= 1
+      const gen = ++generation
+      // Tear down any prior handle before open so two streams cannot share a feed (I3).
+      closeInner()
+      const handle = open({
+        onHealthy: () => {
+          if (gen !== generation) return
+          onHealthy()
+        },
+        onError: (err) => {
+          if (gen !== generation) return
+          onError(err)
+        },
+      })
+      // S4: null open is a permanently blind subscription if ignored.
+      if (handle == null) {
+        this.log(`subscription ${op}: open() returned no handle — treating as error`)
+        onError(new Error(`${op}: open returned null`))
+        return
+      }
+      inner = handle
     }
-    if (this.recentFailures.length >= DEGRADATION_THRESHOLD) {
-      this.enabled = false
-      this.degradationReason = `Remote sync disabled: ${this.recentFailures.length} subscription failures within ${DEGRADATION_WINDOW_MS}ms (last: ${msg})`
-      this.log(this.degradationReason)
+
+    const onHealthy = (): void => {
+      // Delivery proves this subscription works, so the earlier fault was
+      // transient: don't hold consecutive failures against the next one.
+      // (Policy: alternating recover-cycles never disable — product decision.)
+      failures = 0
     }
+
+    const onError = (err: unknown): void => {
+      // I3/S5: invalidate sibling callbacks from this attempt immediately so a
+      // second onError cannot double-schedule (and so a stale onHealthy cannot
+      // clear failures on a replacement that has not delivered yet).
+      generation += 1
+      const msg = err instanceof Error ? err.message : String(err)
+      // Dead, not transient. Drop the handle before replacing it so we
+      // never run two streams over the same feed.
+      closeInner()
+
+      // C1: resource-scoped application errors kill THIS subscription only.
+      // Retrying re-issues identical args forever and falsely blames schema drift.
+      const code = extractConvexErrorCode(err)
+      if (code !== null && SUBSCRIPTION_RETIRE_CODES.has(code)) {
+        disposed = true
+        this.log(`subscription ${op} retired (resource error ${code}) — not retrying, transport stays enabled: ${msg}`)
+        return
+      }
+
+      // S3: log even when the transport is already disabled so sibling
+      // feeds' deaths are visible after the first disable.
+      if (disposed || this.shutdownStarted || !this.enabled) {
+        this.log(`subscription ${op} died while transport inactive: ${msg}`)
+        return
+      }
+
+      const delay = RESUBSCRIBE_DELAYS_MS[failures]
+      failures += 1
+      this.subscriptionReplacements += 1
+      if (delay === undefined) {
+        this.enabled = false
+        // S2: report schedule length (3), not the post-increment failures (4).
+        const attempted = RESUBSCRIBE_DELAYS_MS.length
+        this.degradationReason =
+          `Remote sync disabled: subscription ${op} died and ${attempted} consecutive re-subscribes failed — ` +
+          `the backend function is likely missing or renamed (schema drift), or the deployment is ` +
+          `unreachable. Restart the session once the deployment is confirmed. (last: ${msg})`
+        this.log(this.degradationReason)
+        return
+      }
+      this.log(
+        `subscription ${op} died (a Convex subscription does not recover; replacing it) — ` +
+          `re-subscribe attempt ${failures}/${RESUBSCRIBE_DELAYS_MS.length} in ${delay}ms: ${msg}`,
+      )
+      // I1: mark reconnecting while a replacement is scheduled.
+      this.reconnectingSubscriptions += 1
+      if (timer !== null) clearTimeout(timer)
+      timer = setTimeout(attempt, delay)
+      // Never hold the event loop open just to retry a subscription.
+      timer.unref?.()
+    }
+
+    attempt()
+
+    return this.trackUnsubscribe(() => {
+      disposed = true
+      generation += 1 // invalidate in-flight callbacks
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+        if (this.reconnectingSubscriptions > 0) this.reconnectingSubscriptions -= 1
+      }
+      closeInner()
+    })
   }
 
   private registerFailure(op: string, err: unknown): void {
