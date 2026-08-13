@@ -1254,6 +1254,55 @@ describe('Identity Tools', () => {
           expect(JSON.parse(result).name).toBe('bootstrap')
         })
 
+        /**
+         * cc#32 FINDING-32c, carried across the KAI-408 merge and rewritten for
+         * this branch's API. I7's guard — `name.trim() === ''` is refused before
+         * anything runs — had no test: deleting it left the base branch green.
+         * An empty name is a valid zod string and a destructive migration key:
+         * `renamed` goes true against any real previous name, which makes
+         * `migrating` true, which suspends every remote feed, leaves every
+         * channel and topic under the old identity, and rebinds the backend row
+         * to the empty-string session name. A templating slip in an agent prompt
+         * is enough to reach it.
+         *
+         * KAI-418 owns subscriptions inside the transport, so the deps carry no
+         * unsubscribe maps and the ensure helpers take no location or map. Same
+         * assertions, this branch's shapes — a straight copy of the base's test
+         * would pass vitest and fail tsc on the removed props.
+         */
+        it('I7: an empty name is refused before any migration runs', async () => {
+          const calls: RecordedCall[] = []
+          const transport = makeRecordingRemoteTransport('remote', calls)
+          const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+          const deps: IdentityToolDeps = {
+            session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+            context: new ActiveContext(),
+            router: new TransportRouter([transport]),
+            messageBus,
+          }
+          deps.session.setName('worker')
+          deps.context.joinChannel('kai', 'cccollab.json', 'remote')
+          deps.context.joinTopic('topic_1', 'KAI-408', 'kai', 'remote')
+          await transport.introduce({ sessionName: 'worker' })
+          ensureChannelSubscription({ transport, channelName: 'kai', messageBus })
+          ensureTopicSubscription({ transport, topicId: 'topic_1', channelName: 'kai', messageBus })
+          const nameBefore = deps.session.displayName
+          calls.length = 0
+
+          for (const name of ['', '   ']) {
+            const result = JSON.parse(await handleIdentityTool('introduce', { name }, deps))
+            expect(result.error).toMatch(/non-empty/i)
+          }
+
+          // Refused BEFORE the migration, not merely reported afterwards: the
+          // teardown is the damage, and it is irreversible from the tool's side.
+          expect(calls.some((c) => c.method === 'leaveChannel')).toBe(false)
+          expect(calls.some((c) => c.method === 'leaveTopic')).toBe(false)
+          expect(calls.some((c) => c.method === 'introduce')).toBe(false)
+          expect(deps.context.getJoinedTopics().map((t) => t.threadTs)).toEqual(['topic_1'])
+          expect(deps.session.displayName).toBe(nameBefore)
+        })
+
         it('C1: failed channel re-join after org change is degraded', async () => {
           const calls: RecordedCall[] = []
           const orgs = [
