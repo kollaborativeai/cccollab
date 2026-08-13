@@ -1064,6 +1064,14 @@ describe('Identity Tools', () => {
        * REJECT rather than half-migrate.
        */
       describe('organization change', () => {
+        /** Both orgs the session moves between. A user can only introduce into
+         *  an org they belong to, so both are in their own `list_organizations`
+         *  — which is what makes the catalog readable and the change provable. */
+        const ORG_CATALOG = [
+          { id: 'org_1', name: 'Org One', slug: 'org-one' },
+          { id: 'org_2', name: 'Org Two', slug: 'org-two' },
+        ]
+
         /** A remote location with a channel and a topic joined, introduced into org_1. */
         async function remoteInOrg1(
           calls: RecordedCall[],
@@ -1072,7 +1080,18 @@ describe('Identity Tools', () => {
           deps: IdentityToolDeps
           transport: Transport
         }> {
-          const transport = makeRecordingRemoteTransport('remote', calls, opts)
+          // The org catalog a real caller has. Membership is a precondition for
+          // the backend to accept EITHER handle, so a session that can introduce
+          // into org_1 and then org_2 belongs to both and sees both here. Before
+          // cc#32 FINDING-32a these fixtures ran with an EMPTY catalog, which
+          // exercised the raw string compare canonicalization exists to replace —
+          // and is now (correctly) refused as an unreadable list.
+          //
+          // The `topicMap` / `channelMap` locals KAI-408 declared here are
+          // deliberately NOT carried over: KAI-418 removed the shared
+          // unsubscribe maps (the transport owns feed lifecycle now), and
+          // reinstating them would undo that, not merge it.
+          const transport = makeRecordingRemoteTransport('remote', calls, { ...opts, organizations: ORG_CATALOG })
           const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
@@ -1271,7 +1290,7 @@ describe('Identity Tools', () => {
           const remoteCalls: RecordedCall[] = []
           const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
           const local = makeRecordingTransport('local', localCalls)
-          const remote = makeRecordingRemoteTransport('remote', remoteCalls)
+          const remote = makeRecordingRemoteTransport('remote', remoteCalls, { organizations: ORG_CATALOG })
           const deps: IdentityToolDeps = {
             session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
             context: new ActiveContext(),

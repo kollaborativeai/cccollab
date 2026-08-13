@@ -89,6 +89,31 @@ export function canonicalizeOrganizationId(
   return handle
 }
 
+/**
+ * Did `value` come back from {@link canonicalizeOrganizationId} as an id the
+ * catalog actually holds, rather than as the caller's handle passed through
+ * unchanged?
+ *
+ * This is the difference between "these two handles name different orgs" and
+ * "I could not find out". `listOrganizations` swallows any query failure into
+ * `[]` (remote.ts) and {@link listOrgsFromRemotes} swallows it again, so an
+ * unreadable catalog is indistinguishable from "this user belongs to no
+ * organizations" - and against an empty catalog canonicalization degrades
+ * silently to the raw string compare it exists to replace (cc#32 FINDING-32a).
+ *
+ * Asks the catalog whether the PRODUCED value is a real id rather than
+ * re-implementing the match: a second matching rule here could drift from the
+ * one above, and this cannot.
+ */
+function resolvedAgainstCatalog(value: string | undefined, orgs: readonly OrgListEntry[]): boolean {
+  return value !== undefined && orgs.some((o) => o.id === value)
+}
+
+/**
+ * Collect org lists from enabled remotes (best-effort). Used only to resolve
+ * id↔slug before org-change detection and after a successful introduce so the
+ * stored binding is always a canonical id when the list is available.
+ */
 async function listOrgsFromRemotes(router: TransportRouter): Promise<OrgListEntry[]> {
   const seen = new Map<string, OrgListEntry>()
   for (const transport of router.enabled()) {
@@ -178,6 +203,11 @@ export async function handleIdentityTool(
       const orgCatalog = organization !== undefined ? await listOrgsFromRemotes(deps.router) : []
       const canonicalOrganization =
         organization !== undefined ? canonicalizeOrganizationId(organization, orgCatalog) : undefined
+      // Whether the catalog could actually vouch for the requested handle.
+      // False means the read was degraded (or the handle is foreign) - see
+      // `resolvedAgainstCatalog`. Both the migration decision and the stored
+      // binding are gated on it below.
+      const requestedIsCanonical = resolvedAgainstCatalog(canonicalOrganization, orgCatalog)
 
       // Locations whose org REALLY changed (previous binding known and different)
       // — foreign-org topic ids must be DROPPED. Separate from first-binding:
@@ -213,7 +243,24 @@ export async function handleIdentityTool(
           if (previousCanonical === undefined) {
             firstOrgBindingLocations.add(location)
           } else if (previousCanonical !== canonicalOrganization) {
-            orgChangedLocations.add(location)
+            // "Different" is only a FACT when the catalog resolved both sides.
+            // If either is just the caller's handle passed through - an
+            // unreadable org list, a partial merge across remotes - then we do
+            // not know whether these two spellings name the same org, and an
+            // unknown must never authorize the destructive branch: teardown,
+            // leave-under-previous-name, and every joined topic dropped. Fail
+            // closed on the DESTRUCTIVE action, not on the operation: introduce
+            // itself still goes through and the backend still rebinds the row
+            // (cc#32 FINDING-32a).
+            if (requestedIsCanonical && resolvedAgainstCatalog(previousCanonical, orgCatalog)) {
+              orgChangedLocations.add(location)
+            } else {
+              process.stderr.write(
+                `[cccollab] identity: cannot tell whether "${previousOrg ?? ''}" and "${organization ?? ''}" ` +
+                  `name the same organization at "${location}" - the organization list was unreadable. ` +
+                  `Skipping migration rather than dropping topics on a guess.\n`,
+              )
+            }
           }
         }
       }
@@ -295,7 +342,26 @@ export async function handleIdentityTool(
           // local topics. Store the CANONICAL id so a later introduce with the
           // other spelling of the same org is not a change.
           if (canonicalOrganization !== undefined && transport.source !== LOCAL_LOCATION) {
-            deps.session.setOrganizationFor(transport.source, canonicalOrganization)
+            // Store the CANONICAL id, never the raw slug/id argument, so a later
+            // introduce with the other spelling of the same org is not a change.
+            //
+            // When the catalog could not resolve the handle, `canonicalOrganization`
+            // IS the raw argument, so writing it here replaces a good binding with a
+            // spelling that only compares equal to itself. A clean introduce later
+            // re-resolves it, so this does not corrupt anything permanently - but for
+            // as long as the outage lasts, the next introduce naming the org the other
+            // way round compares unequal and tears the session down a SECOND time,
+            // where an untouched binding would have compared equal and done nothing
+            // (cc#32 FINDING-32a).
+            //
+            // Only ever DECLINE TO OVERWRITE. A location with nothing recorded yet
+            // still gets the handle: refusing would leave `previousOrg` undefined, and
+            // the first-bind arm above would re-fire on every introduce for the life
+            // of the outage.
+            const alreadyBound = deps.session.getOrganizationFor(transport.source)
+            if (requestedIsCanonical || alreadyBound === undefined) {
+              deps.session.setOrganizationFor(transport.source, canonicalOrganization)
+            }
           }
         } catch {
           failed.push(transport.source)
