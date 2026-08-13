@@ -230,14 +230,15 @@ export class LocalTransport implements Transport {
     if (!this.registrationToken) {
       throw new Error('Not registered with the local broker yet - call introduce first.')
     }
-    const params = new URLSearchParams({
-      asId: this.requireId(),
-      token: this.registrationToken,
-    })
+    // The hold-token goes in an Authorization header, not the query string —
+    // a capability secret in a URL is the thing most likely to be logged or
+    // echoed. Matches `deregisterSession` below (cc#66 review).
+    const params = new URLSearchParams({ asId: this.requireId() })
     if (args.limit !== undefined) params.set('limit', String(args.limit))
     if (args.before !== undefined) params.set('before', String(args.before))
     const data = await this.brokerGet<{ messages: TransportDmMessage[]; hasMore: boolean }>(
       `/sessions/${encodeURIComponent(args.withSessionId)}/dm?${params.toString()}`,
+      { Authorization: `Bearer ${this.registrationToken}` },
     )
     return {
       messages: data.messages,
@@ -311,8 +312,8 @@ export class LocalTransport implements Transport {
     return `http://127.0.0.1:${this.brokerPort}`
   }
 
-  private async brokerGet<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.base()}${path}`)
+  private async brokerGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
+    const res = await fetch(`${this.base()}${path}`, headers ? { headers } : undefined)
     if (!res.ok) throw new Error(`Broker ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
   }

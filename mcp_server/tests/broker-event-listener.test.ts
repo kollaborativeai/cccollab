@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import http from 'node:http'
 import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
@@ -6,6 +7,57 @@ import { ActiveContext } from '../src/context.js'
 function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
 }
+
+describe('cc#43: the hold-token never travels in a URL', () => {
+  // The hold-token is a capability: it authorizes DM send, DM read,
+  // re-registration and deletion. In a query string it lands in the connect
+  // line this listener appends to ~/.cccollab/logs/debug.log, and in anything
+  // else that captures a URL. The broker's `extractHoldToken` accepts
+  // Authorization: Bearer, so the header costs nothing.
+  const SECRET = 'hold-tok-SECRETVALUE123'
+
+  function startAndCapture() {
+    const captured: { url?: string; headers?: Record<string, string> } = {}
+    const spy = vi.spyOn(http, 'get').mockImplementation(((url: string, opts: unknown) => {
+      captured.url = String(url)
+      captured.headers = (opts as { headers?: Record<string, string> })?.headers
+      return { on: () => {}, destroy: () => {}, setTimeout: () => {} } as unknown as http.ClientRequest
+    }) as unknown as typeof http.get)
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const listener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+      sessionId: () => 'id-us',
+      sessionToken: () => SECRET,
+    })
+    void listener.start()
+    spy.mockRestore()
+    return captured
+  }
+
+  it('puts the token in an Authorization header, not the query string', () => {
+    const captured = startAndCapture()
+    expect(captured.url).not.toContain(SECRET)
+    expect(captured.headers?.Authorization).toBe(`Bearer ${SECRET}`)
+  })
+
+  it('does not write the token into the debug log', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { CCCOLLAB_LOGS_DIR } = await import('../src/constants.js')
+    const logFile = join(CCCOLLAB_LOGS_DIR, 'debug.log')
+    const before = existsSync(logFile) ? readFileSync(logFile, 'utf-8').length : 0
+
+    startAndCapture()
+
+    const after = existsSync(logFile) ? readFileSync(logFile, 'utf-8').slice(before) : ''
+    expect(after).not.toContain(SECRET)
+  })
+})
 
 describe('BrokerEventListener (channel-aware)', () => {
   let listener: BrokerEventListener

@@ -106,12 +106,22 @@ export class BrokerEventListener {
     if (this.stopped) return
 
     // cc#43 C1: tag SSE with hold-token, not free sessionId.
+    //
+    // The token travels in an Authorization header, never the URL. A query
+    // parameter puts a capability secret — it authorizes DM send, DM read,
+    // re-registration and deletion — into the component most likely to be
+    // logged, echoed in an error, or captured by tooling, and the connect
+    // line below writes exactly that string to stderr, which lands in the
+    // session transcript. The broker reads Bearer, ?token= or body.token
+    // via `extractHoldToken`, so the header alone is sufficient (cc#66 review).
     this.taggedToken = this.getSessionToken()
-    const qs = this.taggedToken ? `?token=${encodeURIComponent(this.taggedToken)}` : ''
-    const url = `${this.brokerUrl}/events${qs}`
-    this.log(`Connecting to broker at ${url}`)
+    const url = `${this.brokerUrl}/events`
+    this.log(`Connecting to broker at ${url} (tagged: ${this.taggedToken ? 'yes' : 'no'})`)
 
-    const req = http.get(url, { headers: { Accept: 'text/event-stream' } }, (res) => {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' }
+    if (this.taggedToken) headers.Authorization = `Bearer ${this.taggedToken}`
+
+    const req = http.get(url, { headers }, (res) => {
       let buffer = ''
 
       res.on('data', (chunk: Buffer) => {

@@ -682,5 +682,8 @@ describe('Broker: direct messages (send_message_to_session)', () => {
     // Oldest dropped was msg-0; newest is msg-500.
     expect(all.some((m) => m.text === 'msg-0')).toBe(false)
     expect(all.some((m) => m.text === `msg-${CAP}`)).toBe(true)
-  })
+    // 501 sends plus the paged reads, against vitest's 5 s default. This has
+    // headroom rather than a real budget: a red gate nobody trusts is how a
+    // genuine failure hides (cc#66 review).
+  }, 30_000)
 })
