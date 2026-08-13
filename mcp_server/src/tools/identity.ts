@@ -1,12 +1,17 @@
 import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
-import type { SessionManager } from '../session.js'
+import { mergeIdentity, type SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
 import { LOCAL_LOCATION, type SessionIdentity, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
-import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import {
+  attachLocation,
+  ensureChannelSubscription,
+  ensureTopicSubscription,
+  type AttachCtx,
+} from '../transport/attach.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 import { driftWarning, type VersionState } from '../plugin-version.js'
@@ -96,20 +101,27 @@ export async function handleIdentityTool(
 
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
+      // KAI-401: bind the org the session is acting as before introduce fans out.
       deps.session.setOrganizationId(organization)
-      // Omitting `identity` keeps the declared one — the same rule the
-      // broker already applies to this field (`body.identity ?? existing`).
-      // Empty `{}` is treated as undeclared (S1) and does not wipe a prior
-      // declaration either.
+      // KAI-415: MERGE, never replace. The session already carries an env-derived
+      // identity (`identityFromEnv` at startup), and its `sessionId` is the key
+      // everything in KAI-415 is filed under. A self-declaration is a partial
+      // statement — `introduce({identity: {repo}})` must not erase the sessionId
+      // and silently disable restore for the rest of the session. Declared fields
+      // still win; omitted ones fall through. Empty `{}` is treated as undeclared
+      // (KAI-401 S1) and does not wipe a prior declaration either.
       if (identity !== undefined && Object.keys(identity).length > 0) {
-        deps.session.setIdentity(identity)
+        const merged = mergeIdentity(deps.session.getIdentity(), identity)
+        deps.session.setIdentity(merged)
       }
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`.
       // The payload comes off the session rather than being reassembled
       // here, so a location attached later re-sends this exact object
-      // (see `SessionManager.introduceArgs`).
+      // (see `SessionManager.introduceArgs`). KAI-401: use introduceArgs() so
+      // organization + merged identity travel as one payload; surface
+      // identityRejected per location instead of silent swallow.
       const introduceArgs = deps.session.introduceArgs()
       const transportResults: Record<string, { ok: boolean; error?: string; identityRejected?: string }> = {}
       let anyOk = false
@@ -132,12 +144,47 @@ export async function handleIdentityTool(
 
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name.
+      // I1 (KAI-415): also re-join topics under the new name and open remote
+      // feeds — restore may have seated them under the pre-introduce display
+      // name (often the OS username).
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
           const transport = deps.router.get(ch.location)
           await transport.joinChannel({ sessionName: displayName, channel: ch.name })
-        } catch {
-          // Non-fatal.
+          if (deps.messageBus && deps.remoteChannelUnsubscribes) {
+            ensureChannelSubscription({
+              transport,
+              locationName: ch.location,
+              channelName: ch.name,
+              messageBus: deps.messageBus,
+              map: deps.remoteChannelUnsubscribes,
+            })
+          }
+        } catch (err) {
+          // I4: log re-join failures after restore rather than silent success.
+          console.error(
+            `[cccollab] introduce re-join channel "${ch.name}" at "${ch.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+      }
+      for (const topic of deps.context.getJoinedTopics()) {
+        try {
+          const transport = deps.router.get(topic.location)
+          await transport.joinTopic({ sessionName: displayName, topicId: topic.threadTs })
+          if (deps.messageBus && deps.remoteTopicUnsubscribes) {
+            ensureTopicSubscription({
+              transport,
+              locationName: topic.location,
+              topicId: topic.threadTs,
+              channelName: topic.channel,
+              messageBus: deps.messageBus,
+              map: deps.remoteTopicUnsubscribes,
+            })
+          }
+        } catch (err) {
+          console.error(
+            `[cccollab] introduce re-join topic "${topic.topicName}" (${topic.threadTs}) at "${topic.location}" failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
       }
 
@@ -375,7 +422,7 @@ async function handleAuthenticate(
       clientId: locationInfo.clerkClientId,
       redirectPort: locationInfo.clerkRedirectPort,
     })
-    saveLocationAuth(targetName, {
+    await saveLocationAuth(targetName, {
       authType: 'clerk',
       url,
       accessToken: tokens.accessToken,

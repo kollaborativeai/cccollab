@@ -82,6 +82,11 @@ export function makeClerkAuthFetcher(
 
     inFlight = (async () => {
       try {
+        // Outer try wraps the whole lock section, not only refreshAccessToken:
+        // an acquireLock timeout used to reject the auth callback instead of
+        // returning null (documented contract at the top of this function),
+        // and the inner bare catch discarded TimeoutError with no log —
+        // defeating KAI-417's claim that a bounded fetch is "loud" (cc#33).
         return await withConfigLock(async (persist) => {
           // Peer-process detection: if disk has a newer ID token that's
           // still fresh, adopt it instead of issuing a refresh. This avoids
@@ -109,36 +114,36 @@ export function makeClerkAuthFetcher(
             return null
           }
 
-          try {
-            const next = await refreshAccessToken({
-              issuer: clerkIssuer,
-              clientId: clerkClientId,
-              refreshToken: currentRefreshToken,
-              fallbackIdToken: currentIdToken,
-            })
-            currentIdToken = next.idToken
-            currentRefreshToken = next.refreshToken
-            currentExpiresAt = next.accessTokenExpiresAt
-            persist(init.locationName, {
-              authType: 'clerk',
-              url: init.url,
-              accessToken: next.accessToken,
-              refreshToken: next.refreshToken,
-              idToken: next.idToken,
-              accessTokenExpiresAt: next.accessTokenExpiresAt,
-              userEmail: init.userEmail,
-              userId: init.userId,
-              updatedAt: Date.now(),
-            })
-            return next.idToken
-          } catch {
-            // Refresh call failed (network, invalid_grant, etc).
-            // Clear the in-memory ID token; surface null so the SDK flips
-            // to unauthenticated. The user can re-run `authenticate`.
-            currentIdToken = ''
-            return null
-          }
+          const next = await refreshAccessToken({
+            issuer: clerkIssuer,
+            clientId: clerkClientId,
+            refreshToken: currentRefreshToken,
+            fallbackIdToken: currentIdToken,
+          })
+          currentIdToken = next.idToken
+          currentRefreshToken = next.refreshToken
+          currentExpiresAt = next.accessTokenExpiresAt
+          persist(init.locationName, {
+            authType: 'clerk',
+            url: init.url,
+            accessToken: next.accessToken,
+            refreshToken: next.refreshToken,
+            idToken: next.idToken,
+            accessTokenExpiresAt: next.accessTokenExpiresAt,
+            userEmail: init.userEmail,
+            userId: init.userId,
+            updatedAt: Date.now(),
+          })
+          return next.idToken
         })
+      } catch (err) {
+        // Refresh / lock / persist failure → unauthenticated. Always log so a
+        // TimeoutError is not silent (auth-clerk claims "loud"; this is the
+        // only handler that can make that true).
+        const msg = err instanceof Error ? err.message : String(err)
+        process.stderr.write(`[cccollab.${init.locationName}] token refresh failed: ${msg}\n`)
+        currentIdToken = ''
+        return null
       } finally {
         inFlight = null
       }

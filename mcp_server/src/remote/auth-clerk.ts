@@ -133,6 +133,22 @@ export interface TokenExchangeArgs {
   codeVerifier: string
 }
 
+/**
+ * Deadline for the Clerk token endpoint calls. These are not merely slow
+ * paths — `refreshAccessToken` runs INSIDE the config lock (see
+ * `withConfigLock`), so a stalled request holds both the in-process gate
+ * (blocking every other location's fetcher and `authenticate`'s save) and
+ * the on-disk lock (timing out every other cccollab process on the
+ * machine). An unbounded fetch therefore converts one hung request into a
+ * machine-wide silent stall.
+ *
+ * Peers waiting on the lock use `LOCK_TIMEOUT_MS` from `src/file-lock.ts`,
+ * which is **derived as this value plus headroom**. This constant must stay
+ * strictly below that lock deadline — a 10 s fetch inside a 5 s lock made
+ * every slow-but-healthy refresh time out every peer (cc#33 timeout inversion).
+ */
+export const CLERK_FETCH_TIMEOUT_MS = 10_000
+
 export interface TokenSet {
   accessToken: string
   refreshToken: string
@@ -156,6 +172,7 @@ export interface TokenSet {
 export async function exchangeCodeForTokens(
   args: TokenExchangeArgs,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = CLERK_FETCH_TIMEOUT_MS,
 ): Promise<TokenSet> {
   const url = new URL('/oauth/token', args.issuer)
   assertSecureBearerUrl(url, 'Clerk /oauth/token')
@@ -170,6 +187,7 @@ export async function exchangeCodeForTokens(
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   const json = (await res.json()) as Record<string, unknown>
   if (!res.ok) {
@@ -211,6 +229,7 @@ export async function exchangeCodeForTokens(
 export async function refreshAccessToken(
   args: { issuer: string; clientId: string; refreshToken: string; fallbackIdToken?: string },
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = CLERK_FETCH_TIMEOUT_MS,
 ): Promise<TokenSet> {
   const url = new URL('/oauth/token', args.issuer)
   assertSecureBearerUrl(url, 'Clerk /oauth/token (refresh)')
@@ -224,6 +243,7 @@ export async function refreshAccessToken(
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   const json = (await res.json()) as Record<string, unknown>
   if (!res.ok) {

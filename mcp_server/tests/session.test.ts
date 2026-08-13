@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SessionManager, sessionKey } from '../src/session.js'
+import { SessionManager, sessionKey, identityFromEnv, mergeIdentity } from '../src/session.js'
 
 describe('SessionManager', () => {
   describe('session name derivation', () => {
@@ -185,6 +185,16 @@ describe('SessionManager', () => {
       const uuid = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
       expect(sessionKey({ sessionId: uuid })).toBe(uuid)
     })
+
+    // I3 (KAI-415): path-separator refuse alone is not enough — ids that
+    // pass the old blocklist but fail SAFE_SESSION_ID used to arm the
+    // writer, then throw on every save. Align with the filename allowlist.
+    it('refuses a sessionId that is not a safe filename (KAI-415 I3)', () => {
+      expect(sessionKey({ sessionId: 'foo bar' })).toBeNull()
+      expect(sessionKey({ sessionId: 'foo@bar' })).toBeNull()
+      expect(sessionKey({ sessionId: 'a:b' })).toBeNull()
+      expect(sessionKey({ sessionId: 'uuid%2ejson' })).toBeNull()
+    })
   })
 
   /**
@@ -229,6 +239,73 @@ describe('SessionManager', () => {
       sm.setIdentity(undefined)
 
       expect(sm.introduceArgs().identity).toBeUndefined()
+    })
+  })
+
+  describe('identityFromEnv (KAI-415)', () => {
+    it('reads the session UUID Claude Code exports, so persistence keys itself with no user action', () => {
+      const identity = identityFromEnv({ CLAUDE_CODE_SESSION_ID: 'uuid-from-env' }, '/projects/x', 4321)
+      expect(identity?.sessionId).toBe('uuid-from-env')
+      expect(identity?.cwd).toBe('/projects/x')
+      expect(identity?.pid).toBe(4321)
+    })
+
+    it('yields NO sessionId when the env var is unset - never an empty string that would key a file', () => {
+      const identity = identityFromEnv({}, '/projects/x', 4321)
+      expect(identity?.sessionId).toBeUndefined()
+      expect(sessionKey(identity)).toBeNull()
+    })
+
+    it('treats a blank / whitespace env var as absent rather than as a key', () => {
+      expect(sessionKey(identityFromEnv({ CLAUDE_CODE_SESSION_ID: '   ' }, '/projects/x', 1))).toBeNull()
+    })
+
+    it('trims surrounding whitespace off an otherwise valid UUID', () => {
+      expect(identityFromEnv({ CLAUDE_CODE_SESSION_ID: ' uuid-abc \n' }, '/x', 1)?.sessionId).toBe('uuid-abc')
+    })
+
+    it('omits sessionId for an unsafe CLAUDE_CODE_SESSION_ID so the writer never arms (KAI-415 I3)', () => {
+      const identity = identityFromEnv({ CLAUDE_CODE_SESSION_ID: 'foo bar' }, '/projects/x', 1)
+      expect(identity?.sessionId).toBeUndefined()
+      expect(sessionKey(identity)).toBeNull()
+      expect(identityFromEnv({ CLAUDE_CODE_SESSION_ID: '../../pwned' }, '/x', 1)?.sessionId).toBeUndefined()
+    })
+  })
+
+  describe('mergeIdentity (KAI-415)', () => {
+    const base = { sessionId: 'uuid-env', cwd: '/projects/env-cwd', pid: 111 }
+
+    it('lets a declared field override the env-derived base (KAI-401 contract preserved)', () => {
+      const merged = mergeIdentity(base, { cwd: '/projects/declared', repo: 'cccollab' })
+      expect(merged?.cwd).toBe('/projects/declared')
+      expect(merged?.repo).toBe('cccollab')
+    })
+
+    it('keeps env-derived fields the declaration omits - an introduce without sessionId must not wipe it', () => {
+      // The regression this guards: introduce({name, identity:{repo}}) blowing
+      // away the env sessionId would silently disable persistence for the session.
+      const merged = mergeIdentity(base, { repo: 'cccollab' })
+      expect(merged?.sessionId).toBe('uuid-env')
+      expect(merged?.cwd).toBe('/projects/env-cwd')
+      expect(merged?.pid).toBe(111)
+    })
+
+    it('keeps the whole base when nothing is declared at all', () => {
+      expect(mergeIdentity(base, undefined)).toEqual(base)
+    })
+
+    it('takes the declaration wholesale when there is no base', () => {
+      expect(mergeIdentity(undefined, { repo: 'cccollab' })).toEqual({ repo: 'cccollab' })
+    })
+
+    it('stays undefined when neither side has anything - no identity key on the wire (KAI-401)', () => {
+      expect(mergeIdentity(undefined, undefined)).toBeUndefined()
+      expect(mergeIdentity({}, {})).toBeUndefined()
+    })
+
+    it('ignores explicitly-undefined declared fields instead of using them to erase the base', () => {
+      const merged = mergeIdentity(base, { sessionId: undefined, repo: 'cccollab' })
+      expect(merged?.sessionId).toBe('uuid-env')
     })
   })
 

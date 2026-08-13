@@ -707,6 +707,20 @@ describe('RemoteTransport — organizations', () => {
   })
 })
 
+describe('RemoteTransport join — C3 soft no-op (KAI-415)', () => {
+  it('joinChannel throws when the remote session is not introduced', async () => {
+    const { client } = makeStubClient(async () => [])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.joinChannel({ sessionName: 'reviewer', channel: 'ops' })).rejects.toThrow(/not introduced/)
+  })
+
+  it('joinTopic throws when the remote session is not introduced', async () => {
+    const { client } = makeStubClient(async () => [])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.joinTopic({ sessionName: 'reviewer', topicId: 't1' })).rejects.toThrow(/not introduced/)
+  })
+})
+
 describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor', () => {
   it('keeps the transport enabled when ackChannel fails (fire-and-forget, non-degrading)', async () => {
     // Regression guard: earlier we caught ackChannel failures via
