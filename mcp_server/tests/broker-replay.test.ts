@@ -574,4 +574,41 @@ describe('Broker: SSE replay cursor (KAI-414)', () => {
       resumed.close()
     }
   })
+
+  // cc#35 coverage gap. The test above cannot see the digits-only guard at all:
+  // every cursor it sends carries a FOREIGN broker id, so the gap it observes
+  // comes from the previous-instance arm, and deleting the `/^\d+$/` check left
+  // the suite green. These cursors carry THIS broker's id and a sequence that
+  // `Number()` resolves to a position the broker really did issue — `2e0` is 2,
+  // and `split(':')` throws away `:junk` — so only the digits-only check can
+  // refuse them. Unguarded, the broker silently resumes a local process at a
+  // position it never actually reached and calls the replay complete.
+  it('reports a gap for a cursor with this broker id and a non-digit sequence', async () => {
+    const stream = openStream(port)
+    await stream.ready
+    const topicId = await seedTopic(port, 'guard-sender', 'guard-ch', 'guard-topic')
+    await post(port, `/topics/${topicId}/messages`, { sender: 'guard-sender', text: 'guarded' })
+    await waitUntil(() => (stream.events.some((e) => e.data.text === 'guarded') ? true : null), 5000)
+    const cursor = stream.events[stream.events.length - 1]!.id!
+    const [brokerId, seq] = cursor.split(':')
+    stream.close()
+
+    // The control that makes the gaps below mean something: the SAME position,
+    // well-formed, is honoured without a gap. So what the broker rejects is the
+    // shape of the cursor, not the position or the reconnect itself.
+    const control = openStream(port, cursor)
+    await control.ready
+    await new Promise<void>((r) => setTimeout(r, 300))
+    expect(control.events.some((e) => e.data.type === 'stream_gap')).toBe(false)
+    control.close()
+
+    for (const bad of [`${brokerId}:${Number(seq)}e0`, `${brokerId}:${seq}:junk`]) {
+      const resumed = openStream(port, bad)
+      await resumed.ready
+      await waitUntil(() => (resumed.events.some((e) => e.data.type === 'stream_gap') ? true : null), 5000)
+      const gap = resumed.events.find((e) => e.data.type === 'stream_gap')!
+      expect(String(gap.data.reason)).toMatch(/not a position/i)
+      resumed.close()
+    }
+  }, 15_000)
 })

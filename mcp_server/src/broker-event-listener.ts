@@ -7,16 +7,38 @@ import type { SessionManager } from './session.js'
 import type { ParsedMessage } from './types.js'
 import { normalizeChannelName } from './context.js'
 import { LOCAL_LOCATION } from './transport/index.js'
-import { CCCOLLAB_LOGS_DIR } from './constants.js'
+import { brokerHeartbeatMs, CCCOLLAB_LOGS_DIR } from './constants.js'
 
 mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
 const LOG_FILE = join(CCCOLLAB_LOGS_DIR, 'debug.log')
 const RECONNECT_DELAY_MS = 2000
-/** How long an open-but-silent stream is tolerated before we call it dead. The
- *  broker heartbeats every CCCOLLAB_HEARTBEAT_MS (15s by default), so this is
- *  deliberately more than two beats: a healthy stream is never silent this
- *  long, and anything shorter would reconnect-loop on ordinary jitter. */
-const READ_DEADLINE_MS = 40_000
+/** Slack on top of two beats, so ordinary jitter — a busy event loop, a slow
+ *  write — cannot be mistaken for a dead stream. */
+const READ_DEADLINE_HEADROOM_MS = 10_000
+
+/**
+ * How long an open-but-silent stream is tolerated before we call it dead.
+ *
+ * DERIVED from the broker's heartbeat, not written down twice. The two are a
+ * matched pair: the deadline is only correct while it outlasts two beats, and
+ * the heartbeat is a knob any operator can turn (`CCCOLLAB_HEARTBEAT_MS`). While
+ * this was a 40s literal, `CCCOLLAB_HEARTBEAT_MS=60000` made every session
+ * declare a perfectly healthy broker dead at 40s and reconnect 2s later,
+ * forever — `connected` flapping with no fault anywhere, which is precisely the
+ * honest health signal this feature exists to provide (cc#35). Measured at
+ * scale model: 1 connection in 7s when the pair is sized correctly, 4 when it
+ * is not, against a server that never closed or errored.
+ *
+ * Same shape as `LOCK_TIMEOUT_MS = CLERK_FETCH_TIMEOUT_MS + LOCK_HEADROOM_MS`
+ * in `config/save.ts` (cc#33), for the same reason: constants that must hold an
+ * ordering cannot be trusted to drift apart quietly.
+ *
+ * At the default heartbeat this is 15_000 * 2 + 10_000 = 40_000 — the value
+ * that shipped, so nobody who never set the variable sees a change.
+ */
+export function readDeadlineMsFor(heartbeatMs: number = brokerHeartbeatMs()): number {
+  return heartbeatMs * 2 + READ_DEADLINE_HEADROOM_MS
+}
 
 interface BrokerEventListenerOptions {
   brokerUrl: string
@@ -95,14 +117,18 @@ export class BrokerEventListener {
    *  broker, and not that it still works. Reset by every `data` event, which
    *  the broker's heartbeat guarantees will keep arriving on a healthy stream. */
   private readDeadline: NodeJS.Timeout | null = null
-  private readonly readDeadlineMs: number
+  /** The watchdog interval actually in force — derived from the broker's
+   *  heartbeat unless a caller overrode it. Readable so the pair's invariant
+   *  (deadline outlasts two beats) can be asserted where it is USED, rather
+   *  than only on the helper that computes it. */
+  readonly readDeadlineMs: number
 
   constructor(options: BrokerEventListenerOptions) {
     this.brokerUrl = options.brokerUrl
     this.bus = options.messageBus
     this.session = options.sessionManager
     this.context = options.context
-    this.readDeadlineMs = options.readDeadlineMs ?? READ_DEADLINE_MS
+    this.readDeadlineMs = options.readDeadlineMs ?? readDeadlineMsFor()
   }
 
   async start(): Promise<void> {

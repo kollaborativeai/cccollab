@@ -941,4 +941,86 @@ describe('BrokerEventListener stream health (KAI-414)', () => {
       await server.close()
     }
   }, 20_000)
+
+  // cc#35 coverage gap. `res.on('close')` is the backstop for "every teardown
+  // that emits neither 'end' nor 'error' — and there are several", and deleting
+  // it left the whole suite green: every teardown the other tests produce is
+  // already covered by 'end' or 'error'. Measured on this Node build, exactly
+  // one shape fires 'close' alone — destroying the RESPONSE rather than the
+  // request (server-side resets and FINs all raise 'error' or 'end' first) — so
+  // that is the shape driven here, through the real listener and a real socket.
+  // Without the backstop, `scheduleReconnect` never runs after such a teardown:
+  // the listener stops reconnecting AND, because that is the one place that
+  // clears it, `whoami` keeps reporting a healthy watch on a socket that is gone.
+  it('reconnects after a teardown that emits neither end nor error', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+    })
+    // A deadline far past the end of this test: a reconnect observed below can
+    // then only have come from the teardown handler, never from the watchdog.
+    const listener = makeListener(server.port, 60_000)
+    const realGet = http.get
+    let captured: http.IncomingMessage | undefined
+    const getSpy = vi.spyOn(http, 'get').mockImplementation((...args: Parameters<typeof http.get>) => {
+      const req = realGet(...args)
+      req.once('response', (res: http.IncomingMessage) => {
+        captured = res
+      })
+      return req
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      expect(connections).toBe(1)
+
+      captured!.destroy()
+
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+    } finally {
+      getSpy.mockRestore()
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // cc#35 FINDING-35. The deadline and the broker's heartbeat are a matched
+  // pair: the deadline is only correct while it outlasts two beats. The
+  // heartbeat is user-configurable (CCCOLLAB_HEARTBEAT_MS) and the deadline was
+  // a 40s literal, so raising the heartbeat past 40s made every session
+  // reconnect-loop against a healthy broker — proven at scale-model: 1
+  // connection in 7s when sized correctly, 4 when not. Asserted on the value
+  // the listener will ACTUALLY use, not on the derivation helper alone, so
+  // hardcoding the deadline again fails here rather than passing a green helper.
+  it('sizes its read deadline against CCCOLLAB_HEARTBEAT_MS, so a raised heartbeat cannot reconnect-loop', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      process.env.CCCOLLAB_HEARTBEAT_MS = '60000'
+      expect(makeListener(1).readDeadlineMs).toBeGreaterThan(2 * 60_000)
+
+      // Down as well as up: a shortened heartbeat must not leave a deadline so
+      // long that a wedged stream goes unnoticed for minutes.
+      process.env.CCCOLLAB_HEARTBEAT_MS = '1000'
+      expect(makeListener(1).readDeadlineMs).toBeLessThan(40_000)
+    } finally {
+      if (previous === undefined) delete process.env.CCCOLLAB_HEARTBEAT_MS
+      else process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
+  })
+
+  // Calibration pin, not a RED proof: the derivation must reproduce the 40s
+  // that shipped, so deriving the pair changes nothing for anyone who never
+  // set the variable.
+  it('leaves the default read deadline at 40s — two 15s beats plus headroom', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      delete process.env.CCCOLLAB_HEARTBEAT_MS
+      expect(makeListener(1).readDeadlineMs).toBe(40_000)
+    } finally {
+      if (previous !== undefined) process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
+  })
 })
