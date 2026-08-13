@@ -251,6 +251,34 @@ describe('attachLocation', () => {
     })
   })
 
+  /**
+   * The config's channel KEY is raw JSON — nothing forces it lowercase. But
+   * `ActiveContext` normalizes on the way in, and every tool reads the channel
+   * name back out of the context. So auto-subscribe must key the subscription
+   * map by the NORMALIZED name, or the two halves disagree forever:
+   *
+   *  - `leave_channel` looks up `remote::dev` and misses `remote::Dev`, so it
+   *    silently leaks a live subscription and never forgets the delivery cursor;
+   *  - the identity tool's stale-subscription check reads the context name, so
+   *    the location looks permanently un-subscribed and EVERY re-introduce
+   *    registers another live feed for the same channel — the duplicate
+   *    subscription this whole ticket exists to eliminate, back through a
+   *    different door.
+   */
+  it('keys auto-subscribe by the NORMALIZED channel name, not the raw config key', async () => {
+    const ctx = makeCtx({ ...location, channels: [{ name: 'Dev', topics: [] }] })
+
+    const result = await attachLocation('acme', ctx)
+    expect(result.ok).toBe(true)
+
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
+    expect(transport.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
+    // The subscription map key must match what the context (and therefore every
+    // later lookup: leave_channel, the stale check) will ask for.
+    expect([...ctx.remoteChannelUnsubscribes.keys()]).toEqual(['acme::dev'])
+    expect(ctx.context.isChannelSubscribed('dev', 'acme')).toBe(true)
+  })
+
   it('returns ok: false and does NOT register when introduce throws', async () => {
     const ctx = makeCtx(location)
     const failing = new FakeRemoteTransport('acme')

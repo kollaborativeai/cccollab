@@ -132,6 +132,63 @@ describe('Channel Tools', () => {
       const result = JSON.parse(await handleChannelTool('leave_channel', { name: 'nope' }, deps))
       expect(result.error).toContain('Not subscribed')
     })
+
+    /**
+     * A DELIBERATE leave must forget the channel's delivery cursor, so a later
+     * re-join re-seeds from `latestTs` and skips the backlog accrued while away.
+     *
+     * `joinChannel` seeds that cursor only when absent — which is what lets the
+     * identity migration's TRANSIENT leave/re-join keep its place in the stream
+     * and not drop broadcasts that land mid-rename. The flip side is that a
+     * cursor left behind by an intentional leave would survive and the re-join
+     * would replay everything since the last delivered message as fresh inbound
+     * notifications. Only the tool layer knows which leave this is, so the
+     * forget lives here — and this test drives the real `leave_channel` tool to
+     * pin that WIRING, not just the transport method it calls.
+     */
+    it('forgets the remote channel cursor, so a later re-join skips the backlog', async () => {
+      const forgotten: string[] = []
+      const remote = {
+        source: 'remote',
+        enabled: true,
+        hasTopic: () => false,
+        introduce: vi.fn(async () => {}),
+        joinChannel: vi.fn(async () => ({ subscriberCount: 1 })),
+        leaveChannel: vi.fn(async () => {}),
+        listChannels: vi.fn(async () => []),
+        // The capability that makes this a remote transport for our purposes.
+        subscribeChannelMessages: vi.fn(() => () => {}),
+        forgetChannelCursor: vi.fn((channel: string) => {
+          forgotten.push(channel)
+        }),
+      } as unknown as Transport
+      const context = new ActiveContext()
+      const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+      session.setName('architect')
+      const remoteDeps: ChannelToolDeps = {
+        session,
+        context,
+        router: new TransportRouter([remote]),
+        remoteChannelUnsubscribes: new Map<string, () => void>(),
+      }
+      remoteDeps.context.joinChannel('kai', 'manual', 'remote')
+
+      await handleChannelTool('leave_channel', { name: 'kai', location: 'remote' }, remoteDeps)
+
+      expect(forgotten).toEqual(['kai'])
+    })
+
+    it('does not blow up leaving a local channel, which carries no cursor', async () => {
+      // The local broker replays nothing on re-join, so it exposes no
+      // forgetChannelCursor — the type guard must degrade to a no-op.
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('default', 'fallback', 'local')
+
+      const result = JSON.parse(await handleChannelTool('leave_channel', { name: 'default' }, deps))
+
+      expect(result.removed).toBe(true)
+    })
   })
 
   describe('set_active_channel', () => {

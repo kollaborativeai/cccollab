@@ -523,14 +523,15 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       description:
         'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers on every enabled transport. Returns JSON.',
       inputSchema: {
-        name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
+        name: z.string().min(1).describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
         organization: z
           .string()
           .optional()
           .describe(
-            'Organization id (from list_organizations) to create this session in. ' +
-              'Required when connected to a remote location.',
+            'Organization id or slug (from list_organizations / whoami.organizationSlug) to create this session in. ' +
+              'Prefer the slug when present; raw id still works. Required when connected to a remote location. ' +
+              'Handles are canonicalized to id before compare/store so id↔slug of the same org is not a rebind.',
           ),
       },
     },
@@ -547,7 +548,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, organizationSlug?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `organizationSlug` is the path segment for re-introduce; prefer it over scraping `organization` (display names can contain parentheses). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
       inputSchema: {},
     },
     async () => {
