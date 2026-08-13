@@ -59,9 +59,10 @@ function makeDeps(transport: RemoteTransport): IdentityToolDeps {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
     router: new TransportRouter([transport]),
+    // No `remoteTopicUnsubscribes` / `remoteChannelUnsubscribes`: KAI-418
+    // removed the shared unsubscribe maps and the transport owns feed
+    // lifecycle now. tsc rejects them here even though the suite ignored them.
     messageBus: { push: vi.fn(async () => {}) } as unknown as MessageBus,
-    remoteTopicUnsubscribes: new Map(),
-    remoteChannelUnsubscribes: new Map(),
   }
 }
 
