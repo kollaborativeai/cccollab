@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import http from 'node:http'
 import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
@@ -36,15 +37,81 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
+      // S10: watcher must get threadTs/topicName so it can act on the new topic.
+      // RED: drop threadTs/topicName from the topic_created push → this fails.
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
           sender: 'tester',
           text: expect.stringContaining('Auth discussion'),
           channel: 'default',
           channelName: 'default',
+          threadTs: 'uuid-1',
+          topicName: 'Auth discussion',
         }),
       )
     })
+  })
+
+  /**
+   * cc#35 pr-test I3 / code-reviewer S7: gap WARNING fans out once per LOCAL
+   * subscription only. Remote-only and zero-local must not invent a channel.
+   * RED: filter with bare `'local'` string that drifts, or push a hardcoded
+   * fallback channel → multi-local count / remote-only / zero-local fail.
+   */
+  it('stream_gap WARNING fans out to every local channel and skips remote-only', async () => {
+    const gap: BrokerLocalEvent = {
+      source: 'local',
+      type: 'stream_gap',
+      reason: 'buffer overflow',
+    }
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const bus = createMockMessageBus()
+
+    // two local + one remote (fresh context: beforeEach already has "default")
+    const multi = new ActiveContext()
+    multi.joinChannel('alpha', 'manual', 'local')
+    multi.joinChannel('beta', 'manual', 'local')
+    multi.joinChannel('gamma', 'manual', 'flatout')
+    const multiListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: multi,
+    })
+    multiListener.processLocalEvent(gap)
+    await vi.waitFor(() => expect(bus.push).toHaveBeenCalledTimes(2))
+    const channels = bus.push.mock.calls.map((c) => (c[0] as { channel: string }).channel).sort()
+    expect(channels).toEqual(['alpha', 'beta'])
+    expect(multiListener.mayHaveMissedEvents()).toBe(true)
+
+    // remote-only: flag set, no push destination
+    bus.push.mockClear()
+    const remoteOnly = new ActiveContext()
+    remoteOnly.joinChannel('only-remote', 'manual', 'flatout')
+    const remoteListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: remoteOnly,
+    })
+    remoteListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(remoteListener.mayHaveMissedEvents()).toBe(true)
+
+    // zero channels
+    bus.push.mockClear()
+    const emptyListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+    emptyListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(emptyListener.mayHaveMissedEvents()).toBe(true)
   })
 
   it('drops topic_created for a channel we are not subscribed to', async () => {
@@ -245,5 +312,715 @@ describe('BrokerEventListener (channel-aware)', () => {
     listener.processLocalEvent(event)
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+})
+
+describe('BrokerEventListener (channel watch mode)', () => {
+  let listener: BrokerEventListener
+  let mockBus: ReturnType<typeof createMockMessageBus>
+  let context: ActiveContext
+
+  function messageIn(topicId: string, topicName?: string): BrokerLocalEvent {
+    return {
+      source: 'local',
+      type: 'message',
+      channel: 'default',
+      topicId,
+      topicName,
+      sender: 'worker-1',
+      text: 'PR merged',
+    }
+  }
+
+  beforeEach(() => {
+    mockBus = createMockMessageBus()
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    context = new ActiveContext()
+
+    listener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: mockBus as never,
+      sessionManager: session,
+      context,
+    })
+  })
+
+  it('delivers a message from a topic it never joined when watching the channel', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'worker-1', text: 'PR merged', threadTs: 'never-joined-topic' }),
+      )
+    })
+  })
+
+  it('tags the delivered message with its topic name', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent(messageIn('never-joined-topic', 'KAI-401'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ topicName: 'KAI-401' }))
+    })
+  })
+
+  it('drops a message from an unjoined topic when NOT watching the channel', async () => {
+    context.joinChannel('default', 'manual', 'local')
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('delivers messages from topics created AFTER the session started watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    // A topic that did not exist at watch time; the gate is per-event, so no
+    // re-subscription is needed for it to be visible.
+    listener.processLocalEvent(messageIn('topic-created-later'))
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ threadTs: 'topic-created-later' }))
+    })
+  })
+
+  it('does not deliver topic traffic from a channel it is not subscribed to, even while watching another', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'other',
+      topicId: 't1',
+      sender: 'worker-1',
+      text: 'Noise',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  // The listener only ever handles LOCAL broker events, so both of its gates
+  // must ask about the LOCAL subscription. An unqualified lookup answers "is
+  // ANY subscription of this name watched/subscribed?", which once remote watch
+  // lands (KAI-413) would let a session watching remote "default" in org A read
+  // local broker traffic of the same channel name.
+  it('does not deliver local topic traffic to a session that only watches a REMOTE channel of the same name', async () => {
+    context.joinChannel('default', 'manual', 'flatout', true)
+    listener.processLocalEvent(messageIn('never-joined-topic'))
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('does not deliver local broadcasts to a session that is only subscribed to a REMOTE channel of the same name', async () => {
+    context.joinChannel('default', 'manual', 'flatout')
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'broadcast',
+      channel: 'default',
+      sender: 'worker-1',
+      text: 'Noise from another org',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('still drops self messages while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'default',
+      topicId: 't1',
+      sender: 'orchestrator',
+      text: 'My own message',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('delivers topic_archived for an unjoined topic while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_archived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      archivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ text: 'Topic archived' }))
+    })
+  })
+
+  // "Topic archived" against a bare uuid is unusable to a watcher: it never
+  // joined the topic, so it has no local name for that id. It would know that
+  // *a* topic closed, not which one — for an orchestrator whose whole use of
+  // this event is "which worker just finished", that is a functional miss.
+  it('names the topic in a topic_archived event so the watcher knows WHICH topic closed', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_archived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      topicName: 'KAI-401',
+      archivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(expect.objectContaining({ topicName: 'KAI-401' }))
+    })
+  })
+
+  it('delivers and names a topic_unarchived event for an unjoined topic while watching', async () => {
+    context.joinChannel('default', 'manual', 'local', true)
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'topic_unarchived',
+      channel: 'default',
+      topicId: 'never-joined-topic',
+      topicName: 'KAI-401',
+      unarchivedBy: 'worker-1',
+    })
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ text: 'Topic unarchived', topicName: 'KAI-401' }),
+      )
+    })
+  })
+
+  // The sharpest form of the opt-in guarantee: watching one channel must not
+  // leak topic traffic from ANOTHER channel the session is subscribed to but
+  // is NOT watching. This is what protects a worker that happens to share a
+  // channel with an orchestrator.
+  it('does not deliver unjoined-topic traffic from a SUBSCRIBED but unwatched channel', async () => {
+    context.joinChannel('watched-ch', 'manual', 'local', true)
+    context.joinChannel('quiet-ch', 'manual', 'local')
+    listener.processLocalEvent({
+      source: 'local',
+      type: 'message',
+      channel: 'quiet-ch',
+      topicId: 'unjoined-in-quiet',
+      sender: 'worker-1',
+      text: 'should not be seen',
+    })
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * `watching: true` is worthless if the stream that carries the traffic is down.
+ * The listener already knows: it either holds an open SSE response or it does
+ * not. These tests pin that fact to a real socket, so `whoami` can report the
+ * truth instead of a subscription flag dressed up as liveness.
+ */
+describe('BrokerEventListener connection state (KAI-414)', () => {
+  it('reports disconnected before start, connected while the SSE stream is open, disconnected after stop', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(': hello\n\n')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const bus = createMockMessageBus()
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: bus as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    expect(listener.isConnected()).toBe(false)
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true))
+      listener.stop()
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it('reports disconnected when the broker is not reachable at all', async () => {
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    // Nothing is listening on this port: connect() fails, and the listener must
+    // not pretend otherwise while it waits out the reconnect delay.
+    const listener = new BrokerEventListener({
+      brokerUrl: 'http://127.0.0.1:1',
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+    try {
+      await listener.start()
+      await new Promise<void>((r) => setTimeout(r, 100))
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+    }
+  })
+})
+
+/**
+ * The listener half of the reconnect fix (KAI-414). A dropped SSE stream must
+ * resume FROM A CURSOR (`Last-Event-ID`), so messages published during the gap
+ * still arrive. And when the server says it cannot fill the gap, the listener
+ * must remember that it may have missed messages — a health signal that cannot
+ * say "I may have missed something" is an unsound oracle.
+ */
+describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
+  it('resumes from its cursor after a drop, so messages published during the gap still arrive', async () => {
+    const delivered: string[] = []
+    let connections = 0
+    let resumedFrom: string | undefined
+
+    // A stand-in broker: it drops the first connection, and on the reconnect it
+    // honours Last-Event-ID by replaying what was published during the outage.
+    const server = http.createServer((req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      if (connections === 1) {
+        res.write(
+          'id: b1:1\ndata: ' +
+            JSON.stringify({
+              source: 'local',
+              type: 'message',
+              channel: 'default',
+              topicId: 't1',
+              topicName: 'KAI-1',
+              sender: 'worker',
+              text: 'before the drop',
+            }) +
+            '\n\n',
+        )
+        setTimeout(() => res.destroy(), 30)
+        return
+      }
+      resumedFrom = req.headers['last-event-id'] as string | undefined
+      res.write(
+        'id: b1:2\ndata: ' +
+          JSON.stringify({
+            source: 'local',
+            type: 'message',
+            channel: 'default',
+            topicId: 't1',
+            topicName: 'KAI-1',
+            sender: 'worker',
+            text: 'DURING the gap',
+          }) +
+          '\n\n',
+      )
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const context = new ActiveContext()
+    context.joinChannel('default', 'manual', 'local', true)
+    const bus = {
+      push: vi.fn(async (m: { text: string }) => {
+        delivered.push(m.text)
+      }),
+    }
+
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: bus as never,
+      sessionManager: session,
+      context,
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(delivered).toContain('DURING the gap'), { timeout: 10_000 })
+      expect(resumedFrom).toBe('b1:1')
+      expect(listener.mayHaveMissedEvents()).toBe(false)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
+
+  it('admits it may have missed messages when the broker reports a gap it cannot fill', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            source: 'local',
+            type: 'stream_gap',
+            reason: 'cursor is from a previous broker instance',
+          }) +
+          '\n\n',
+      )
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const bus = createMockMessageBus()
+    const context = new ActiveContext()
+    // A subscribed local channel so the warning has a destination. F6 dropped
+    // the hardcoded 'cccollab' fallback: an unsubscribed session still records
+    // the gap for whoami but has no channel to speak into.
+    context.joinChannel('default', 'manual', 'local')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: bus as never,
+      sessionManager: session,
+      context,
+    })
+
+    try {
+      expect(listener.mayHaveMissedEvents()).toBe(false)
+      await listener.start()
+      await vi.waitFor(() => expect(listener.mayHaveMissedEvents()).toBe(true))
+      // ...and it must TELL the session, not just remember it. An orchestrator
+      // that has to run whoami to discover it went deaf is still blind.
+      await vi.waitFor(() =>
+        expect(bus.push).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sender: 'cccollab',
+            channel: 'default',
+            text: expect.stringContaining('WARNING'),
+          }),
+        ),
+      )
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 10_000)
+
+  // The comment on `missedEvents` states the property this test pins: once a
+  // gap is known, no LATER reconnect makes that untrue. Every other test in
+  // this file observes the flag on the same connection that reported the gap.
+  // Revert stickiness (clear on any 200 response, clear inside dropStream) and
+  // this test goes RED; the others stay green. That's the guard.
+  it('keeps mayHaveMissedEvents() true across a subsequent reconnect', async () => {
+    let connections = 0
+    const server = http.createServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      if (connections === 1) {
+        // First connection: broker announces a gap it cannot fill, then closes.
+        res.write(
+          'data: ' + JSON.stringify({ source: 'local', type: 'stream_gap', reason: 'buffer overflow' }) + '\n\n',
+        )
+        setTimeout(() => res.destroy(), 30)
+        return
+      }
+      // Subsequent reconnects: a clean, cursorless hello. Nothing here should
+      // clear the flag from the earlier connection.
+      res.write('id: b1:0\ndata: ' + JSON.stringify({ source: 'local', type: 'stream_hello' }) + '\n\n')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.mayHaveMissedEvents()).toBe(true), { timeout: 5000 })
+      // Wait for the RECONNECT — the reviewer's second attack cleared the flag
+      // here. It must survive.
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 5000 })
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000 })
+      expect(listener.mayHaveMissedEvents()).toBe(true)
+      // Pin F2 mutation B: dropStream() is a test-only seam today, but the
+      // OLD shape reset `connected` here, so a future dev restoring that shape
+      // could plausibly reset the flag too. It must not.
+      listener.dropStream()
+      expect(listener.mayHaveMissedEvents()).toBe(true)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
+
+  /**
+   * cc#35 pr-test I6: reconnectPending coalesces end+close+error into one
+   * reconnect. Without it, a single socket teardown can schedule N timers and
+   * open N parallel SSE streams.
+   * RED: remove `if (this.reconnectPending) return` → connections exceeds 2
+   * before the delay window closes.
+   */
+  it('reconnectPending coalesces multiple teardowns into a single reconnect', async () => {
+    let connections = 0
+    const server = http.createServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write('id: b1:0\ndata: ' + JSON.stringify({ source: 'local', type: 'stream_hello' }) + '\n\n')
+      if (connections === 1) {
+        // One destroy fires end + close (and sometimes error). Without the
+        // guard that is 2–3 scheduled reconnects → 2–3 parallel sockets.
+        setTimeout(() => res.destroy(), 20)
+      }
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBe(1), { timeout: 5000 })
+      // After destroy, exactly one reconnect should land (connections === 2).
+      // RECONNECT_DELAY_MS is 2000; wait past it once.
+      await vi.waitFor(() => expect(connections).toBe(2), { timeout: 5000 })
+      // Brief settle: a double-scheduled reconnect would open a third socket.
+      await new Promise<void>((r) => setTimeout(r, 500))
+      expect(connections).toBe(2)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
+})
+
+/**
+ * A 200 status line is not proof that anything is listening. The session pins
+ * the broker's port once at startup and never rediscovers it, so if the broker
+ * dies and ANYTHING else binds that port, the listener gets a perfectly polite
+ * 200 that never carries an event — and used to report `connected: true`
+ * forever, with no reconnect and nothing logged. Same for a wedged-but-alive
+ * broker (SIGSTOP, blocked event loop, half-open TCP after a suspend), which
+ * needs no port reuse at all.
+ *
+ * These tests pin the three things that make the stream self-healing: the
+ * response must LOOK like an event stream, a stream that stops carrying data
+ * must be treated as dead, and a stream that is quiet but still heartbeating
+ * must NOT be — otherwise the read deadline is just a reconnect loop.
+ */
+describe('BrokerEventListener stream health (KAI-414)', () => {
+  /** A mock broker whose handlers deliberately hold sockets open; `close()`
+   *  therefore has to tear the sockets down itself or it would never resolve. */
+  async function startServer(handler: http.RequestListener): Promise<{ port: number; close: () => Promise<void> }> {
+    const server = http.createServer(handler)
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+    return {
+      port,
+      close: async () => {
+        server.closeAllConnections()
+        await new Promise<void>((r) => server.close(() => r()))
+      },
+    }
+  }
+
+  function makeListener(port: number, readDeadlineMs?: number): BrokerEventListener {
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    return new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+      readDeadlineMs,
+    })
+  }
+
+  const SSE_HELLO = `id: b1:0\ndata: ${JSON.stringify({ source: 'local', type: 'stream_hello' })}\n\n`
+
+  // The CRITICAL case: whatever grabbed the port answers 200 and holds the
+  // socket open. No data, no `end`, no `error` — so nothing else in the
+  // listener will ever notice. Only the content-type check can.
+  it('does not report connected on a 200 that is not an event stream, and reconnects', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.write('<html>not a broker</html>')
+      // Held open on purpose: this is the socket nothing ever tears down.
+    })
+    const listener = makeListener(server.port)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // Non-200 held open: `end`, `error` and the request's own `error` all stay
+  // silent, so without a `close` backstop the listener is permanently dead and
+  // never even schedules a retry.
+  it('reconnects when the broker answers a non-200 and holds the socket open', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.write('{"error":"not found"}')
+    })
+    const listener = makeListener(server.port)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+      expect(listener.isConnected()).toBe(false)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // A real SSE stream that simply stops carrying anything. The socket stays up,
+  // so the status line and the content-type both still say "healthy" — only a
+  // read deadline can tell the difference between quiet and deaf.
+  it('flips to disconnected and reconnects when a healthy stream goes silent past the read deadline', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+      // ...and then never speaks again.
+    })
+    const listener = makeListener(server.port, 400)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(false), { timeout: 5000, interval: 10 })
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // The guard on the guard. A read deadline with nothing to reset it turns
+  // every idle-but-healthy stream into a reconnect loop; the broker's heartbeat
+  // is what keeps that from happening, and this is the test that says so. The
+  // hard wait is the assertion: absence of a reconnect can only be observed by
+  // letting several deadline windows elapse.
+  it('does not reconnect while an idle stream is still receiving heartbeats', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+      // Comment frames only — no `id:`, no `data:`. Exactly what the broker
+      // sends, and exactly what a quiet-but-alive stream looks like.
+      const beat = setInterval(() => res.write(': ping\n\n'), 50)
+      res.on('close', () => clearInterval(beat))
+    })
+    const listener = makeListener(server.port, 200)
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      // Long enough to outlast several deadline windows AND the 2s reconnect
+      // delay that would follow the first one. A shorter wait would make the
+      // connection count vacuous: a listener that HAD given up at 200ms would
+      // still be sitting in its reconnect delay, showing connections:1.
+      await new Promise<void>((r) => setTimeout(r, 2600))
+      expect(connections).toBe(1)
+      expect(listener.isConnected()).toBe(true)
+    } finally {
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // cc#35 coverage gap. `res.on('close')` is the backstop for "every teardown
+  // that emits neither 'end' nor 'error' — and there are several", and deleting
+  // it left the whole suite green: every teardown the other tests produce is
+  // already covered by 'end' or 'error'. Measured on this Node build, exactly
+  // one shape fires 'close' alone — destroying the RESPONSE rather than the
+  // request (server-side resets and FINs all raise 'error' or 'end' first) — so
+  // that is the shape driven here, through the real listener and a real socket.
+  // Without the backstop, `scheduleReconnect` never runs after such a teardown:
+  // the listener stops reconnecting AND, because that is the one place that
+  // clears it, `whoami` keeps reporting a healthy watch on a socket that is gone.
+  it('reconnects after a teardown that emits neither end nor error', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+    })
+    // A deadline far past the end of this test: a reconnect observed below can
+    // then only have come from the teardown handler, never from the watchdog.
+    const listener = makeListener(server.port, 60_000)
+    const realGet = http.get
+    let captured: http.IncomingMessage | undefined
+    const getSpy = vi.spyOn(http, 'get').mockImplementation((...args: Parameters<typeof http.get>) => {
+      const req = realGet(...args)
+      req.once('response', (res: http.IncomingMessage) => {
+        captured = res
+      })
+      return req
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      expect(connections).toBe(1)
+
+      captured!.destroy()
+
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+    } finally {
+      getSpy.mockRestore()
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // cc#35 FINDING-35. The deadline and the broker's heartbeat are a matched
+  // pair: the deadline is only correct while it outlasts two beats. The
+  // heartbeat is user-configurable (CCCOLLAB_HEARTBEAT_MS) and the deadline was
+  // a 40s literal, so raising the heartbeat past 40s made every session
+  // reconnect-loop against a healthy broker — proven at scale-model: 1
+  // connection in 7s when sized correctly, 4 when not. Asserted on the value
+  // the listener will ACTUALLY use, not on the derivation helper alone, so
+  // hardcoding the deadline again fails here rather than passing a green helper.
+  it('sizes its read deadline against CCCOLLAB_HEARTBEAT_MS, so a raised heartbeat cannot reconnect-loop', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      process.env.CCCOLLAB_HEARTBEAT_MS = '60000'
+      expect(makeListener(1).readDeadlineMs).toBeGreaterThan(2 * 60_000)
+
+      // Down as well as up: a shortened heartbeat must not leave a deadline so
+      // long that a wedged stream goes unnoticed for minutes.
+      process.env.CCCOLLAB_HEARTBEAT_MS = '1000'
+      expect(makeListener(1).readDeadlineMs).toBeLessThan(40_000)
+    } finally {
+      if (previous === undefined) delete process.env.CCCOLLAB_HEARTBEAT_MS
+      else process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
+  })
+
+  // Calibration pin, not a RED proof: the derivation must reproduce the 40s
+  // that shipped, so deriving the pair changes nothing for anyone who never
+  // set the variable.
+  it('leaves the default read deadline at 40s — two 15s beats plus headroom', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      delete process.env.CCCOLLAB_HEARTBEAT_MS
+      expect(makeListener(1).readDeadlineMs).toBe(40_000)
+    } finally {
+      if (previous !== undefined) process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
   })
 })

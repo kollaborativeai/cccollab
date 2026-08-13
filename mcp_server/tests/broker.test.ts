@@ -431,4 +431,64 @@ describe('Broker: isolation guards and invariants', () => {
       expect(evt!.unarchivedBy).toBe('attrib-a')
     })
   })
+
+  describe('message events carry the topic name (KAI-414)', () => {
+    it('includes topicName so a channel watcher sees a name, not a bare uuid', async () => {
+      await registerSession(port, 'named-a')
+      await joinChannel(port, 'named-a', 'named-ch')
+      const created = await createTopic(port, 'named-a', 'KAI-401', 'named-ch')
+      const { id } = (await created.json()) as { id: string }
+
+      const evt = await nextEvent(
+        port,
+        (e) => e.type === 'message' && e.topicId === id,
+        async () => {
+          const res = await postTopicMessage(port, id, 'named-a', 'PR merged')
+          expect(res.status).toBe(200)
+        },
+      )
+
+      expect(evt).not.toBeNull()
+      expect(evt!.topicName).toBe('KAI-401')
+    })
+
+    it('includes topicName on topic_archived so a watcher knows which topic closed', async () => {
+      await registerSession(port, 'named-arch')
+      await joinChannel(port, 'named-arch', 'named-arch-ch')
+      const created = await createTopic(port, 'named-arch', 'KAI-402', 'named-arch-ch')
+      const { id } = (await created.json()) as { id: string }
+
+      const evt = await nextEvent(
+        port,
+        (e) => e.type === 'topic_archived' && e.topicId === id,
+        async () => {
+          const res = await archiveTopic(port, id, 'named-arch')
+          expect(res.status).toBe(200)
+        },
+      )
+
+      expect(evt).not.toBeNull()
+      expect(evt!.topicName).toBe('KAI-402')
+    })
+
+    it('includes topicName on topic_unarchived', async () => {
+      await registerSession(port, 'named-unarch')
+      await joinChannel(port, 'named-unarch', 'named-unarch-ch')
+      const created = await createTopic(port, 'named-unarch', 'KAI-403', 'named-unarch-ch')
+      const { id } = (await created.json()) as { id: string }
+      await archiveTopic(port, id, 'named-unarch')
+
+      const evt = await nextEvent(
+        port,
+        (e) => e.type === 'topic_unarchived' && e.topicId === id,
+        async () => {
+          const res = await unarchiveTopic(port, id, 'named-unarch')
+          expect(res.status).toBe(200)
+        },
+      )
+
+      expect(evt).not.toBeNull()
+      expect(evt!.topicName).toBe('KAI-403')
+    })
+  })
 })

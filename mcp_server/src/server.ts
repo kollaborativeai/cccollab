@@ -1,13 +1,13 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileSync, unlinkSync, statSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import * as z from 'zod'
 
-import { CCCOLLAB_RUN_DIR } from './constants.js'
+import { CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
 import { loadConfig, type Config } from './config.js'
 import { readRendezvous, probeBroker, waitForHealthyRendezvous, removeRendezvous } from './broker-discovery.js'
 import { SessionManager } from './session.js'
@@ -93,6 +93,23 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   )
 
   const messageBus = new MessageBus(mcp.server)
+  // The stream_gap WARNING (and every other push) rides MessageBus.push →
+  // mcp.notification. Failure emits `notify:error`. Without a production
+  // subscriber that event is pure void — the one mechanism that tells a user
+  // they have a hole can fail without a trace. Log it.
+  messageBus.on('notify:error', (payload: { err?: unknown; source?: string }) => {
+    const err = payload?.err
+    const detail = err instanceof Error ? err.message : String(err ?? 'unknown')
+    try {
+      mkdirSync(CCCOLLAB_LOGS_DIR, { recursive: true })
+      appendFileSync(
+        join(CCCOLLAB_LOGS_DIR, 'debug.log'),
+        `[${new Date().toISOString()}] message-bus notify:error source=${payload?.source ?? '?'} ${detail}\n`,
+      )
+    } catch {
+      /* never let a log failure take down the bus */
+    }
+  })
   const listener = new BrokerEventListener({
     brokerUrl: `http://127.0.0.1:${brokerPort}`,
     messageBus,
@@ -316,6 +333,10 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     context,
     router,
     locations: resolved.locations,
+    localEventStream: () => ({
+      connected: listener.isConnected(),
+      mayHaveMissedMessages: listener.mayHaveMissedEvents(),
+    }),
     messageBus,
     remoteTopicUnsubscribes,
     remoteChannelUnsubscribes,
@@ -404,13 +425,18 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   console.error(`[cccollab] Session "${session.sessionName}" connected as ${config.username}`)
 }
 
-interface ToolDeps {
+export interface ToolDeps {
   /** Plugin/binary version handshake, computed once at startup. */
   versionState: VersionState
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
   locations: ResolvedLocation[]
+  /** Health of the local broker listener's SSE stream: whether it is carrying
+   *  traffic right now, and whether it has a KNOWN hole (a gap the broker could
+   *  not replay). `whoami` reports both — an open socket is not evidence that
+   *  nothing was missed while it was shut. */
+  localEventStream: () => { connected: boolean; mayHaveMissedMessages: boolean }
   messageBus: MessageBus
   remoteTopicUnsubscribes: Map<string, () => void>
   remoteChannelUnsubscribes: Map<string, () => void>
@@ -509,7 +535,10 @@ function buildInstructions(session: SessionManager, resolved: ResolvedConfig, ro
  * Business logic lives in `handleXxxTool`; this function is only the
  * MCP-SDK-facing glue (Zod schemas + CallToolResult shaping).
  */
-function registerTools(mcp: McpServer, deps: ToolDeps): void {
+/** Exported so tests can drive the tools through a real MCP client. The zod
+ *  `inputSchema` here is the true argument boundary — the SDK drops anything it
+ *  does not declare — so it must be exercised, not bypassed. */
+export function registerTools(mcp: McpServer, deps: ToolDeps): void {
   const text = (s: string): CallToolResult => ({ content: [{ type: 'text' as const, text: s }] })
   const error = (err: unknown): CallToolResult => ({
     content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -547,7 +576,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source, watching, watchingActive}], eventStream: {connected, mayHaveMissedMessages}, locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). On each subscribed channel, `watching` is the channel-wide watch you REQUESTED; `watchingActive` is whether it is in effect right now - false when the local event stream is disconnected, i.e. you are subscribed but currently deaf. `eventStream` reports the stream itself: `connected` (hearing traffic now) and `mayHaveMissedMessages` (a gap the broker could not replay - your history has a hole; backfill with read_topic_messages on joined topics).',
       inputSchema: {},
     },
     async () => {
@@ -649,14 +678,24 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'join_channel',
     {
       description:
-        'Subscribe to a channel (implicitly created) at the given location. Idempotent. Channels with the same name at different locations are distinct - specify `location` when a name exists at multiple locations. Returns {channel, location, becameActive, subscriberCount}.',
+        'Subscribe to a channel (implicitly created) at the given location. Idempotent. Channels with the same name at different locations are distinct - specify `location` when a name exists at multiple locations. Returns {channel, location, becameActive, subscriberCount, watching}.',
       inputSchema: {
         name: z.string().describe('Channel name (case-insensitive, non-empty).'),
+        // Deliberately NOT `.default('local')`: zod would fill it in before the
+        // handler runs, and the handler must be able to tell "the caller chose
+        // local" from "the caller said nothing" to refuse an ambiguous watch.
         location: z
           .string()
           .optional()
-          .default('local')
-          .describe('Location name. Defaults to "local" (the in-process broker).'),
+          .describe(
+            'Location name. Omit to default to local for ordinary joins. For `watch: true`, location is REQUIRED whenever any remote is configured — an unstated location is refused (not defaulted) so an orchestrator cannot silently watch a brand-new empty local channel.',
+          ),
+        watch: z
+          .boolean()
+          .optional()
+          .describe(
+            "Channel-wide topic visibility: receive messages from EVERY topic in the channel, including topics created later, without joining each one. Intended for orchestrators watching a fleet; ordinary sessions should leave this off to avoid unrelated topic traffic. Does not join you to the topics - it is read-only visibility. Omit to leave an existing subscription's setting unchanged; pass false to stop watching. Local locations only for now. Delivery survives a reconnect: the event stream is cursored, so messages published while it was down are replayed when it comes back. If the broker CANNOT replay them (it restarted, or you fell too far behind), you are told - `whoami`'s `eventStream.mayHaveMissedMessages` goes true and a warning is pushed to you. You are never silently short. `whoami` also reports `watchingActive` per channel: true only while the stream is actually carrying traffic.",
+          ),
       },
     },
     async (args) => {
@@ -1033,7 +1072,21 @@ async function main() {
   await startServer(config, brokerPort, resolved)
 }
 
-main().catch((err) => {
-  console.error('[cccollab] Fatal error:', err)
-  process.exit(1)
-})
+/** Is `moduleUrl` the module the process was started with? Exported for test. */
+export function isProcessEntrypoint(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false
+  return moduleUrl === pathToFileURL(argv1).href
+}
+
+// Guarded: importing this module must be inert. `registerTools` lives here and
+// tests import it to drive the real zod schemas — the only boundary that
+// catches a dropped argument. Unguarded, that import would load config, spawn a
+// detached broker daemon, register a session on the developer's real broker,
+// attach a StdioServerTransport to the importing process's stdio, and on any
+// failure call process.exit(1) — inside a vitest worker.
+if (isProcessEntrypoint(import.meta.url, process.argv[1])) {
+  main().catch((err) => {
+    console.error('[cccollab] Fatal error:', err)
+    process.exit(1)
+  })
+}

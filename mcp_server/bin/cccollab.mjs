@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 
@@ -31,6 +31,14 @@ const entryName = subcommand ?? 'server'
 const srcEntry = join(DIR, 'src', `${entryName}.ts`)
 const distEntry = join(DIR, 'dist', `${entryName}.js`)
 
+// Both branches below dispatch by spawning a child whose argv[1] IS the entry
+// module, never by importing it. server.ts gates main() on
+// `isProcessEntrypoint(import.meta.url, process.argv[1])`, and under a
+// same-process `await import(distEntry)` argv[1] stays this launcher while
+// import.meta.url is dist/server.js — never equal, so main() silently never
+// ran and an installed cccollab exited 0 with no MCP tools at all. Spawning
+// keeps the dev and installed paths identical in shape, so the guard cannot be
+// true for one and false for the other.
 function runChild(child) {
   child.on('exit', (code) => process.exit(code ?? 1))
   for (const sig of ['SIGINT', 'SIGTERM']) {
@@ -50,13 +58,13 @@ if (existsSync(srcEntry)) {
   if (tsxCli) {
     runChild(spawn(process.execPath, [tsxCli, srcEntry, ...process.argv.slice(2)], { stdio: 'inherit' }))
   } else if (existsSync(distEntry)) {
-    await import(pathToFileURL(distEntry).href)
+    runChild(spawn(process.execPath, [distEntry, ...process.argv.slice(2)], { stdio: 'inherit' }))
   } else {
     console.error('cccollab: src/server.ts present but tsx not installed, and no dist/server.js')
     process.exit(1)
   }
 } else if (existsSync(distEntry)) {
-  await import(pathToFileURL(distEntry).href)
+  runChild(spawn(process.execPath, [distEntry, ...process.argv.slice(2)], { stdio: 'inherit' }))
 } else {
   console.error('cccollab: no runnable target (expected src/server.ts + tsx, or dist/server.js)')
   process.exit(1)

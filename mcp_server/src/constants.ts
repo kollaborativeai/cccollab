@@ -19,6 +19,46 @@ export const PROFILE = process.env.CCCOLLAB_PROFILE?.trim() || 'default'
  *  per user; no per-profile split. */
 export const BROKER_RENDEZVOUS_FILE = join(CCCOLLAB_RUN_DIR, `${PROFILE}.json`)
 
+/**
+ * Parse a positive-integer tuning knob. `undefined` means "not a value this
+ * codebase accepts" — non-numeric, non-finite, or below 1 — and each caller
+ * decides what to do about that: `broker.ts` refuses to boot, the listener
+ * falls back to the default it would have used anyway.
+ *
+ * Lives here, and not in either caller, because the broker and the listener
+ * must agree on what a given `CCCOLLAB_HEARTBEAT_MS` MEANS. Two copies of this
+ * rule is how the pair below drifts apart again.
+ */
+export function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 1) return undefined
+  return Math.floor(n)
+}
+
+/** Interval between the broker's SSE comment frames when nothing is set. */
+export const DEFAULT_BROKER_HEARTBEAT_MS = 15_000
+
+/**
+ * The heartbeat interval the broker will use — the single reader of
+ * `CCCOLLAB_HEARTBEAT_MS`, so the listener can size its read deadline against
+ * the SAME number the broker beats on (see `readDeadlineMsFor`).
+ *
+ * Read at call time rather than frozen at import: the broker is a spawned child
+ * process, so the environment is the only injection channel its own tests have,
+ * and a module-level constant would capture whatever was set when the first
+ * importer loaded.
+ *
+ * A value the broker would refuse resolves to the default here rather than
+ * throwing. That is not leniency: on such a value the broker exits at boot, so
+ * there is no heartbeat to be sized against and no healthy stream to protect —
+ * making the whole MCP server fail to import over a broker knob would turn one
+ * dead child process into a dead session.
+ */
+export function brokerHeartbeatMs(): number {
+  return parsePositiveInt(process.env.CCCOLLAB_HEARTBEAT_MS) ?? DEFAULT_BROKER_HEARTBEAT_MS
+}
+
 /** Persistent unified config file. Contains the locations map with
  *  credentials, auto-join settings, etc. Chmod 600 on write - tokens
  *  must not be world-readable. See `src/config/`. */

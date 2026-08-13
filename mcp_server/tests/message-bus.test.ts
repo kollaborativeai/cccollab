@@ -80,6 +80,23 @@ describe('MessageBus', () => {
       })
     })
 
+    it('includes the topic name in meta when present', async () => {
+      await bus.push(createMessage({ threadTs: 'uuid-1', topicName: 'KAI-401' }))
+      expect(mockMcp.notification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          params: expect.objectContaining({
+            meta: expect.objectContaining({ thread_ts: 'uuid-1', topic: 'KAI-401' }),
+          }),
+        }),
+      )
+    })
+
+    it('omits topic from meta when the message has no topic name', async () => {
+      await bus.push(createMessage({ threadTs: 'uuid-1' }))
+      const meta = mockMcp.notification.mock.calls[0]![0].params.meta as Record<string, string>
+      expect(meta).not.toHaveProperty('topic')
+    })
+
     it('tags remote source when passed', async () => {
       await bus.push(createMessage(), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledWith(
