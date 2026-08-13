@@ -6,6 +6,7 @@ import { LocalTransport } from '../../src/transport/local.js'
 import { TransportRouter } from '../../src/transport/router.js'
 import { ensureLazyAttach } from '../../src/transport/attach.js'
 import { AttachDiagnostics } from '../../src/transport/diagnostics.js'
+import { OrganizationRejectedError } from '../../src/transport/index.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { Transport } from '../../src/transport/index.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
@@ -51,11 +52,14 @@ function createMockDeps(): IdentityToolDeps {
  * fake remote transport. The remote transport's `introduce` records every
  * call it receives (and forwards them to `onIntroduce` when provided).
  * Optional `remoteOverrides` can be used to add extra methods to the fake
- * remote transport (e.g. `getBoundOrganizationName` for the whoami tests).
+ * remote transport (e.g. `getBoundOrganization` for the whoami tests).
  */
 function makeDepsWithRemote(
   onIntroduce?: (args: Record<string, unknown>) => void,
-  remoteOverrides?: Partial<{ getBoundOrganizationName: () => Promise<string | null> }>,
+  remoteOverrides?: Partial<{
+    getBoundOrganization: () => Promise<{ name: string; slug?: string } | null>
+    introduce: (args: Record<string, unknown>) => Promise<void>
+  }>,
 ): IdentityToolDeps {
   const localTransport = new LocalTransport(7850)
   const fakeRemote = {
@@ -253,6 +257,131 @@ describe('Identity Tools', () => {
         const result = JSON.parse(await handleIdentityTool('introduce', { name: 'reviewer' }, deps))
         expect(result.name).toBe('reviewer')
       })
+
+      it('reports an error when the remote refuses the organization, instead of reporting success', async () => {
+        // KAI-407: slugs make a mistyped organization ordinary where a
+        // copy-pasted 32-char id made it near-impossible. A refusal means the
+        // session never bound, so returning the success shape would leave the
+        // caller believing it had.
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new OrganizationRejectedError('Organization not found.')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBeUndefined()
+        expect(result.error).toContain('acme')
+        expect(result.error).toContain('Organization not found.')
+      })
+
+      it('reports an error when the remote refuses guest role (I1), not silent success', async () => {
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new OrganizationRejectedError('Requires member or higher')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBeUndefined()
+        expect(result.error).toMatch(/Requires member or higher|acme/)
+        expect(deps.session.hasName()).toBe(false)
+      })
+
+      /**
+       * C2: org reject must not rename the session or skip channel re-join
+       * bookkeeping under a half-applied identity. Remotes introduce first;
+       * setName only after accept.
+       */
+      it('on org reject does not set the session name and does not re-join channels', async () => {
+        const joinChannel = vi.fn(async () => {})
+        const localIntroduce = vi.fn(async () => {})
+        const localTransport = new LocalTransport(7850)
+        // Spy local introduce/join via a wrapper transport in the router.
+        const localWrapper = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: localIntroduce,
+          joinChannel,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listChannels: vi.fn(async () => []),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c' })),
+          joinTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c', history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+        }
+        const remoteIntroduce = vi.fn(async () => {
+          throw new OrganizationRejectedError('Organization not found.')
+        })
+        const fakeRemote = {
+          source: 'remote' as const,
+          enabled: true,
+          introduce: remoteIntroduce,
+          joinChannel: vi.fn(async () => {}),
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listChannels: vi.fn(async () => []),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c' })),
+          joinTopic: vi.fn(async () => ({ id: 't', topic: 't', channel: 'c', history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+        }
+        const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+        const context = new ActiveContext()
+        // Pretend we were already on a channel under a prior name.
+        context.joinChannel('dev', 'manual', 'local')
+        const deps: IdentityToolDeps = {
+          session,
+          context,
+          router: new TransportRouter([localWrapper as unknown as Transport, fakeRemote as unknown as Transport]),
+        }
+
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'bob', organization: 'typo-slug' }, deps),
+        )
+        expect(result.error).toContain('typo-slug')
+        expect(session.hasName()).toBe(false)
+        expect(localIntroduce).not.toHaveBeenCalled()
+        expect(joinChannel).not.toHaveBeenCalled()
+        expect(remoteIntroduce).toHaveBeenCalled()
+        void localTransport
+      })
+
+      it('still reports success when a transport fails transiently, so a later introduce re-registers', async () => {
+        // The counterpart to the test above: a dropped connection is not a
+        // refusal. It stays non-fatal — the org is fine, the socket was not.
+        const deps = makeDepsWithRemote(undefined, {
+          introduce: async () => {
+            throw new Error('WebSocket closed')
+          },
+        })
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme' }, deps),
+        )
+        expect(result.name).toBe('reviewer')
+        expect(result.error).toBeUndefined()
+      })
+
+      it('treats whitespace-only organization as missing when a remote is enabled', async () => {
+        const deps = makeDepsWithRemote()
+        const result = JSON.parse(
+          await handleIdentityTool('introduce', { name: 'reviewer', organization: '   ' }, deps),
+        )
+        expect(result.error).toMatch(/organization/i)
+      })
     })
 
     describe('whoami — organization', () => {
@@ -272,18 +401,36 @@ describe('Identity Tools', () => {
         expect(result.locations.local.organization).toBe('local')
       })
 
-      it('reports the bound organization name for a remote location', async () => {
+      it('omits an empty bound organization slug rather than reporting it', async () => {
+        // `organizationSlug: ''` would survive JSON.stringify and read as a
+        // usable handle; echoing it back to `introduce` trips "An organization
+        // is required". Absent is the honest answer. (`undefined` is
+        // unobservable here — stringify drops it either way.)
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => 'Acme',
+          getBoundOrganization: async () => ({ name: 'Acme', slug: '' }),
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
         expect(result.locations.remote.organization).toBe('Acme')
+        expect('organizationSlug' in result.locations.remote).toBe(false)
+      })
+
+      it('reports the bound organization slug as its own field, not packed into the name', async () => {
+        // KAI-407: the slug is what `introduce` accepts, so it must be readable
+        // without parsing it back out of a display string — an org name may
+        // itself contain parentheses (`Acme (EU)`).
+        const deps = makeDepsWithRemote(undefined, {
+          getBoundOrganization: async () => ({ name: 'Acme (EU)', slug: 'acme_eu' }),
+        })
+        await handleIdentityTool('introduce', { name: 'reviewer', organization: 'acme_eu' }, deps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.remote.organization).toBe('Acme (EU)')
+        expect(result.locations.remote.organizationSlug).toBe('acme_eu')
       })
 
       it('omits organization when the remote location has no bound org yet', async () => {
         const deps = makeDepsWithRemote(undefined, {
-          getBoundOrganizationName: async () => null,
+          getBoundOrganization: async () => null,
         })
         await handleIdentityTool('introduce', { name: 'reviewer', organization: 'org_a' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))

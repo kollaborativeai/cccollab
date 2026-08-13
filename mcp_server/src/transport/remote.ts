@@ -5,7 +5,10 @@ import { anyApi } from 'convex/server'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
+  OrganizationRejectedError,
   TopicNameConflictError,
+  type BoundOrganization,
+  type OrganizationSummary,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -366,9 +369,12 @@ export class RemoteTransport implements Transport {
    * holds. Callers that need a best-effort introduce should catch the
    * rethrow themselves.
    *
-   * `registerFailure` still runs on the way out so the circuit breaker
-   * counts this against the failure window — a transient blip at startup
-   * is a failure just like one mid-session.
+   * Transient transport faults still count against the circuit breaker via
+   * `registerFailure`. A refused organization (wrong slug/id, non-member,
+   * guest role) does NOT — that is the caller's argument being wrong, not
+   * the transport being unhealthy (KAI-407 / C1). Counting those trips the
+   * breaker after three typos and then a correct introduce reports local-only
+   * success with remote permanently disabled.
    */
   async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
     if (!this.enabled) {
@@ -396,6 +402,10 @@ export class RemoteTransport implements Transport {
         /* best-effort preload */
       }
     } catch (err) {
+      // Org / authz refusals: rethrow without counting against the breaker.
+      if (args.organizationId !== undefined && isOrganizationRejection(err)) {
+        throw new OrganizationRejectedError(extractConvexErrorMessage(err))
+      }
       this.registerFailure('introduce', err)
       throw err
     }
@@ -521,15 +531,23 @@ export class RemoteTransport implements Transport {
 
   /**
    * Lists the authenticated user's organizations on KAI's deployment.
-   * Backs the `list_organizations` tool.
+   * Backs the `list_organizations` tool. `slug` (KAI-407) is absent on orgs
+   * that never got one; those remain addressable by `id`.
    */
-  async listOrganizations(): Promise<Array<{ id: string; name: string }>> {
+  async listOrganizations(): Promise<OrganizationSummary[]> {
     if (!this.enabled) return []
     try {
-      return (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
+      const rows = (await this.client.query(fn<'query'>(this.refs.organizations.queries.listForUser), {})) as Array<{
         id: string
         name: string
+        slug?: string
       }>
+      // S1: normalize empty slug at the remote edge so list/get/whoami share one rule.
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        ...(r.slug ? { slug: r.slug } : {}),
+      }))
     } catch (err) {
       this.registerFailure('listOrganizations', err)
       return []
@@ -537,22 +555,32 @@ export class RemoteTransport implements Transport {
   }
 
   /**
-   * Returns the name of the organization this transport's session is bound
-   * to, or null when no session has been introduced or the lookup fails.
-   * Backs the `organization` field of `whoami`.
+   * Returns the organization this transport's session is bound to — its
+   * display `name`, plus its `slug` (KAI-407) when it has one. Backs the
+   * `organization` / `organizationSlug` fields of `whoami`. Null when no
+   * session has been introduced or the lookup fails.
+   *
+   * The slug is reported as its own field rather than folded into the name
+   * (`"Acme (acme)"`), because the point of surfacing it is that a caller can
+   * hand it straight back to `introduce` — and a name may itself contain
+   * parentheses (`Acme (EU)`), which would make the packed form ambiguous to
+   * pick apart.
    *
    * Errors are intentionally swallowed without `registerFailure` — this
    * method backs an informational status surface (`whoami`) that is polled
    * frequently and should never cause the remote transport's circuit
    * breaker to trip on a transient query hiccup.
    */
-  async getBoundOrganizationName(): Promise<string | null> {
+  async getBoundOrganization(): Promise<BoundOrganization | null> {
     if (!this.enabled || !this.sessionId) return null
     try {
       const ctx = (await this.client.query(fn<'query'>(this.refs.sessions.queries.getSessionContext), {
         sessionId: this.sessionId,
-      })) as { organizationName: string }
-      return ctx.organizationName
+      })) as { organizationName: string; organizationSlug?: string }
+      return {
+        name: ctx.organizationName,
+        ...(ctx.organizationSlug ? { slug: ctx.organizationSlug } : {}),
+      }
     } catch {
       return null
     }
@@ -1247,15 +1275,74 @@ function extractConvexErrorCode(err: unknown): string | null {
   return null
 }
 
+/**
+ * The refusal text the BACKEND sent, preferred over anything the client
+ * assembled.
+ *
+ * `err.data` is the ConvexError payload, and Convex preserves it across the
+ * wire in both of the shapes this backend throws: `ConvexError({code, message})`
+ * gives an object, and `ConvexError('Requires member or higher')`
+ * (`frontend/src/convex/utils.ts`, reached from `requireCccollabParticipant`)
+ * gives a bare STRING. Only the object shape used to be read, so every
+ * string-payload refusal fell through to `err.message` — which on the sync
+ * client is `createHybridErrorStacktrace`: the refusal text *plus* server file
+ * paths and line numbers, which the tool layer then interpolates into the
+ * agent's context (cc#31 FINDING-31a).
+ *
+ * Reading the payload is also what makes classification structural rather than
+ * textual. `err.message` is the field a deployment is free to mask — KAI-434
+ * was exactly that failure, a classifier matching text production had replaced
+ * with "Server Error" — while the payload survives. `isOrganizationRejection`
+ * consumes this, so a masked message no longer downgrades a hard role refusal
+ * into a transient fault that `introduce` swallows and reports as success.
+ */
 function extractConvexErrorMessage(err: unknown): string {
   if (typeof err === 'object' && err !== null && 'data' in err) {
     const data = (err as { data: unknown }).data
+    if (typeof data === 'string' && data !== '') return data
     if (typeof data === 'object' && data !== null && 'message' in data) {
       const message = (data as { message: unknown }).message
       if (typeof message === 'string') return message
     }
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Detect whether an introduce failure is the backend refusing the
+ * organization bind, as opposed to a transient transport fault.
+ *
+ * Production (slug-resolving backend):
+ *  - `ConvexError({code: 'ORGANIZATION_NOT_FOUND'})` — unknown slug/id,
+ *    non-member, archived (collapsed into one code on purpose).
+ *  - Role/authz refusal — guest (or lower) hits `requireCccollabParticipant`
+ *    with "Requires member or higher" (I1). Not a transport fault.
+ *
+ * Legacy-compat:
+ *  - `ArgumentValidationError` whose **message** implicates `organizationId`
+ *    — a backend whose `introduce` validator is still `v.id('organizations')`.
+ *    The production path for AVE is the **message** regex (Convex embeds the
+ *    name in the message more often than as `err.name`); we do not treat every
+ *    AVE as an org rejection (I7).
+ *
+ * Callers must additionally confirm an `organizationId` was actually sent
+ * before treating an ArgumentValidationError as an org rejection.
+ */
+function isOrganizationRejection(err: unknown): boolean {
+  if (extractConvexErrorCode(err) === 'ORGANIZATION_NOT_FOUND') return true
+
+  const message = extractConvexErrorMessage(err)
+  // Guest / insufficient-role on introduce (I1). Distinct from ORGANIZATION_NOT_FOUND.
+  if (/Requires member or higher/i.test(message) || /Not authorized/i.test(message)) {
+    return true
+  }
+
+  // Legacy AVE: only when the message names organizationId (I7).
+  const looksLikeAve =
+    (err instanceof Error && err.name === 'ArgumentValidationError') || /ArgumentValidationError/i.test(message)
+  if (looksLikeAve && /organizationId/i.test(message)) return true
+
+  return false
 }
 
 function isFunctionNotFoundError(err: unknown): boolean {

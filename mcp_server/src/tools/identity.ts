@@ -2,7 +2,7 @@ import type { ActiveContext } from '../context.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import type { TransportRouter } from '../transport/router.js'
-import { LOCAL_LOCATION, type Transport } from '../transport/index.js'
+import { LOCAL_LOCATION, OrganizationRejectedError, type Transport } from '../transport/index.js'
 import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
@@ -85,26 +85,72 @@ export async function handleIdentityTool(
         organization?: string
       }
 
-      const hasRemote = deps.router.enabled().some((t) => t.source !== LOCAL_LOCATION)
-      if (hasRemote && !organization) {
+      // S3: whitespace-only must not count as "present".
+      const organizationId = organization?.trim() || undefined
+
+      const enabled = deps.router.enabled()
+      const remotes = enabled.filter((t) => t.source !== LOCAL_LOCATION)
+      const locals = enabled.filter((t) => t.source === LOCAL_LOCATION)
+      const hasRemote = remotes.length > 0
+
+      if (hasRemote && !organizationId) {
         return JSON.stringify({
-          error: 'An organization is required. Call list_organizations and pass an id as `organization`.',
+          error:
+            'An organization is required. Call list_organizations and pass its `slug` (or `id`) as `organization`.',
         })
       }
 
+      // C2: when an org is being bound, introduce remotes FIRST — before
+      // setName / local introduce. A refused org must not rename the session
+      // or leave channel re-joins skipped under a half-applied identity.
+      // Retrying the SAME bad value fails forever (backend); a different
+      // valid slug/id succeeds while the transport is still enabled (I5).
+      if (organizationId) {
+        for (const transport of remotes) {
+          try {
+            await transport.introduce({
+              sessionName: displayName,
+              objective,
+              organizationId,
+            })
+          } catch (err) {
+            if (err instanceof OrganizationRejectedError) {
+              // Do not setName; do not touch local; rejoin not needed.
+              // Multi-remote partial bind after one success is a product
+              // decision (I2) — left alone for Samuel.
+              return JSON.stringify({
+                error: `Could not join organization "${organizationId}" at "${transport.source}": ${err.message}`,
+              })
+            }
+            // Transient: continue; a later introduce may re-register.
+          }
+        }
+      }
+
+      // Commit local identity only after remote org bind accepted (or no
+      // remote/org path).
       deps.session.setName(displayName)
       deps.session.setObjective(objective)
 
-      // Identity fans out: every enabled transport learns who we are so
-      // it can attribute messages and list us in `list_sessions`. Each
-      // introduce() is best-effort; a transient failure on one transport
-      // must not prevent the other from registering.
-      for (const transport of deps.router.enabled()) {
+      // Local transport (and remotes when no org was requested — local-only
+      // fan-out). Remotes with an org were already introduced above.
+      const remaining = organizationId ? locals : enabled
+      for (const transport of remaining) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+          await transport.introduce({
+            sessionName: displayName,
+            objective,
+            organizationId,
+          })
+        } catch (err) {
+          if (err instanceof OrganizationRejectedError) {
+            // Should not happen on local (ignores org); if a remote is in
+            // `remaining` without orgId this path is unused. Still hard-fail.
+            return JSON.stringify({
+              error: `Could not join organization "${organizationId}" at "${transport.source}": ${err.message}`,
+            })
+          }
+          // Non-fatal transient.
         }
       }
 
@@ -201,8 +247,13 @@ export async function handleIdentityTool(
  * cases). The local transport has no degradation surface.
  *
  * `organization` is `"local"` for the local broker, the bound
- * organization name for a remote transport (via `getBoundOrganizationName`),
+ * organization name for a remote transport (via `getBoundOrganization`),
  * or omitted when a remote transport has no session yet.
+ *
+ * `organizationSlug` (KAI-407) accompanies it when the bound organization has
+ * a slug. It is kept a separate field rather than folded into `organization`
+ * because it is the handle `introduce` accepts — a caller reads it here and
+ * passes it straight back, with no display string to parse.
  *
  * `diagnostics`, when provided, contributes an entry for every location
  * whose attach FAILED and which is therefore absent from the router
@@ -210,32 +261,42 @@ export async function handleIdentityTool(
  * A location that is live in the router takes precedence over a stale
  * diagnostics entry for the same name.
  */
+type LocationState = {
+  enabled: boolean
+  degradation?: string
+  organization?: string
+  organizationSlug?: string
+}
+
 async function buildLocationStates(
   router: TransportRouter,
   diagnostics?: AttachDiagnostics,
-): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
+): Promise<Record<string, LocationState>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
       const maybeDegraded = transport as Partial<RemoteTransport>
       const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
 
       let organization: string | undefined
+      let organizationSlug: string | undefined
       if (transport.source === LOCAL_LOCATION) {
         organization = 'local'
-      } else if (typeof maybeDegraded.getBoundOrganizationName === 'function') {
-        organization = (await maybeDegraded.getBoundOrganizationName()) ?? undefined
+      } else if (typeof maybeDegraded.getBoundOrganization === 'function') {
+        const bound = await maybeDegraded.getBoundOrganization()
+        organization = bound?.name
+        organizationSlug = bound?.slug
       }
 
-      const state: { enabled: boolean; degradation?: string; organization?: string } = {
+      const state: LocationState = {
         enabled: transport.enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
+        ...(organizationSlug ? { organizationSlug } : {}),
       }
       return [transport.source, state] as const
     }),
   )
-  const states: Record<string, { enabled: boolean; degradation?: string; organization?: string }> =
-    Object.fromEntries(entries)
+  const states: Record<string, LocationState> = Object.fromEntries(entries)
 
   // Merge in failed-attach locations that never made it into the router.
   // A live router entry always wins over a diagnostics record for the

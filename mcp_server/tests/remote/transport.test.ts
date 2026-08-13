@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
 
 import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
+import { OrganizationRejectedError } from '../../src/transport/index.js'
 
 /**
  * Self-disable transition test.
@@ -351,19 +352,223 @@ describe('RemoteTransport — organizations', () => {
     )
   })
 
-  it('getBoundOrganizationName returns the org name from getSessionContext', async () => {
+  it('listOrganizations passes the org slug through from the listForUser query', async () => {
+    const { client } = makeStubClient(async () => [{ id: 'org_a', name: 'Acme', slug: 'acme' }])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    expect(await transport.listOrganizations()).toEqual([{ id: 'org_a', name: 'Acme', slug: 'acme' }])
+  })
+
+  it('listOrganizations omits an empty slug at the remote edge (S1)', async () => {
+    const { client } = makeStubClient(async () => [{ id: 'org_a', name: 'Acme', slug: '' }])
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const orgs = await transport.listOrganizations()
+    expect(orgs).toEqual([{ id: 'org_a', name: 'Acme' }])
+    expect('slug' in orgs[0]!).toBe(false)
+  })
+
+  it('getBoundOrganization returns the slug as its own field so whoami can hand it to introduce', async () => {
     let queryCallCount = 0
     const { client } = makeStubClient(
       async () => {
         queryCallCount++
         if (queryCallCount === 1) return [] // introduce's listJoinedForUser preload
-        return { sessionName: 'reviewer', organizationName: 'Acme' } // getSessionContext
+        return { sessionName: 'reviewer', organizationName: 'Acme', organizationSlug: 'acme' }
+      },
+      async () => 'session_1',
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })
+    expect(await transport.getBoundOrganization()).toEqual({ name: 'Acme', slug: 'acme' })
+  })
+
+  it('getBoundOrganization returns the org name from getSessionContext, omitting an empty slug', async () => {
+    let queryCallCount = 0
+    const { client } = makeStubClient(
+      async () => {
+        queryCallCount++
+        if (queryCallCount === 1) return [] // introduce's listJoinedForUser preload
+        // An org with no slug. The empty string — not `undefined` — is what
+        // makes this observable: `toEqual` ignores an undefined property, so
+        // only `slug: ''` can distinguish omitting the key from passing it
+        // through.
+        return { sessionName: 'reviewer', organizationName: 'Acme', organizationSlug: '' } // getSessionContext
       },
       async () => 'session_1', // introduce mutation
     )
     const transport = new RemoteTransport({ client, log: () => {} })
     await transport.introduce({ sessionName: 'reviewer', organizationId: 'org_a' })
-    expect(await transport.getBoundOrganizationName()).toBe('Acme')
+    expect(await transport.getBoundOrganization()).toEqual({ name: 'Acme' })
+  })
+
+  it('introduce raises OrganizationRejectedError when the backend refuses the organization', async () => {
+    // The slug-resolving backend collapses unknown/non-member/archived into
+    // one ConvexError so `introduce` cannot be used to probe which slugs
+    // exist. Its message must reach the caller verbatim.
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'ORGANIZATION_NOT_FOUND', message: 'Organization not found.' },
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toThrow(
+      new OrganizationRejectedError('Organization not found.'),
+    )
+  })
+
+  /**
+   * C1 (KAI-407 review): three org refusals must NOT trip the circuit breaker.
+   * A refused org is the caller's argument being wrong, not transport health.
+   * Without this, a fourth introduce with a correct slug reports local-only
+   * success because the remote was dropped from `router.enabled()`.
+   */
+  it('org refusals do not disable the transport (five refusals leave enabled=true)', async () => {
+    const { client, mutationMock } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'ORGANIZATION_NOT_FOUND', message: 'Organization not found.' },
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+
+    for (let i = 0; i < 5; i++) {
+      await expect(
+        transport.introduce({ sessionName: 'reviewer', organizationId: `typo-${i}` }),
+      ).rejects.toBeInstanceOf(OrganizationRejectedError)
+      expect(transport.enabled).toBe(true)
+    }
+    expect(transport.degradation).toBeNull()
+
+    // A subsequent good introduce must still hit the client (not short-circuit
+    // as "remote transport is disabled").
+    mutationMock.mockImplementation(async () => 'session_ok')
+    await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })
+    expect(transport.enabled).toBe(true)
+    expect(mutationMock).toHaveBeenCalled()
+  })
+
+  /** I1: guest role denial is a hard org-bind refusal, not a soft transport fault. */
+  it('introduce raises OrganizationRejectedError when the backend refuses guest role', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Uncaught ConvexError'), {
+          data: { code: 'FORBIDDEN', message: 'Requires member or higher' },
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
+    expect(transport.enabled).toBe(true)
+  })
+
+  /**
+   * cc#31 FINDING-31a. Production does NOT throw the object payload the test
+   * above uses: `requireCccollabParticipant` reaches
+   * `throw new ConvexError('Requires member or higher')` — a bare STRING
+   * payload. The classifier used to read only `err.message` for that shape, and
+   * `err.message` is the field a deployment is free to mask. KAI-434 is this
+   * repo's own precedent: a classifier tuned to text production had already
+   * replaced with "Server Error".
+   */
+  it('classifies a role refusal from the payload when the message is masked', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        // Masked message, intact payload: the shape a redacting deployment produces.
+        throw Object.assign(new Error('[Request ID: 8f2c] Server Error'), {
+          data: 'Requires member or higher',
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
+    // Unclassified, this would have counted against the breaker as a transport
+    // fault — and the tool layer would have reported the introduce as a success.
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('surfaces the backend refusal text, not the client stacktrace, for a string payload', async () => {
+    // What the sync client puts in `err.message` for a ConvexError: the refusal
+    // plus server frames (createHybridErrorStacktrace). The tool layer
+    // interpolates this straight into the agent's context.
+    const hybrid =
+      '[CONVEX M(cccollab/sessions:introduce)] Uncaught ConvexError: Requires member or higher\n' +
+      '    at requireOrganizationPermission (../convex/utils.ts:1029:41)\n' +
+      '    at handler (../convex/cccollab/sessions.ts:336:5)\n  Called by client'
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error(hybrid), { data: 'Requires member or higher' })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(OrganizationRejectedError)
+    expect((err as Error).message).toBe('Requires member or higher')
+    expect((err as Error).message).not.toMatch(/convex\/utils\.ts|at handler|Called by client/)
+  })
+
+  it('introduce raises OrganizationRejectedError when the backend validator refuses a slug', async () => {
+    // A backend whose introduce validator is still `v.id('organizations')`
+    // rejects any slug before the handler runs. Deterministic, not transient.
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Invalid argument `organizationId`'), { name: 'ArgumentValidationError' })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
+  })
+
+  /**
+   * cc#31 FINDING-31b. I7 narrowed "every ArgumentValidationError is an org
+   * rejection" to "only when the message names organizationId", and nothing
+   * held the narrowing: deleting `&& /organizationId/i.test(message)` left the
+   * whole suite green. Unheld, a validator tightening on an unrelated argument
+   * sends the agent to fix an organization that was never the problem, while
+   * the transport that IS misbehaving stays uncounted by the breaker and marked
+   * healthy.
+   */
+  it('does not treat an ArgumentValidationError about another argument as an org rejection (I7)', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Invalid argument `machine`: expected string, got number'), {
+          name: 'ArgumentValidationError',
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e: unknown) => e)
+
+    expect(err).not.toBeInstanceOf(OrganizationRejectedError)
+    expect((err as Error).message).toMatch(/machine/)
+  })
+
+  it('introduce rethrows a transient failure as-is, so the tool layer keeps treating it as non-fatal', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw new Error('WebSocket closed')
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e) => e)
+    expect(err).not.toBeInstanceOf(OrganizationRejectedError)
+    expect(err.message).toBe('WebSocket closed')
   })
 })
 
