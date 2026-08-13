@@ -26,13 +26,19 @@ export class SessionManager {
     return parts.join(' | ')
   }
 
-  /** Short name for thread messages: the chosen name, or username if not set */
+  /** Short name for thread messages: the chosen name, or username if not set.
+   *  Empty/whitespace names fall through to the username (KAI-446 I5) so a
+   *  bad introduce cannot leave the session with a blank SSE tag. */
   get displayName(): string {
-    return this.name ?? this.username
+    if (this.name !== undefined && this.name.trim().length > 0) return this.name
+    return this.username
   }
 
   setName(name: string): void {
-    this.name = name
+    const trimmed = name.trim()
+    // Empty/whitespace is not a name (KAI-446 I5) — leave unset so hasName()
+    // is false and displayName falls back to the username.
+    this.name = trimmed.length > 0 ? trimmed : undefined
   }
 
   setObjective(objective: string | undefined): void {
@@ -58,9 +64,9 @@ export class SessionManager {
     return this.name !== undefined && senderName === this.name
   }
 
-  /** True once introduce() has been called */
+  /** True once introduce() has been called with a non-empty name */
   hasName(): boolean {
-    return this.name !== undefined
+    return this.name !== undefined && this.name.trim().length > 0
   }
 
   static parse(text: string): { sender: string; text: string } | null {

@@ -153,7 +153,7 @@ function makeDeps(transports: Transport[], sessionName = 'architect') {
   session.setName(sessionName)
   const context = new ActiveContext()
   const router = new TransportRouter(transports)
-  return { session, context, router }
+  return { session, context, router, onIdentityChanged: () => {} }
 }
 
 describe('Dual transport: channel routing', () => {
@@ -473,6 +473,7 @@ function makeDepsWithLocations(
     messageBus: extras.messageBus,
     cwd: extras.cwd ?? '/tmp/test',
     env: extras.env ?? {},
+    onIdentityChanged: () => {},
   }
 }
 
@@ -913,7 +914,7 @@ describe('KAI-368: a failing remote attach does not brick local', () => {
     expect(shutdown).toHaveBeenCalledTimes(1)
     // 4. whoami surfaces local as healthy and personal as ✗ degraded,
     //    sourced from the diagnostics registry.
-    const deps: IdentityToolDeps = { session, context, router, diagnostics }
+    const deps: IdentityToolDeps = { session, context, router, diagnostics, onIdentityChanged: () => {} }
     const who = JSON.parse(await handleIdentityTool('whoami', {}, deps))
     expect(who.locations.local).toEqual({ enabled: true, organization: 'local' })
     expect(who.locations.personal.enabled).toBe(false)

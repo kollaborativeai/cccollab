@@ -179,6 +179,19 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // handles non-local locations; the local broker path stays inline
   // because it doesn't need the transport-factory / introduce-first
   // dance. Logic is intentionally identical to the pre-refactor loop.
+  //
+  // KAI-446 ceiling, left as-is deliberately: before `introduce`,
+  // `displayName` is the OS username, so this subscribes a session by that
+  // name and `introduce` then re-joins under the chosen one without removing
+  // it. Since the broker gates the `/events` stream on session name, that
+  // leftover is a standing entitled identity nothing legitimate reads as —
+  // the listener stays anonymous until it has a name (broker-event-listener.ts
+  // :91). Dropping the join when `hasName()` is false is the obvious fix and
+  // matches the `introduce` call above, but it also silently narrows
+  // pre-introduce discovery (`list_channels`/`list_topics` would answer empty),
+  // and nothing here is import-testable to prove either way. Follow-up, not
+  // this branch — and it changes no exploitability: `POST /channels/join`
+  // mints an entitled name for anyone who asks.
   for (const location of resolved.locations) {
     if (!location.isLocal) continue
     const transport = router.all().find((t) => t.source === location.name)
@@ -323,6 +336,11 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
     env,
     ensureAttached,
     diagnostics,
+    // The broker streams channel-tagged events only to connections whose
+    // session is subscribed (KAI-446), and the listener below starts before a
+    // late `introduce` can name this session — so re-open the stream when it
+    // does, or the session never hears anything again.
+    onIdentityChanged: () => listener.reconnectForIdentity(),
   })
 
   let shutdownInFlight: Promise<void> | null = null
@@ -424,6 +442,9 @@ interface ToolDeps {
    *  name gate for pre-introduce discovery. Cheap and idempotent after the
    *  first attach — see `ensureLazyAttach`. */
   ensureAttached: (target?: string, opts?: { force?: boolean; allowWithoutName?: boolean }) => Promise<void>
+  /** Re-identify the broker's SSE stream after `introduce` sets a name.
+   *  See `IdentityToolDeps.onIdentityChanged`. */
+  onIdentityChanged: () => void
   /** Registry of failed non-local attaches (KAI-368). Passed through to
    *  the identity tools so `whoami` can surface a location that failed to
    *  attach and is therefore absent from the router. */
@@ -523,7 +544,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
       description:
         'Set your name and optionally your current objective. Required before any topic/messaging tool will work. Registers on every enabled transport. Returns JSON.',
       inputSchema: {
-        name: z.string().describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
+        name: z.string().trim().min(1).describe('Your display name (e.g., "architect", "frontend", "reviewer")'),
         objective: z.string().optional().describe('What you are currently working on (optional)'),
         organization: z
           .string()
@@ -547,7 +568,7 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source, confirmed?, hint?}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). For local channels, `confirmed: false` means the local context lists the channel but the broker does not — call join_channel to re-subscribe.',
       inputSchema: {},
     },
     async () => {

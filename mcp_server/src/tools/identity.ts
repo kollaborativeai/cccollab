@@ -66,6 +66,14 @@ export interface IdentityToolDeps {
    *  reads this separate registry to still surface the location as
    *  disabled + degraded. Optional so legacy unit tests keep compiling. */
   diagnostics?: AttachDiagnostics
+  /** Called after `introduce` has registered a name, so the broker's SSE
+   *  stream can be re-opened under it. The broker scopes that stream to the
+   *  connecting session's subscriptions (KAI-446) and the listener connects
+   *  before `introduce` may have run, so without this a session that names
+   *  itself at runtime stays anonymous on the broker and receives nothing.
+   *  Required (KAI-446 I9): production correctness hangs off this wiring;
+   *  tests pass `() => {}` when they do not care. */
+  onIdentityChanged: () => void
 }
 
 export async function handleIdentityTool(
@@ -92,8 +100,22 @@ export async function handleIdentityTool(
         })
       }
 
-      deps.session.setName(displayName)
+      // Reject empty/whitespace names (KAI-446 I5): `setName("")` used to make
+      // hasName() true while displayName was "", so the SSE stream connected
+      // as anonymous and stayed deaf to every channel-tagged event.
+      const trimmedName = typeof displayName === 'string' ? displayName.trim() : ''
+      if (!trimmedName) {
+        return JSON.stringify({ error: 'Name must be a non-empty string.' })
+      }
+
+      deps.session.setName(trimmedName)
       deps.session.setObjective(objective)
+
+      // Re-open the broker's event stream under the new name before the
+      // transports register it. The stream is subscription-scoped (KAI-446),
+      // so a session that was anonymous when the listener connected would
+      // otherwise never receive another channel-tagged event.
+      deps.onIdentityChanged()
 
       // Identity fans out: every enabled transport learns who we are so
       // it can attribute messages and list us in `list_sessions`. Each
@@ -101,7 +123,7 @@ export async function handleIdentityTool(
       // must not prevent the other from registering.
       for (const transport of deps.router.enabled()) {
         try {
-          await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
+          await transport.introduce({ sessionName: trimmedName, objective, organizationId: organization })
         } catch {
           // Non-fatal: a subsequent introduce or tool call will
           // re-register.
@@ -110,12 +132,19 @@ export async function handleIdentityTool(
 
       // Channel joins go per-location: each subscribed channel has its
       // own transport and the router picks the matching one by name.
+      // Failures are no longer silent (KAI-446 I1): broker membership is
+      // what entitles the SSE stream, so a failed re-join leaves the
+      // session permanently deaf. Surface them the same way version drift
+      // is surfaced — on the result, where the model actually reads.
+      const joinFailures: string[] = []
       for (const ch of deps.context.getSubscribedChannels()) {
         try {
           const transport = deps.router.get(ch.location)
-          await transport.joinChannel({ sessionName: displayName, channel: ch.name })
-        } catch {
-          // Non-fatal.
+          await transport.joinChannel({ sessionName: trimmedName, channel: ch.name })
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          joinFailures.push(`${ch.name}@${ch.location}: ${reason}`)
+          console.error(`[cccollab] introduce re-join failed for ${ch.name}@${ch.location}: ${reason}`)
         }
       }
 
@@ -125,11 +154,16 @@ export async function handleIdentityTool(
       // describe this server. Attached to the result rather than logged: the
       // model reads results, and stderr goes to a file nobody opens mid-session.
       const versionWarning = deps.versionState ? driftWarning(deps.versionState) : undefined
+      const joinWarning =
+        joinFailures.length > 0
+          ? `Failed to re-join ${joinFailures.length} channel(s) under the new name (SSE will stay deaf until join_channel succeeds): ${joinFailures.join('; ')}`
+          : undefined
+      const warnings = [versionWarning, joinWarning].filter((w): w is string => Boolean(w))
 
       return JSON.stringify({
-        name: displayName,
+        name: trimmedName,
         ...(objective ? { objective } : {}),
-        ...(versionWarning ? { warning: versionWarning } : {}),
+        ...(warnings.length === 1 ? { warning: warnings[0] } : warnings.length > 1 ? { warnings } : {}),
       })
     }
     case 'whoami': {
@@ -141,11 +175,6 @@ export async function handleIdentityTool(
       const activeTopicName = deps.context.hasTopic() ? deps.context.getTopicName() : undefined
       const activeTopicChannel = deps.context.getTopicChannel()
       const activeTopicLocation = deps.context.getTopicLocation()
-      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => ({
-        name: c.name,
-        location: c.location,
-        source: c.source,
-      }))
 
       // Expose every transport's runtime state so the user sees
       // degradation on any location (not just "the first non-local")
@@ -154,6 +183,25 @@ export async function handleIdentityTool(
       // enabled rather than missing.
       await deps.ensureAttached?.()
       const locationStates = await buildLocationStates(deps.router, deps.diagnostics)
+
+      // Reconcile local context against the broker's live membership
+      // (KAI-446 I6). ActiveContext can claim channels the stream is no
+      // longer entitled to (failed re-join, shared-name leave residue, or
+      // a join that only updated local state). Remote already surfaces
+      // degradation via buildLocationStates; the local broker is the one
+      // transport we used to take on faith.
+      const brokerLocalChannels = await confirmLocalBrokerChannels(deps)
+
+      const subscribedChannels = deps.context.getSubscribedChannels().map((c) => {
+        const base = { name: c.name, location: c.location, source: c.source }
+        if (c.location !== LOCAL_LOCATION || brokerLocalChannels === null) return base
+        const confirmed = brokerLocalChannels.has(c.name)
+        return {
+          ...base,
+          confirmed,
+          ...(!confirmed ? { hint: 'Not confirmed by the local broker. Call join_channel to re-subscribe.' } : {}),
+        }
+      })
 
       return JSON.stringify({
         name: deps.session.displayName,
@@ -187,6 +235,24 @@ export async function handleIdentityTool(
     }
     default:
       throw new Error(`Unknown identity tool: ${name}`)
+  }
+}
+
+/**
+ * Ask the local transport which channels the named session is actually
+ * subscribed to on the broker. Returns `null` when the local transport is
+ * missing or the listing fails (network / 5xx) so callers do not invent a
+ * false "unconfirmed" diagnosis from a transport outage.
+ */
+async function confirmLocalBrokerChannels(deps: IdentityToolDeps): Promise<Set<string> | null> {
+  const local = deps.router.enabled().find((t) => t.source === LOCAL_LOCATION)
+  if (!local) return null
+  try {
+    const listed = await local.listChannels({ sessionName: deps.session.displayName })
+    if (!Array.isArray(listed)) return null
+    return new Set(listed.map((c) => c.name))
+  } catch {
+    return null
   }
 }
 

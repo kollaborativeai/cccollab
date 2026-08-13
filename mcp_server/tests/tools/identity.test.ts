@@ -43,6 +43,7 @@ function createMockDeps(): IdentityToolDeps {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
     router: new TransportRouter([transport]),
+    onIdentityChanged: () => {},
   }
 }
 
@@ -86,6 +87,7 @@ function makeDepsWithRemote(
       localTransport,
       fakeRemote as unknown as import('../../src/transport/index.js').Transport,
     ]),
+    onIdentityChanged: () => {},
   }
 }
 
@@ -98,6 +100,7 @@ function makeLocalOnlyDeps(): IdentityToolDeps {
     session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
     context: new ActiveContext(),
     router: new TransportRouter([transport]),
+    onIdentityChanged: () => {},
   }
 }
 
@@ -125,6 +128,28 @@ describe('Identity Tools', () => {
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
       expect(result).toEqual({ name: 'architect' })
+    })
+
+    it('introduce rejects an empty or whitespace-only name (KAI-446 I5)', async () => {
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: '   ' }, deps))
+      expect(result.error).toMatch(/non-empty/i)
+      expect(deps.session.hasName()).toBe(false)
+    })
+
+    it('introduce surfaces a warning when channel re-join fails (KAI-446 I1)', async () => {
+      const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/channels/join')) {
+          return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }
+        }
+        return { ok: true, json: async () => ({ ok: true }) }
+      })
+      vi.stubGlobal('fetch', mockFetch)
+      deps.context.joinChannel('backend', 'fallback', 'local')
+      const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
+      expect(result.name).toBe('architect')
+      expect(result.warning ?? result.warnings).toBeTruthy()
+      const warningText = result.warning ?? (Array.isArray(result.warnings) ? result.warnings.join(' ') : '')
+      expect(warningText).toMatch(/re-join|backend/i)
     })
 
     it('introduce includes objective in JSON when provided', async () => {
@@ -222,6 +247,101 @@ describe('Identity Tools', () => {
           enabled: false,
           degradation: 'introduce() failed for "personal": Server Error',
         })
+      })
+
+      /**
+       * KAI-446 I6: whoami used to print ActiveContext subscriptions as a
+       * clean bill of health even when the broker no longer entitled the
+       * stream. Mark local channels the broker does not confirm so silence
+       * is diagnosable (hint → join_channel).
+       */
+      it('marks local context channels the broker does not confirm (KAI-446 I6)', async () => {
+        const listChannels = vi.fn(async (args: { sessionName?: string }) => {
+          expect(args.sessionName).toBe('architect')
+          // Broker only knows `default` — `ghost` is context-only residue.
+          return [{ name: 'default', subscriberCount: 1, sessionCount: 1 }]
+        })
+        const fakeLocal = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+          joinChannel: vi.fn(async () => {}),
+          listChannels,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't1', topic: 'x', channel: 'default' })),
+          joinTopic: vi.fn(async () => ({ history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+          broadcast: vi.fn(async () => {}),
+          getTopicById: vi.fn(async () => null),
+          readTopicMessages: vi.fn(async () => ({ messages: [], hasMore: false })),
+        }
+        const localDeps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([fakeLocal as unknown as Transport]),
+          onIdentityChanged: () => {},
+        }
+        localDeps.context.joinChannel('default', 'manual', 'local')
+        localDeps.context.joinChannel('ghost', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'architect' }, localDeps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, localDeps))
+        expect(listChannels).toHaveBeenCalledWith({ sessionName: 'architect' })
+        expect(result.subscribedChannels).toEqual([
+          { name: 'default', location: 'local', source: 'manual', confirmed: true },
+          {
+            name: 'ghost',
+            location: 'local',
+            source: 'manual',
+            confirmed: false,
+            hint: 'Not confirmed by the local broker. Call join_channel to re-subscribe.',
+          },
+        ])
+      })
+
+      it('omits confirmed when the local broker listing fails (KAI-446 I6)', async () => {
+        const listChannels = vi.fn(async () => {
+          throw new Error('ECONNREFUSED')
+        })
+        const fakeLocal = {
+          source: 'local' as const,
+          enabled: true,
+          introduce: vi.fn(async () => {}),
+          joinChannel: vi.fn(async () => {}),
+          listChannels,
+          deregisterSession: vi.fn(async () => {}),
+          leaveChannel: vi.fn(async () => {}),
+          listTopics: vi.fn(async () => []),
+          createTopic: vi.fn(async () => ({ id: 't1', topic: 'x', channel: 'default' })),
+          joinTopic: vi.fn(async () => ({ history: [] })),
+          leaveTopic: vi.fn(async () => {}),
+          archiveTopic: vi.fn(async () => {}),
+          unarchiveTopic: vi.fn(async () => {}),
+          listSessions: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => {}),
+          hasTopic: vi.fn(() => false),
+          broadcast: vi.fn(async () => {}),
+          getTopicById: vi.fn(async () => null),
+          readTopicMessages: vi.fn(async () => ({ messages: [], hasMore: false })),
+        }
+        const localDeps: IdentityToolDeps = {
+          session: new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' }),
+          context: new ActiveContext(),
+          router: new TransportRouter([fakeLocal as unknown as Transport]),
+          onIdentityChanged: () => {},
+        }
+        localDeps.context.joinChannel('default', 'manual', 'local')
+        await handleIdentityTool('introduce', { name: 'architect' }, localDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, localDeps))
+        // Network failure must not invent "unconfirmed" — leave the field off.
+        expect(result.subscribedChannels).toEqual([{ name: 'default', location: 'local', source: 'manual' }])
       })
     })
 
@@ -428,6 +548,7 @@ describe('Identity Tools', () => {
           router,
           locations: [dormant],
           ensureAttached,
+          onIdentityChanged: () => {},
         }
 
         const result = await handleIdentityTool('authenticate', { location: 'acme' }, customDeps)
@@ -508,6 +629,40 @@ describe('Identity Tools', () => {
         expect(result).toContain('clerkClientId')
       })
     })
+  })
+})
+
+/**
+ * KAI-446: the broker scopes the SSE stream to the connecting session's
+ * subscriptions, and the listener opens that stream before `introduce` has
+ * necessarily run. A session that names itself at runtime is therefore
+ * anonymous on the broker until something re-identifies the stream — so
+ * `introduce` has to say it changed.
+ */
+describe('introduce: re-identifies the event stream (KAI-446)', () => {
+  it('signals the identity change after registering the name', async () => {
+    const deps = createMockDeps()
+    const calls: Array<string | undefined> = []
+    // Recorded at call time: signalling before the name is set would re-open
+    // the stream as anonymous again and leave the session deaf.
+    const withHook: IdentityToolDeps = {
+      ...deps,
+      onIdentityChanged: () => calls.push(deps.session.hasName() ? deps.session.displayName : undefined),
+    }
+
+    await handleIdentityTool('introduce', { name: 'architect' }, withHook)
+
+    expect(calls).toEqual(['architect'])
+  })
+
+  it('does not signal for whoami', async () => {
+    const deps = createMockDeps()
+    deps.session.setName('architect')
+    const onIdentityChanged = vi.fn()
+
+    await handleIdentityTool('whoami', {}, { ...deps, onIdentityChanged })
+
+    expect(onIdentityChanged).not.toHaveBeenCalled()
   })
 })
 

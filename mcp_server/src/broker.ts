@@ -16,18 +16,64 @@ const LOG_FILE = join(CCCOLLAB_LOGS_DIR, `${PROFILE}.log`)
 
 type SSEResponse = ServerResponse & { req: IncomingMessage }
 
-const clients = new Set<SSEResponse>()
+interface SSEClient {
+  res: SSEResponse
+  /** Session this connection identified as via `/events?sessionId=`.
+   *  `undefined` for a connection that named nobody. */
+  sessionName?: string
+}
+
+const clients = new Set<SSEClient>()
 
 function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`
   appendFileSync(LOG_FILE, line)
 }
 
-function broadcast(data: string): void {
+/**
+ * Is this connection's session subscribed to `channel` right now (KAI-446)?
+ *
+ * Membership is read at fan-out time rather than captured when the stream
+ * opened, so a `join_channel` or `leave_channel` takes effect on a connection
+ * that is already open — otherwise every join would need a reconnect.
+ *
+ * This is the only place a connection's `/events?sessionId=` tag is resolved
+ * against the session registry. If that registry is ever keyed by something
+ * other than the display name (a per-registration id, say), this lookup and the
+ * tag `broker-event-listener.ts` writes have to change in the same commit —
+ * they are two halves of one agreement and neither fails loudly on its own.
+ */
+function sseSubscribed(client: SSEClient, channel: string): boolean {
+  if (!client.sessionName) return false
+  // Same lookup as the route guards (KAI-446 S1) — one source of truth.
+  return subscribedChannels(client.sessionName).has(channel)
+}
+
+/**
+ * Fan an event out to the SSE streams entitled to it.
+ *
+ * `channel` scopes delivery: a channel-tagged event reaches only connections
+ * whose session is subscribed to that channel. Before KAI-446, `/events`
+ * handed every event to every connection and the only channel filtering lived
+ * client-side in `broker-event-listener.ts`. A cooperating client filtered; a
+ * hostile one read the wire. This branch also added the matching subscription
+ * checks on the topic routes themselves (several of which were previously
+ * ungated) — see `requireSubscribed`.
+ *
+ * Untagged events (no `channel`) still reach every connection. That lane stays
+ * wide so a leak INTO it remains observable (product decision; do not narrow
+ * here). External `/local-event` posts are the only untagged producer today.
+ *
+ * Like the route guards this is not authentication — see `requireSubscribed`
+ * for what naming a session is actually worth. It makes the stream answer to
+ * the same subscription rule the routes already answer to, nothing more.
+ */
+function broadcast(data: string, channel?: string): void {
   const payload = `data: ${data}\n\n`
   for (const client of clients) {
+    if (channel !== undefined && !sseSubscribed(client, channel)) continue
     try {
-      client.write(payload)
+      client.res.write(payload)
     } catch {
       clients.delete(client)
     }
@@ -56,6 +102,22 @@ interface SessionInfo {
   objective?: string
   registeredAt: string
   channels: Set<string>
+  /**
+   * How many live `POST /sessions` registrations currently claim this name
+   * (KAI-446 C1). Two processes that `introduce` under the same display name
+   * share one registry row; without a holder count the first `DELETE
+   * /sessions/:name` (ordinary shutdown) wiped memberships and permanently
+   * deafened every other open SSE stream still tagged with that name.
+   * Each register increments; each unregister decrements; the row is only
+   * removed when the count hits zero.
+   */
+  holders: number
+  /**
+   * Per-channel join refcount for the same reason: two processes sharing a
+   * name both call `join_channel`, then either may `leave_channel`. Drop
+   * entitlement only when the last holder leaves the channel.
+   */
+  channelHolds: Map<string, number>
 }
 
 const topics = new Map<string, LocalTopic>()
@@ -69,10 +131,34 @@ function normalizeChannel(raw: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
+/**
+ * Push an untagged diagnostic event to every SSE stream currently tagged
+ * with `sessionName`. Untagged so it still arrives after channel membership
+ * is gone — channel-scoped delivery would miss the very clients that just
+ * lost entitlement (KAI-446 C1 observability half).
+ */
+function notifySession(sessionName: string, event: Record<string, unknown>): void {
+  const payload = `data: ${JSON.stringify(event)}\n\n`
+  for (const client of clients) {
+    if (client.sessionName !== sessionName) continue
+    try {
+      client.res.write(payload)
+    } catch {
+      clients.delete(client)
+    }
+  }
+}
+
 function ensureSession(name: string): SessionInfo {
   let info = sessions.get(name)
   if (!info) {
-    info = { name, registeredAt: new Date().toISOString(), channels: new Set() }
+    info = {
+      name,
+      registeredAt: new Date().toISOString(),
+      channels: new Set(),
+      holders: 0,
+      channelHolds: new Map(),
+    }
     sessions.set(name, info)
   }
   return info
@@ -80,6 +166,8 @@ function ensureSession(name: string): SessionInfo {
 
 function joinChannel(sessionName: string, channel: string): boolean {
   const info = ensureSession(sessionName)
+  const prev = info.channelHolds.get(channel) ?? 0
+  info.channelHolds.set(channel, prev + 1)
   const already = info.channels.has(channel)
   info.channels.add(channel)
   let members = channels.get(channel)
@@ -91,9 +179,22 @@ function joinChannel(sessionName: string, channel: string): boolean {
   return !already
 }
 
+/**
+ * Drop one hold on `channel` for `sessionName`. Entitlement (and topic
+ * residue) is only removed when the hold count reaches zero — so a sibling
+ * process that still holds the channel under the same display name keeps
+ * receiving events (KAI-446 C1).
+ */
 function leaveChannel(sessionName: string, channel: string): boolean {
   const info = sessions.get(sessionName)
   if (!info) return false
+  const prev = info.channelHolds.get(channel) ?? 0
+  if (prev <= 0 && !info.channels.has(channel)) return false
+  if (prev > 1) {
+    info.channelHolds.set(channel, prev - 1)
+    return false
+  }
+  info.channelHolds.delete(channel)
   const removed = info.channels.delete(channel)
   const members = channels.get(channel)
   if (members) {
@@ -103,13 +204,26 @@ function leaveChannel(sessionName: string, channel: string): boolean {
   for (const t of topics.values()) {
     if (t.channel === channel) t.joinedSessions.delete(sessionName)
   }
+  if (removed) {
+    // Untagged: streams tagged with this session must hear the loss even
+    // though they are no longer entitled to the channel's fan-out.
+    notifySession(sessionName, {
+      source: 'local',
+      type: 'channel_unsubscribed',
+      sessionId: sessionName,
+      channel,
+      ts: new Date().toISOString(),
+    })
+  }
   return removed
 }
 
 function removeSessionFromAllChannels(sessionName: string): void {
   const info = sessions.get(sessionName)
   if (!info) return
+  // Force-drop every channel regardless of hold count (full unregister).
   for (const ch of [...info.channels]) {
+    info.channelHolds.set(ch, 1)
     leaveChannel(sessionName, ch)
   }
 }
@@ -144,6 +258,72 @@ function parseUrl(url: string): { pathname: string; searchParams: URLSearchParam
   return { pathname: parsed.pathname, searchParams: parsed.searchParams }
 }
 
+/**
+ * The single channel-subscription rule for topic routes (KAI-446).
+ *
+ * Every route that reads or mutates a topic gates on it. It used to be
+ * copy-pasted into some routes and simply missing from their siblings — so
+ * `GET /topics/:id` 403'd an unsubscribed session while `GET /topics/:id/messages`
+ * handed the same session that topic's full text. Keeping the rule in one place
+ * is what stops the two drifting apart again.
+ *
+ * Takes the channel rather than the topic so the routes that have no topic in
+ * hand can use it too: `GET /topics` gates on the requested channel, `POST
+ * /topics` and `POST /broadcast` on the one being written to. Those last two
+ * kept their own copy of the rule and answered 400 where the helper answers
+ * 403 — cosmetic drift, but drift on the two routes the ticket exists to stop
+ * drifting.
+ *
+ * Returns the validated session id, or null when it has already answered `res`
+ * and the caller must stop. Mirrors the order `GET /topics/:id` already used —
+ * topic-existence (404) is checked by the caller first, then missing id (400),
+ * then subscription (403) — so an unknown topic still 404s regardless of session.
+ *
+ * NOTE: this is not authentication, and it buys less than it looks like it
+ * does. Entitlement is a session name, and names are free: `POST /channels/join`
+ * is unauthenticated and `ensureSession` creates whatever it is handed, so one
+ * call mints an entitled identity for any channel. `server.ts` also auto-joins
+ * under the OS username before `introduce` runs, so a session nothing
+ * legitimate reads as (the listener stays anonymous until it has a name) sits
+ * subscribed in every deployment, and `GET /sessions` hands out its name.
+ *
+ * So: this makes the routes on one resource agree on one rule, which is what
+ * KAI-446 is about. It does NOT keep a determined local process out, and it
+ * does not guarantee that an unauthorized read leaves a trace — borrowing an
+ * existing name is quieter than joining. Only broker authentication would.
+ */
+/**
+ * Subscription gate for routes that mutate or read topic/channel content.
+ * Returns a discriminated result so callers cannot discard the gate and still
+ * typecheck, and so every site uses the same (possibly normalized) sessionId
+ * rather than the raw input (KAI-446 I10).
+ */
+type Gate = { ok: true; sessionId: string } | { ok: false }
+
+function requireSessionId(res: ServerResponse, sessionId: string | undefined | null): sessionId is string {
+  if (!sessionId) {
+    jsonResponse(res, 400, { error: 'sessionId is required' })
+    return false
+  }
+  return true
+}
+
+function requireSubscribed(res: ServerResponse, channel: string, sessionId: string | undefined | null): Gate {
+  if (!requireSessionId(res, sessionId)) return { ok: false }
+  if (!subscribedChannels(sessionId).has(channel)) {
+    jsonResponse(res, 403, { error: `Not subscribed to channel "${channel}".` })
+    return { ok: false }
+  }
+  return { ok: true, sessionId }
+}
+
+/** The channels this session is subscribed to; empty for an unknown session.
+ *  Returns a fresh Set so callers cannot grant entitlement by mutating the
+ *  live registry through a cast (KAI-446 S3). */
+function subscribedChannels(sessionId: string): ReadonlySet<string> {
+  return new Set(sessions.get(sessionId)?.channels)
+}
+
 const TOPIC_ID_ROUTE = /^\/topics\/([^/]+)$/
 const TOPIC_ACTION_ROUTE = /^\/topics\/([^/]+)\/(messages|join|leave|archive|unarchive)$/
 const TOPIC_MESSAGES_ROUTE = /^\/topics\/([^/]+)\/messages$/
@@ -165,21 +345,30 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       Connection: 'keep-alive',
     })
 
-    const sseRes = res as SSEResponse
-    clients.add(sseRes)
+    // Naming a session is what entitles the connection to that session's
+    // channel-tagged events (KAI-446). A connection that names nobody stays
+    // open and receives untagged events only — the listener connects before
+    // `introduce` has run and re-opens with its name afterwards.
+    const client: SSEClient = { res: res as SSEResponse, sessionName: searchParams.get('sessionId') ?? undefined }
+    clients.add(client)
     // Push the headers now instead of waiting for the first event: SSE clients
     // (and the event listener) need a live connection immediately, before any
     // broadcast, so they don't miss events that fire right after connecting.
     res.flushHeaders()
-    log(`SSE client connected (total: ${clients.size})`)
+    log(`SSE client connected as ${client.sessionName ?? 'anonymous'} (total: ${clients.size})`)
 
     req.on('close', () => {
-      clients.delete(sseRes)
+      clients.delete(client)
       log(`SSE client disconnected (total: ${clients.size})`)
     })
     return
   }
 
+  // KAI-446 I11 / I7: outside the `/topics` prefix and deliberately NOT
+  // subscription-gated. Ticket AC covered topic routes; this remains an
+  // unauthenticated inject-into-any-channel path. No production caller in
+  // the repo (tests only). Product decision for Samuel: gate on a subscribed
+  // sender, or delete the route — do not "fix" unilaterally here.
   if (pathname === '/local-event' && method === 'POST') {
     void (async () => {
       try {
@@ -189,7 +378,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           return
         }
         const payload = { source: 'local', ...event }
-        broadcast(JSON.stringify(payload))
+        // A channel-tagged event here is scoped like any other; an untagged one
+        // rides the wide lane. Normalized because this body is arbitrary input,
+        // unlike the broker's own events which carry an already-normalized name.
+        broadcast(JSON.stringify(payload), normalizeChannel(event.channel) ?? undefined)
         log(`LOCAL EVENT: ${JSON.stringify(payload).slice(0, 200)}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
@@ -248,6 +440,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // KAI-446 I11: not under `/topics`, yet `leaveChannel` clears
+  // `t.joinedSessions` for every topic on the channel. The route-sweep only
+  // covers `/topics/*`. Availability for shared names is handled by
+  // `channelHolds` refcounts + `channel_unsubscribed` (C1), not by
+  // `requireSubscribed` here — body carries only the subject, so "self vs
+  // sibling" is indistinguishable (see broker tests + product decisions).
   if (pathname === '/channels/leave' && method === 'POST') {
     void (async () => {
       try {
@@ -277,21 +475,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'text, sender and channel are required' })
           return
         }
-        const info = sessions.get(body.sender)
-        if (!info || !info.channels.has(channel)) {
-          jsonResponse(res, 400, { error: `Sender is not subscribed to channel "${channel}".` })
-          return
-        }
+        const gate = requireSubscribed(res, channel, body.sender)
+        if (!gate.ok) return
         const event = {
           source: 'local' as const,
           type: 'broadcast' as const,
           channel,
-          sender: body.sender,
+          sender: gate.sessionId,
           text: body.text,
           ts: new Date().toISOString(),
         }
-        broadcast(JSON.stringify(event))
-        log(`BROADCAST ${channel}: ${body.sender}: ${body.text}`)
+        broadcast(JSON.stringify(event), channel)
+        log(`BROADCAST ${channel}: ${gate.sessionId}: ${body.text}`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -309,11 +504,8 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'topic, creator and channel are required' })
           return
         }
-        const info = sessions.get(body.creator)
-        if (!info || !info.channels.has(channel)) {
-          jsonResponse(res, 400, { error: `Creator is not subscribed to channel "${channel}".` })
-          return
-        }
+        const gate = requireSubscribed(res, channel, body.creator)
+        if (!gate.ok) return
         const wanted = body.topic.trim().toLowerCase()
         for (const t of topics.values()) {
           if (t.state === 'active' && t.channel === channel && t.topic.trim().toLowerCase() === wanted) {
@@ -337,17 +529,24 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           id,
           topic: body.topic,
           channel,
-          creator: body.creator,
+          creator: gate.sessionId,
           state: 'active',
           createdAt,
           messages: [],
           joinedSessions: new Set(),
         }
         topics.set(id, localTopic)
-        const topicData = { id, topic: body.topic, channel, creator: body.creator, state: 'active', createdAt }
+        const topicData = {
+          id,
+          topic: body.topic,
+          channel,
+          creator: gate.sessionId,
+          state: 'active',
+          createdAt,
+        }
         const event = { source: 'local' as const, type: 'topic_created' as const, channel, topic: topicData }
-        broadcast(JSON.stringify(event))
-        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${body.creator}`)
+        broadcast(JSON.stringify(event), channel)
+        log(`TOPIC CREATED ${channel}: ${id} "${body.topic}" by ${gate.sessionId}`)
         jsonResponse(res, 200, topicData)
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -356,17 +555,25 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // Listing is a topic read, so it answers to the same rule (KAI-446). It used
+  // to derive the caller's channels only when no `channel` param was supplied —
+  // and the local transport sends `channel` INSTEAD of `sessionId`, never both,
+  // so `?channel=<foreign>` was ungated and a bare `GET /topics` enumerated
+  // every topic in every channel. Metadata rather than message text, but the
+  // same rule applies: you see the channels you joined.
   if (pathname === '/topics' && method === 'GET') {
     const includeArchived = searchParams.get('include_archived') === 'true'
     const channelFilter = normalizeChannel(searchParams.get('channel'))
-    const sessionFilter = searchParams.get('sessionId')
+    const sessionId = searchParams.get('sessionId')
 
-    let allowedChannels: Set<string> | null = null
+    let allowedChannels: ReadonlySet<string>
     if (channelFilter) {
+      const gate = requireSubscribed(res, channelFilter, sessionId)
+      if (!gate.ok) return
       allowedChannels = new Set([channelFilter])
-    } else if (sessionFilter) {
-      const info = sessions.get(sessionFilter)
-      allowedChannels = info ? new Set(info.channels) : new Set()
+    } else {
+      if (!requireSessionId(res, sessionId)) return
+      allowedChannels = subscribedChannels(sessionId)
     }
 
     const result: Array<{
@@ -380,7 +587,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     }> = []
     for (const t of topics.values()) {
       if (!includeArchived && t.state === 'archived') continue
-      if (allowedChannels && !allowedChannels.has(t.channel)) continue
+      if (!allowedChannels.has(t.channel)) continue
       result.push({
         id: t.id,
         topic: t.topic,
@@ -403,16 +610,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
-    const sessionId = searchParams.get('sessionId')
-    if (!sessionId) {
-      jsonResponse(res, 400, { error: 'sessionId query parameter is required' })
-      return
-    }
-    const info = sessions.get(sessionId)
-    if (!info || !info.channels.has(t.channel)) {
-      jsonResponse(res, 403, { error: `Not subscribed to channel "${t.channel}".` })
-      return
-    }
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId')).ok) return
     jsonResponse(res, 200, {
       topic: {
         id: t.id,
@@ -432,11 +630,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   // history newest-page-first via `before`/`limit` and normalizes `ts` to
   // epoch-ms so it matches the shared TransportHistoryPage contract.
   //
-  // Deliberately NOT subscription-gated: the read-history transport contract
-  // carries no session identity, and the broker is loopback-only and
-  // single-tenant, so there is nothing to authorize against. If per-session
-  // gating is ever wanted, `readTopicMessages` must first grow a `sessionName`
-  // across the Transport interface (local + remote + tool layer).
+  // Subscription-gated exactly like GET /topics/:id (KAI-446). This route used
+  // to be ungated on the grounds that the read-history transport contract
+  // carried no session identity — so `readTopicMessages` grew a `sessionName`
+  // across the Transport interface (local + remote + tool layer) and the
+  // asymmetry is gone: both routes on this resource now answer to the same rule.
   const historyMatch = TOPIC_MESSAGES_ROUTE.exec(pathname)
   if (historyMatch && method === 'GET') {
     const id = historyMatch[1]!
@@ -445,6 +643,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       jsonResponse(res, 404, { error: 'topic not found' })
       return
     }
+    if (!requireSubscribed(res, t.channel, searchParams.get('sessionId')).ok) return
     const limit = clampHistoryLimit(searchParams.get('limit'))
     const beforeRaw = searchParams.get('before')
     const beforeNum = beforeRaw === null ? NaN : Number(beforeRaw)
@@ -481,77 +680,70 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
               jsonResponse(res, 400, { error: 'text and sender are required' })
               return
             }
-            const info = sessions.get(sender)
-            if (!info || !info.channels.has(t.channel)) {
-              jsonResponse(res, 403, { error: `Sender is not subscribed to channel "${t.channel}".` })
-              return
-            }
+            const gate = requireSubscribed(res, t.channel, sender)
+            if (!gate.ok) return
             const ts = new Date().toISOString()
-            t.messages.push({ sender, text, ts })
+            t.messages.push({ sender: gate.sessionId, text, ts })
             const event = {
               source: 'local' as const,
               type: 'message' as const,
               channel: t.channel,
               topicId: id,
-              sender,
+              sender: gate.sessionId,
               text,
               ts,
             }
-            broadcast(JSON.stringify(event))
-            log(`MESSAGE in ${id} (${t.channel}): ${sender}: ${text}`)
+            broadcast(JSON.stringify(event), t.channel)
+            log(`MESSAGE in ${id} (${t.channel}): ${gate.sessionId}: ${text}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'join': {
-            const sessionId = body.sessionId as string | undefined
-            if (!sessionId) {
-              jsonResponse(res, 400, { error: 'sessionId is required' })
-              return
-            }
-            const info = sessions.get(sessionId)
-            if (!info || !info.channels.has(t.channel)) {
-              jsonResponse(res, 403, { error: `You are not subscribed to channel "${t.channel}".` })
-              return
-            }
-            t.joinedSessions.add(sessionId)
-            log(`JOIN: ${sessionId} joined topic ${id} (${t.channel})`)
+            const gate = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
+            if (!gate.ok) return
+            t.joinedSessions.add(gate.sessionId)
+            log(`JOIN: ${gate.sessionId} joined topic ${id} (${t.channel})`)
             jsonResponse(res, 200, { ok: true, channel: t.channel, messages: t.messages })
             return
           }
           case 'leave': {
-            const sessionId = body.sessionId as string | undefined
-            if (sessionId) t.joinedSessions.delete(sessionId)
-            log(`LEAVE: ${sessionId ?? 'unknown'} left topic ${id}`)
+            const gate = requireSubscribed(res, t.channel, body.sessionId as string | undefined)
+            if (!gate.ok) return
+            t.joinedSessions.delete(gate.sessionId)
+            log(`LEAVE: ${gate.sessionId} left topic ${id}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'archive': {
-            const archivedBy = body.archivedBy as string | undefined
+            const gate = requireSubscribed(res, t.channel, body.archivedBy as string | undefined)
+            if (!gate.ok) return
             t.state = 'archived'
             const event = {
               source: 'local' as const,
               type: 'topic_archived' as const,
               channel: t.channel,
               topicId: id,
-              archivedBy: archivedBy ?? 'unknown',
+              archivedBy: gate.sessionId,
             }
-            broadcast(JSON.stringify(event))
-            log(`TOPIC ARCHIVED: ${id} by ${archivedBy ?? 'unknown'}`)
+            broadcast(JSON.stringify(event), t.channel)
+            log(`TOPIC ARCHIVED: ${id} by ${gate.sessionId}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
           case 'unarchive': {
-            const unarchivedBy = body.unarchivedBy as string | undefined
+            const gate = requireSubscribed(res, t.channel, body.unarchivedBy as string | undefined)
+            if (!gate.ok) return
+            const unarchivedBy = gate.sessionId
             t.state = 'active'
             const event = {
               source: 'local' as const,
               type: 'topic_unarchived' as const,
               channel: t.channel,
               topicId: id,
-              unarchivedBy: unarchivedBy ?? 'unknown',
+              unarchivedBy,
             }
-            broadcast(JSON.stringify(event))
-            log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy ?? 'unknown'}`)
+            broadcast(JSON.stringify(event), t.channel)
+            log(`TOPIC UNARCHIVED: ${id} by ${unarchivedBy}`)
             jsonResponse(res, 200, { ok: true })
             return
           }
@@ -582,12 +774,26 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           jsonResponse(res, 400, { error: 'name is required' })
           return
         }
+        // Each register takes a holder slot. Two processes introducing under
+        // the same display name must both hold the row so one shutdown cannot
+        // wipe the other's channel memberships (KAI-446 C1).
         const existing = sessions.get(body.name)
         const info: SessionInfo = existing
-          ? { ...existing, objective: body.objective ?? existing.objective }
-          : { name: body.name, objective: body.objective, registeredAt: new Date().toISOString(), channels: new Set() }
+          ? {
+              ...existing,
+              objective: body.objective ?? existing.objective,
+              holders: existing.holders + 1,
+            }
+          : {
+              name: body.name,
+              objective: body.objective,
+              registeredAt: new Date().toISOString(),
+              channels: new Set(),
+              holders: 1,
+              channelHolds: new Map(),
+            }
         sessions.set(body.name, info)
-        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''}`)
+        log(`SESSION REGISTERED: ${body.name}${body.objective ? ` (${body.objective})` : ''} (holders=${info.holders})`)
         jsonResponse(res, 200, { ok: true })
       } catch {
         jsonResponse(res, 400, { error: 'invalid JSON' })
@@ -596,11 +802,37 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // KAI-446 I11: outside `/topics`, yet `removeSessionFromAllChannels` mutates
+  // every topic's `joinedSessions` for this name. Same ceiling as leave —
+  // the sweep cannot see it. Holder refcounts + `session_unregistered` (C1)
+  // keep sibling streams alive; the path still carries no caller identity.
   const sessionNameMatch = SESSION_NAME_ROUTE.exec(pathname)
   if (sessionNameMatch && method === 'DELETE') {
     const name = decodeURIComponent(sessionNameMatch[1]!)
+    const info = sessions.get(name)
+    if (!info) {
+      jsonResponse(res, 200, { ok: true })
+      return
+    }
+    info.holders = Math.max(0, info.holders - 1)
+    if (info.holders > 0) {
+      // Sibling process still claims this name — keep memberships and streams
+      // alive. The caller already stopped listening; the remaining holders
+      // must not go deaf (KAI-446 C1).
+      log(`SESSION UNREGISTER retained: ${name} (holders=${info.holders})`)
+      jsonResponse(res, 200, { ok: true, retained: true })
+      return
+    }
     removeSessionFromAllChannels(name)
     sessions.delete(name)
+    // Untagged notice so any still-open stream tagged with this name can
+    // re-introduce / re-join instead of sitting silently deaf.
+    notifySession(name, {
+      source: 'local',
+      type: 'session_unregistered',
+      sessionId: name,
+      ts: new Date().toISOString(),
+    })
     log(`SESSION UNREGISTERED: ${name}`)
     jsonResponse(res, 200, { ok: true })
     return
@@ -613,7 +845,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 function shutdown(): void {
   log('Shutting down...')
   for (const client of clients) {
-    client.end()
+    client.res.end()
   }
   clients.clear()
   server.close()

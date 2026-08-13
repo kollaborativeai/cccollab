@@ -604,7 +604,7 @@ export class RemoteTransport implements Transport {
   }
 
   async listTopics(args: {
-    sessionName?: string
+    sessionName: string
     channel?: string
     includeArchived?: boolean
   }): Promise<TransportTopic[]> {
@@ -878,7 +878,16 @@ export class RemoteTransport implements Transport {
     }
   }
 
-  async readTopicMessages(args: { topicId: string; limit?: number; before?: number }): Promise<TransportHistoryPage> {
+  // `sessionName` is part of the Transport contract (KAI-446) but unused here:
+  // the remote gates read-history on the backend-issued `sessionId` that
+  // `orgScopedArgs` merges in, which is authoritative. The local broker, which
+  // has no such id, uses the session name instead.
+  async readTopicMessages(args: {
+    sessionName: string
+    topicId: string
+    limit?: number
+    before?: number
+  }): Promise<TransportHistoryPage> {
     if (!this.enabled) return { messages: [], hasMore: false }
     try {
       const raw = (await this.client.query(

@@ -1,4 +1,5 @@
 import type { ActiveContext } from '../context.js'
+import { BrokerHttpError } from '../transport/local.js'
 import type { MessageBus } from '../message-bus.js'
 import type { SessionManager } from '../session.js'
 import {
@@ -69,6 +70,10 @@ const REQUIRES_NAME = new Set([
   'unarchive_topic',
   'send_message_to_topic',
   'list_sessions',
+  // KAI-446: read-history is subscription-gated on the reading session, so it
+  // needs a name like every other topic tool. Without one the tool used to
+  // reach the broker's ungated read route anonymously.
+  'read_topic_messages',
 ])
 
 export async function handleTopicTool(
@@ -82,12 +87,24 @@ export async function handleTopicTool(
 
   switch (name) {
     case 'list_topics': {
-      const { channel, include_archived, location } = args as {
-        channel?: string
-        include_archived?: boolean
-        location?: ChannelLocation
+      try {
+        const { channel, include_archived, location } = args as {
+          channel?: string
+          include_archived?: boolean
+          location?: ChannelLocation
+        }
+        return await handleListTopics(deps, channel, include_archived, location)
+      } catch (err) {
+        if (err instanceof BrokerHttpError) {
+          return JSON.stringify({
+            error:
+              err.status === 403
+                ? 'Not subscribed to one or more channels on the broker. Use join_channel first.'
+                : err.message,
+          })
+        }
+        throw err
       }
-      return handleListTopics(deps, channel, include_archived, location)
     }
     case 'start_topic': {
       const { topic, channel, location } = args as {
@@ -140,13 +157,18 @@ export async function handleTopicTool(
         threadTs = deps.context.getThreadTs()
         topicName = deps.context.getTopicName() ?? 'topic'
       }
+      // Leaving must be locally idempotent (KAI-446 I4): a 403 from the
+      // broker (e.g. after a shared-name sibling wiped the membership row)
+      // must not strand the topic in ActiveContext forever. Clean local
+      // state first, then best-effort tell the transport.
       let leavingTransportSource: string | undefined
+      let transportError: string | undefined
       try {
         const transport = resolveTopicTransport(deps, threadTs)
         leavingTransportSource = transport.source
         await transport.leaveTopic({ sessionName: deps.session.displayName, topicId: threadTs })
       } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
+        transportError = err instanceof Error ? err.message : String(err)
       }
       deps.context.leaveTopic(threadTs)
       if (deps.remoteTopicUnsubscribes && leavingTransportSource !== undefined) {
@@ -156,7 +178,11 @@ export async function handleTopicTool(
           map: deps.remoteTopicUnsubscribes,
         })
       }
-      return JSON.stringify({ id: threadTs, name: topicName })
+      return JSON.stringify({
+        id: threadTs,
+        name: topicName,
+        ...(transportError ? { warning: transportError } : {}),
+      })
     }
     case 'archive_topic': {
       const { topic } = args as { topic?: string }
@@ -195,13 +221,37 @@ export async function handleTopicTool(
       // online before asking which transport owns it — the user is
       // explicitly reading a (possibly remote) topic.
       await deps.ensureAttached?.()
+      // Joined topics are already subscription-checked (`joinTopic` refuses an
+      // unsubscribed channel, `leaveChannel` drops that channel's topics).
+      // Anything else resolves through the subscription check that
+      // `send_message_to_topic` and archive-by-name use, so the read is refused
+      // HERE rather than forwarded for the broker to 403 (KAI-446) — and on the
+      // remote path, where the tool used to forward unconditionally, this is the
+      // only gate this process applies.
+      // Resolve name → id when needed, then READ with the resolved id
+      // (KAI-446 I3). Sibling tools already pass `resolved.id`; throwing the
+      // id away left `topic: "sprint planning"` hitting the transport as a
+      // topicId and returning an empty page on remote / 404 on local.
+      let location = deps.context.getJoinedTopicLocation(topicId)
+      let resolvedId = topicId
+      if (location === undefined) {
+        const resolved = await resolveTopicIdInSubscribedChannels(deps, topicId)
+        if ('error' in resolved) return JSON.stringify(resolved)
+        location = resolved.location
+        resolvedId = resolved.id
+      }
       let transport: Transport
       try {
-        transport = resolveTopicTransport(deps, topicId)
+        transport = deps.router.get(location)
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
       }
-      const page = await transport.readTopicMessages({ topicId, limit, before })
+      const page = await transport.readTopicMessages({
+        sessionName: deps.session.displayName,
+        topicId: resolvedId,
+        limit,
+        before,
+      })
       return JSON.stringify(page)
     }
 
@@ -231,10 +281,12 @@ async function handleListTopics(
     }
     for (const transport of eligible) {
       try {
-        const rows = await transport.listTopics({ channel, includeArchived })
+        const rows = await transport.listTopics({ sessionName: deps.session.displayName, channel, includeArchived })
         for (const r of rows) located.push({ ...r, location: transport.source })
-      } catch {
-        // Transport unreachable: skip.
+      } catch (err) {
+        // 4xx is a real refusal (KAI-446 I2), not "unreachable".
+        if (err instanceof BrokerHttpError && err.status >= 400 && err.status < 500) throw err
+        // Genuine connect/network failure: skip this transport.
       }
     }
   } else {
@@ -255,7 +307,8 @@ async function handleListTopics(
             includeArchived,
           })
           for (const r of rows) located.push({ ...r, location: transport.source })
-        } catch {
+        } catch (err) {
+          if (err instanceof BrokerHttpError && err.status >= 400 && err.status < 500) throw err
           // Transport unreachable: skip.
         }
       }
@@ -841,7 +894,9 @@ async function listTopicsAcrossTransports(
           includeArchived: opts.includeArchived,
         })
         for (const r of rows) located.push({ ...r, location: transport.source })
-      } catch {
+      } catch (err) {
+        // 4xx is a real refusal (KAI-446 I2), not "unreachable".
+        if (err instanceof BrokerHttpError && err.status >= 400 && err.status < 500) throw err
         // skip disabled or unreachable transport
       }
     }

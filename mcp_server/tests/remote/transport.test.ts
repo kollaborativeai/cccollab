@@ -565,7 +565,7 @@ describe('RemoteTransport.listTopics', () => {
     const transport = new RemoteTransport({ client })
     await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
 
-    const topics = await transport.listTopics({ channel: 'dev' })
+    const topics = await transport.listTopics({ sessionName: 'reader', channel: 'dev' })
 
     expect(topics).toHaveLength(1)
     expect(topics[0]!.messageCount).toBe(3)
@@ -590,7 +590,7 @@ describe('RemoteTransport.listTopics', () => {
     const transport = new RemoteTransport({ client })
     await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
 
-    const topics = await transport.listTopics({ channel: 'dev' })
+    const topics = await transport.listTopics({ sessionName: 'reader', channel: 'dev' })
 
     expect(topics).toHaveLength(1)
     expect(topics[0]!.messageCount).toBeUndefined()
@@ -624,7 +624,7 @@ describe('RemoteTransport.listTopics', () => {
     const transport = new RemoteTransport({ client })
     await transport.introduce({ sessionName: 'tester', organizationId: 'org_1' })
 
-    const topics = await transport.listTopics({ channel: 'dev' })
+    const topics = await transport.listTopics({ sessionName: 'reader', channel: 'dev' })
 
     expect(topics.map((t) => t.joined)).toEqual([true, false])
   })

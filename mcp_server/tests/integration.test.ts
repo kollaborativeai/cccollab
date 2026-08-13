@@ -33,6 +33,12 @@ interface HarnessDeps {
   session: SessionManager
   context: ActiveContext
   router: TransportRouter
+  /** Mirrors `server.ts`: re-identify the SSE stream when `introduce` names
+   *  the session. The listener starts before `introduce` here exactly as it
+   *  does in production, and the broker's stream is subscription-scoped
+   *  (KAI-446), so without this the harness sessions stay anonymous on the
+   *  broker and receive nothing. */
+  onIdentityChanged: () => void
 }
 
 interface SessionHarness {
@@ -68,7 +74,12 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
 
   const transport = new LocalTransport(brokerPort)
   const router = new TransportRouter([transport])
-  const deps: HarnessDeps = { session, context, router }
+  const deps: HarnessDeps = {
+    session,
+    context,
+    router,
+    onIdentityChanged: () => listener.reconnectForIdentity(),
+  }
   await handleIdentityTool('introduce', { name: displayName }, deps)
 
   return {
@@ -83,6 +94,29 @@ async function makeSession(displayName: string, brokerPort: number): Promise<Ses
     topicDeps: deps,
   }
 }
+
+/**
+ * The harness above MIRRORS `server.ts` rather than importing it — nothing in
+ * the suite imports `server.ts` at all, because it is a process entry point
+ * that spawns a broker and speaks MCP on stdio.
+ *
+ * That makes the mirrored line the one place where the whole `/events` identity
+ * agreement can break with every test still green: delete
+ * `onIdentityChanged` from `server.ts` and the harness keeps re-identifying its
+ * own listener while every real session goes permanently deaf to channel events
+ * after `introduce`. Fail-closed and silent.
+ *
+ * Reading the source is the cheap half of the fix and the same technique the
+ * broker route sweep uses. It pins that the line exists, not that it runs; an
+ * end-to-end proof needs the entry point to be importable, which is a bigger
+ * change than this branch.
+ */
+describe('Integration: production wiring the harness mirrors', () => {
+  it('server.ts re-identifies the broker stream when introduce names the session', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'server.ts'), 'utf-8')
+    expect(source).toMatch(/onIdentityChanged:\s*\(\)\s*=>\s*listener\.reconnectForIdentity\(\)/)
+  })
+})
 
 describe('Integration: end-to-end message flow', () => {
   it('routes inbound message through pipeline to Channel notification', async () => {
