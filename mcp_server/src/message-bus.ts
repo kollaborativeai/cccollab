@@ -44,7 +44,33 @@ function dedupKey(msg: ParsedMessage): string {
   const threadOrChannel = msg.threadTs ?? msg.channel
   const ts = Date.parse(msg.ts)
   const secondBucket = Number.isNaN(ts) ? msg.ts : String(Math.floor(ts / 1000))
-  return `${msg.sender}|${threadOrChannel}|${secondBucket}|${msg.text}`
+  return `${msg.sender}|${threadOrChannel}|${secondBucket}|${msg.text}|${imageIdentity(msg)}`
+}
+
+/**
+ * The attachment half of the dedup key.
+ *
+ * Without it the key was `sender|stream|second|text`, and two screenshots pasted
+ * in the same second by the same person — with the same caption, or the empty
+ * one the web UI sends by default — collapsed to a single key. That was survivable
+ * while a dedup hit merely skipped a notification. C2 made `push`'s resolution the
+ * thing that advances `seen` / `channelMaxTs` / `topicMaxTs` / `ackChannel`, so the
+ * hit stopped being a skip and became an ACK: the second image was never shown and
+ * the cursor moved past it, which on a channel is persisted server-side. Measured
+ * on the real path (`dedup-images.test.ts`): one notification for two rows, and the
+ * resubscribe cursor advanced to the dropped row's own `ts`.
+ *
+ * Keyed on the storage urls, in order, because that is what already identifies a
+ * distinct stored file elsewhere in this codebase (`imageFileName`'s digest). Two
+ * genuinely identical arrivals — the same message reaching both transports — still
+ * produce the same identity and still dedupe, which is the case the window exists
+ * for. A non-array or malformed `images` contributes the empty identity rather than
+ * throwing: this runs on every push, and `remote.ts` casts wire rows with a bare
+ * `as` at five sites.
+ */
+function imageIdentity(msg: ParsedMessage): string {
+  if (!Array.isArray(msg.images) || msg.images.length === 0) return ''
+  return msg.images.map((image) => String(image?.url ?? '')).join(',')
 }
 
 export class MessageBus extends EventEmitter {
