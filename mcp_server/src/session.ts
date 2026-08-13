@@ -40,7 +40,14 @@ export function sessionKey(identity: SessionIdentity | undefined): string | null
   if (trimmed === '' || trimmed === '.' || trimmed === '..') return null
   if (trimmed.length > MAX_SESSION_ID_LENGTH) return null
   if (UNSAFE_SESSION_ID.test(trimmed)) return null
-  return id
+  // `trimmed`, not `id`: every guard above runs against the trimmed value, so
+  // returning the raw one validated one string and handed back another.
+  // `String.prototype.trim` strips tab, newline, CR, VT and FF — every one of
+  // them inside the U+0000..U+001F range UNSAFE_SESSION_ID exists to reject —
+  // and it strips the padding the length bound was measured without. So an id
+  // with an edge control character, or 202 characters of which 200 are real,
+  // was checked away and then returned to a caller typed to trust it (cc#37).
+  return trimmed
 }
 
 interface SessionManagerOptions {
