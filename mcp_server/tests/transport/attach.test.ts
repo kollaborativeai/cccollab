@@ -17,6 +17,7 @@ import type { ResolvedLocation } from '../../src/config/resolve.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { ParsedMessage } from '../../src/types.js'
 import {
+  type SessionIdentity,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -66,12 +67,18 @@ class FakeRemoteTransport implements Transport {
   private readonly topics = new Map<string, TransportTopic>()
   private readonly channels = new Map<string, TransportChannel>()
 
-  introduce = vi.fn(async (_args: { sessionName: string; objective?: string }) => {
-    if (this.shouldFailIntroduce || this.shouldFailOnceIntroduce) {
-      this.shouldFailOnceIntroduce = false
-      throw this.introduceError ?? new Error('introduce failed')
-    }
-  })
+  // Mirrors `Transport.introduce` exactly. A narrower stand-in here still
+  // compiles (parameter contravariance), which is how the identity and
+  // organization drop at the real call site went unnoticed by the type
+  // checker — the fake could not even record what it was not sent.
+  introduce = vi.fn(
+    async (_args: { sessionName: string; objective?: string; organizationId?: string; identity?: SessionIdentity }) => {
+      if (this.shouldFailIntroduce || this.shouldFailOnceIntroduce) {
+        this.shouldFailOnceIntroduce = false
+        throw this.introduceError ?? new Error('introduce failed')
+      }
+    },
+  )
   joinChannel = vi.fn(async (args: { sessionName: string; channel: string }) => {
     const existing = this.channels.get(args.channel) ?? { name: args.channel, subscriberCount: 0 }
     existing.subscriberCount += 1
@@ -232,6 +239,62 @@ describe('attachLocation', () => {
     const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.introduce).toHaveBeenCalledWith({ sessionName: 'architect', objective: undefined })
     expect(fakeFactory).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * KAI-401: this introduce runs ONLY when the session already has a name —
+   * i.e. only AFTER an introduce has happened — so the identity-dropping
+   * path was precisely the post-identity path. It sent nothing but
+   * `{sessionName, objective}`, so every lazy attach, `authenticate`
+   * hot-attach and replace-in-place re-attach registered the session on
+   * that location with no identity and no organization.
+   *
+   * The drop was doubly silent. `whoami` read the identity back from
+   * SessionManager (which still holds it) and showed it at the top level,
+   * beside a location reporting `{enabled: true}` and NO `identityRejected`
+   * — because nothing was refused; nothing was sent. On a remote transport
+   * `identity === undefined` takes the early return before the fallback, so
+   * this PR's whole reporting guard structurally cannot fire here.
+   */
+  it('forwards the declared identity and organization to introduce, not just name and objective', async () => {
+    const ctx = makeCtx(location)
+    const identity = {
+      company: 'flatout',
+      repo: 'cccollab',
+      worktree: 'KAI-401',
+      branch: 'KAI-401',
+      cwd: '/projects/cccollab-KAI-401',
+      sessionId: 'uuid-401',
+      pid: 4321,
+    }
+    ctx.session.setObjective('ship KAI-401')
+    ctx.session.setOrganizationId('org_a')
+    ctx.session.setIdentity(identity)
+
+    const result = await attachLocation('acme', ctx)
+
+    expect(result.ok).toBe(true)
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
+    expect(transport.introduce).toHaveBeenCalledWith({
+      sessionName: 'architect',
+      objective: 'ship KAI-401',
+      organizationId: 'org_a',
+      identity,
+    })
+  })
+
+  it('sends no identity or organization when the session declared none', async () => {
+    // The undeclared session's payload must stay exactly what it was
+    // before KAI-401 — `undefined` fields, not empty objects.
+    const ctx = makeCtx(location)
+
+    const result = await attachLocation('acme', ctx)
+
+    expect(result.ok).toBe(true)
+    const transport = ctx.router.get('acme') as FakeRemoteTransport
+    const [args] = transport.introduce.mock.calls[0]!
+    expect(args.identity).toBeUndefined()
+    expect(args.organizationId).toBeUndefined()
   })
 
   it('auto-subscribes to configured channels and topics', async () => {

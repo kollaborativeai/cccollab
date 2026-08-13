@@ -1,6 +1,7 @@
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
+  type SessionIdentity,
   type Transport,
   type TransportChannel,
   type TransportHistoryPage,
@@ -26,15 +27,53 @@ export class LocalTransport implements Transport {
 
   constructor(private readonly brokerPort: number) {}
 
+  /** Why the declared identity did not land on the broker, or null when it
+   *  did (or none was declared). Mirrors `RemoteTransport.identityRejected`
+   *  by name so `whoami` reports both transports through one code path. */
+  private identityRejectedReason: string | null = null
+
+  get identityRejected(): string | null {
+    return this.identityRejectedReason
+  }
+
   /** Local broker emits topic ids as RFC 4122 UUIDs. */
   hasTopic(topicId: string): boolean {
     return BROKER_UUID_PATTERN.test(topicId)
   }
 
   // ─── Identity ─────────────────────────────────────────────────────────
-  async introduce(args: { sessionName: string; objective?: string; organizationId?: string }): Promise<void> {
+  async introduce(args: {
+    sessionName: string
+    objective?: string
+    organizationId?: string
+    identity?: SessionIdentity
+  }): Promise<void> {
     // The local broker is single-tenant; organizationId is intentionally ignored.
-    await this.brokerPost('/sessions', { name: args.sessionName, objective: args.objective })
+    // Only include `identity` when declared so an undeclared session's POST
+    // body is byte-identical to before (KAI-401: no breaking change).
+    const ack = await this.brokerPost<{ identity?: SessionIdentity }>('/sessions', {
+      name: args.sessionName,
+      objective: args.objective,
+      ...(args.identity ? { identity: args.identity } : {}),
+    })
+    // A 200 is not proof the identity was stored (C2). Brokers outlive the
+    // clients that spawn them — detached, no idle timeout, upgraded in place
+    // by `install.sh` without a restart — so a current client routinely talks
+    // to a broker that predates `identity` and discards it while answering
+    // 200. Trust the echo, not the status code: if we sent identity and the
+    // broker did not report storing it, say so rather than let `whoami`
+    // affirm an identity nothing holds.
+    if (args.identity === undefined) {
+      this.identityRejectedReason = null
+      return
+    }
+    this.identityRejectedReason = ack?.identity
+      ? null
+      : `The local broker accepted this session but did not store its declared identity: it acknowledged ` +
+        `without echoing one back, which is how a broker predating KAI-401 answers. Other sessions will not ` +
+        `see this identity via GET /sessions until the running broker is restarted on a build that stores ` +
+        `identity — upgrading the package alone does not replace the already-running process. Client-side ` +
+        `restart keys are unaffected.`
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ import { attachLocation, ensureLazyAttach, planStartupAttachments } from './tran
 import { AttachDiagnostics } from './transport/diagnostics.js'
 import { installProcessSafetyNet } from './process-safety.js'
 import { resolveConfig, type ResolvedConfig, type ResolvedLocation } from './config/resolve.js'
-import { handleIdentityTool } from './tools/identity.js'
+import { handleIdentityTool, IDENTITY_REJECTED_FIELD_DOC } from './tools/identity.js'
 import { inspectVersions, driftWarning, type VersionState } from './plugin-version.js'
 import { ownVersion } from './own-version.js'
 import { handleTopicTool } from './tools/topics.js'
@@ -118,7 +118,7 @@ async function startServer(config: Config, brokerPort: number, resolved: Resolve
   // introduce inside their own attachLocation call.
   if (session.hasName()) {
     try {
-      await localTransport.introduce({ sessionName: session.displayName, objective: session.getObjective() })
+      await localTransport.introduce(session.introduceArgs())
     } catch {
       /* best-effort */
     }
@@ -532,6 +532,40 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
             'Organization id (from list_organizations) to create this session in. ' +
               'Required when connected to a remote location.',
           ),
+        // Fully optional self-declared identity (KAI-401). Enables grouped
+        // views (Company → Repo → Worktree) and stable-key persistence across
+        // restarts without name-matching or OS-scanning. Omitting it keeps
+        // today's behavior exactly.
+        identity: z
+          .object({
+            company: z.string().max(256).optional().describe('Owning company / org, e.g. "flatout"'),
+            repo: z.string().max(256).optional().describe('Repository name, e.g. "cccollab"'),
+            worktree: z.string().max(256).optional().describe('Git worktree name, e.g. "KAI-401"'),
+            branch: z.string().max(256).optional().describe('Git branch'),
+            cwd: z.string().max(1024).optional().describe('Absolute working directory'),
+            // Bounded and rejecting path separators / control characters
+            // (C5): this value is self-asserted by the caller, is republished
+            // to every other session through `whoami` and `GET /sessions`,
+            // and is what KAI-415 turns into a persisted-state file name.
+            // `sessionKey` enforces the same rule for callers that never
+            // reach this schema (the raw broker HTTP boundary); the schema
+            // exists so a bad value fails loudly here instead of being
+            // quietly ignored downstream.
+            sessionId: z
+              .string()
+              .min(1)
+              .max(200)
+              // eslint-disable-next-line no-control-regex -- control chars are exactly what this rejects
+              .regex(/^[^/\\\u0000-\u001f\u007f]+$/, 'must not contain path separators or control characters')
+              .optional()
+              .describe(
+                'Claude Code session UUID — stable across restarts; the key persistence anchors on. ' +
+                  "Self-asserted: it is not verified, so never treat another session's value as proof of identity.",
+              ),
+            pid: z.number().int().nonnegative().optional().describe('Process id of the Claude Code session'),
+          })
+          .optional()
+          .describe('Self-declared session identity for grouping and stable restart identity (all fields optional)'),
       },
     },
     async (args) => {
@@ -547,7 +581,8 @@ function registerTools(mcp: McpServer, deps: ToolDeps): void {
     'whoami',
     {
       description:
-        'Return your session identity as JSON: {name, objective?, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?}>}. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure).',
+        'Return your session identity as JSON: {name, objective?, identity?: {company?, repo?, worktree?, branch?, cwd?, sessionId?, pid?}, activeChannel?: {name, location}, activeTopic?: {name, channel, location}, subscribedChannels: [{name, location, source}], locations: Record<string, {enabled, degradation?, organization?, identityRejected?}>}. Top-level `identity` is what this session DECLARED (client-side), not proof every location stored it. `locations` is keyed by location name and includes every configured transport (including the reserved "local"). `degradation` is set only on transports that have self-disabled (e.g. auth failure). ' +
+        IDENTITY_REJECTED_FIELD_DOC,
       inputSchema: {},
     },
     async () => {

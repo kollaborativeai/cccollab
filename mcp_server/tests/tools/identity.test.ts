@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { handleIdentityTool, type IdentityToolDeps } from '../../src/tools/identity.js'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { handleIdentityTool, IDENTITY_REJECTED_FIELD_DOC, type IdentityToolDeps } from '../../src/tools/identity.js'
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
@@ -124,7 +126,8 @@ describe('Identity Tools', () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
-      expect(result).toEqual({ name: 'architect' })
+      expect(result.name).toBe('architect')
+      expect(result.locations?.local?.ok).toBe(true)
     })
 
     it('introduce includes objective in JSON when provided', async () => {
@@ -133,7 +136,53 @@ describe('Identity Tools', () => {
       const result = JSON.parse(
         await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps),
       )
-      expect(result).toEqual({ name: 'architect', objective: 'reviewing auth module' })
+      expect(result.name).toBe('architect')
+      expect(result.objective).toBe('reviewing auth module')
+      expect(result.locations?.local?.ok).toBe(true)
+    })
+
+    it('introduce surfaces identityRejected on the location that dropped identity (I3)', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      vi.stubGlobal('fetch', mockFetch)
+      const remoteDeps = makeDepsWithRemote(undefined, {
+        identityRejected: 'Declared identity likely did not land at this location: introduce failed WITH identity',
+      } as never)
+
+      const result = JSON.parse(
+        await handleIdentityTool(
+          'introduce',
+          {
+            name: 'architect',
+            organization: 'org_a',
+            identity: { sessionId: 'uuid-1', company: 'flatout' },
+          },
+          remoteDeps,
+        ),
+      )
+
+      expect(result.name).toBe('architect')
+      expect(result.error).toBeUndefined()
+      expect(result.locations.remote.ok).toBe(true)
+      expect(result.locations.remote.identityRejected).toMatch(/identity/i)
+      expect(result.locations.local.ok).toBe(true)
+    })
+
+    it('introduce reports error when every enabled transport fails (I2)', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: 'down' }) })
+      vi.stubGlobal('fetch', mockFetch)
+      const remoteDeps = makeDepsWithRemote(() => {
+        throw new Error('remote introduce hard fail')
+      })
+
+      const result = JSON.parse(
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps),
+      )
+
+      expect(result.error).toMatch(/every enabled transport/i)
+      expect(result.name).toBe('architect')
+      expect(result.locations.remote.ok).toBe(false)
+      expect(result.locations.remote.error).toMatch(/hard fail/i)
+      expect(result.locations.local.ok).toBe(false)
     })
 
     it('introduce re-registers already-subscribed channels with broker', async () => {
@@ -150,6 +199,141 @@ describe('Identity Tools', () => {
 
     it('throws on unknown tool', async () => {
       await expect(handleIdentityTool('unknown_tool', {}, deps)).rejects.toThrow('Unknown identity tool')
+    })
+
+    describe('self-declared identity (KAI-401)', () => {
+      const identity = {
+        company: 'flatout',
+        repo: 'cccollab',
+        worktree: 'KAI-401',
+        branch: 'KAI-401',
+        cwd: '/projects/cccollab-KAI-401',
+        sessionId: 'uuid-401',
+        pid: 4321,
+      }
+
+      it('forwards declared identity to every enabled transport (local + remote parity)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', identity, organization: 'org_a' }, remoteDeps)
+
+        // Remote transport received the identity.
+        expect(seen[0]?.identity).toEqual(identity)
+        // Local transport sent it in the POST /sessions body.
+        const localPost = mockFetch.mock.calls.find(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(localPost).toBeDefined()
+        expect(JSON.parse((localPost![1]! as RequestInit).body as string).identity).toEqual(identity)
+      })
+
+      it('forwards no identity when none is declared (no breaking change)', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+
+        expect(seen[0]?.identity).toBeUndefined()
+        // The local broker wire is byte-identical to before: no identity key.
+        const localPost = mockFetch.mock.calls.find(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(JSON.parse((localPost![1]! as RequestInit).body as string)).not.toHaveProperty('identity')
+      })
+
+      it('whoami surfaces the declared identity so restored-vs-fresh is diagnosable', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.identity).toEqual(identity)
+      })
+
+      it('whoami omits identity when none was declared', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result).not.toHaveProperty('identity')
+      })
+
+      /**
+       * A re-introduce is how a session changes its NAME or objective, and
+       * `identity` is optional on every call — so the ordinary re-introduce
+       * omits it. Clearing the session's identity on that call made the two
+       * readers of one session contradict each other: `whoami` reported no
+       * identity while the broker, whose documented rule is "an omitted
+       * field keeps the prior value", still served the declared one.
+       *
+       * It is not only a display mismatch. `introduceArgs()` is the payload
+       * every transport receives, so a cleared identity is re-broadcast as
+       * "I have none" — moving the broker record off its identity key and
+       * splitting one session across two rows (see broker.test.ts). The
+       * client must hold the same rule the broker does.
+       */
+      /**
+       * C2, at the surface that matters. The drop only counts as reported if
+       * `whoami` says so — the same guarantee AC5 makes for remote, extended
+       * to the transport 100% of users have.
+       */
+      it('whoami reports a local broker that took the session but not its identity', async () => {
+        // A broker predating KAI-401: 200, no identity echoed back.
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) }))
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local.enabled).toBe(true)
+        expect(result.locations.local.identityRejected).toMatch(/identity/i)
+      })
+
+      it('whoami reports no local identity problem when the broker echoes the identity', async () => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, identity }) }),
+        )
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.locations.local).not.toHaveProperty('identityRejected')
+      })
+
+      it('keeps the declared identity when a later introduce omits it', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        await handleIdentityTool('introduce', { name: 'architect', identity }, deps)
+
+        await handleIdentityTool('introduce', { name: 'architect-renamed' }, deps)
+
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
+        expect(result.name).toBe('architect-renamed')
+        expect(result.identity).toEqual(identity)
+      })
+
+      it('re-sends the retained identity on the wire when a later introduce omits it', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const seen: Array<Record<string, unknown>> = []
+        const remoteDeps = makeDepsWithRemote((args) => seen.push(args))
+
+        await handleIdentityTool('introduce', { name: 'architect', identity, organization: 'org_a' }, remoteDeps)
+        await handleIdentityTool('introduce', { name: 'architect-renamed', organization: 'org_a' }, remoteDeps)
+
+        // Second introduce still carries it — a transport that learns of this
+        // session only on the second call must still learn who it is.
+        expect(seen).toHaveLength(2)
+        expect(seen[1]?.identity).toEqual(identity)
+        const localPosts = mockFetch.mock.calls.filter(
+          (c) => (c[0] as string).includes('/sessions') && (c[1] as RequestInit)?.method === 'POST',
+        )
+        expect(JSON.parse((localPosts.at(-1)![1]! as RequestInit).body as string).identity).toEqual(identity)
+      })
     })
 
     describe('whoami', () => {
@@ -222,6 +406,43 @@ describe('Identity Tools', () => {
           enabled: false,
           degradation: 'introduce() failed for "personal": Server Error',
         })
+      })
+
+      /**
+       * KAI-401: a location that took the session but refused its identity
+       * must SAY SO. This is the end of the silence chain — the transport
+       * records the rejection, and whoami is where a human/session can
+       * actually see it. Without this the drop is invisible: introduce
+       * reports success and the identity is simply gone.
+       */
+      it('surfaces a location that registered the session but rejected its declared identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote(undefined, {
+          identityRejected:
+            'Declared identity did not reach this location: introduce failed WITH identity and the same ' +
+            'call WITHOUT it succeeded, so identity is the likely cause. First attempt failed with: Server Error.',
+        } as never)
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        // Healthy transport — this is NOT degradation. The session works,
+        // it just isn't identifiable there.
+        expect(result.locations.remote.enabled).toBe(true)
+        expect(result.locations.remote.degradation).toBeUndefined()
+        expect(result.locations.remote.identityRejected).toMatch(/identity/i)
+      })
+
+      it('omits identityRejected from a location that accepted the identity', async () => {
+        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        vi.stubGlobal('fetch', mockFetch)
+        const remoteDeps = makeDepsWithRemote()
+
+        await handleIdentityTool('introduce', { name: 'architect', organization: 'org_a' }, remoteDeps)
+        const result = JSON.parse(await handleIdentityTool('whoami', {}, remoteDeps))
+
+        expect(result.locations.remote).not.toHaveProperty('identityRejected')
       })
     })
 
@@ -560,5 +781,38 @@ describe('version handshake surfacing', () => {
       const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
       expect(result.versions).toBeUndefined()
     })
+  })
+})
+
+/**
+ * I1 residue. `RemoteTransport.introduceWithIdentityFallback` runs ONE
+ * trial, never inspects the error and never reads the backend back, and
+ * its reason string is hedged accordingly — two tests in
+ * `tests/remote/transport.test.ts` hold it there. The prose that DEFINES
+ * the field for the reader was not: the `whoami` tool description said
+ * the location "did not store" the identity and this module's own jsdoc
+ * said it "refused" it, both of which the experiment cannot know. An
+ * agent reads the description, not the transport internals, so the
+ * certainty came back on the surface that matters.
+ */
+describe('identityRejected field documentation (I1)', () => {
+  it('documents identityRejected as the fallback inference it is, not confirmed backend state', () => {
+    expect(IDENTITY_REJECTED_FIELD_DOC).not.toMatch(/did not store|was not stored|refused/i)
+    expect(IDENTITY_REJECTED_FIELD_DOC).toMatch(/likely/i)
+    // The transient case is the whole reason the claim cannot be certain.
+    expect(IDENTITY_REJECTED_FIELD_DOC).toMatch(/transient/i)
+  })
+
+  it('keeps every surface that documents identityRejected on that one wording', () => {
+    const srcDir = resolve(__dirname, '..', '..', 'src')
+    for (const file of ['server.ts', join('tools', 'identity.ts')]) {
+      const source = readFileSync(join(srcDir, file), 'utf8')
+      // The jsdoc that names what the certainty claims WERE is the one
+      // place they may appear; it lives beside the constant.
+      const prose = source.replace(IDENTITY_REJECTED_FIELD_DOC, '').replace(/"Refused" and "did not store"/g, '')
+      expect(prose, `${file} re-asserts a storage outcome the fallback never observed`).not.toMatch(
+        /did not store its declared|refused its declared/i,
+      )
+    }
   })
 })

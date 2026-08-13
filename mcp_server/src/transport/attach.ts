@@ -142,10 +142,13 @@ export async function attachLocation(name: string, ctx: AttachCtx): Promise<Atta
     // introduce path re-registers across every enabled transport when
     // the user eventually calls it.
   } else {
-    const displayName = ctx.session.displayName
-    const objective = ctx.session.getObjective()
     try {
-      await transport.introduce({ sessionName: displayName, objective })
+      // The whole payload, straight off the session — never a hand-picked
+      // subset. This branch runs only when the session ALREADY introduced,
+      // so hand-picking `{sessionName, objective}` here dropped exactly the
+      // identity (and organization) the session had just declared, on every
+      // lazy attach, hot attach and replace-in-place re-attach (KAI-401).
+      await transport.introduce(ctx.session.introduceArgs())
     } catch (err) {
       // The transport was constructed (its ConvexClient opened a
       // websocket and installed an auth fetcher) but never registered.
