@@ -1,13 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
-import {
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeFileAtomic } from '../src/file-lock.js'

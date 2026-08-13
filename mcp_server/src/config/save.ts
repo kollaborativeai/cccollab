@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import { CCCOLLAB_CONFIG_FILE, CCCOLLAB_HOME } from '../constants.js'
-import { withFileLock, withFileLockSync, writeFileAtomic } from '../file-lock.js'
+import { withFileLock, writeFileAtomic } from '../file-lock.js'
+
+/** Re-exported so the config lock's deadline is readable from the module
+ *  that owns the config file. The value is derived in `file-lock.ts` from
+ *  `CLERK_FETCH_TIMEOUT_MS` (cc#33 / KAI-417 timeout ordering). */
+export { LOCK_TIMEOUT_MS } from '../file-lock.js'
 import { UserCccollabConfigSchema, type UserLocationConfig } from './schema.js'
 
 export interface ClerkLocationAuth {
@@ -56,10 +61,15 @@ export type LocationAuth = ClerkLocationAuth
  * process's update, forcing a re-authentication on the next refresh
  * because the in-memory refresh token no longer matches the persisted
  * one. See `src/file-lock.ts` for the lock protocol.
+ *
+ * Async (cc#33 / KAI-417): this must share the in-process gate with
+ * `withConfigLock`, and a synchronous writer cannot join a promise chain.
+ * A sync save would spin `acquireLock` against a lock its own process
+ * already holds across an `await`, deadlocking until LOCK_TIMEOUT_MS.
  */
-export function saveLocationAuth(locationName: string, auth: LocationAuth): void {
+export async function saveLocationAuth(locationName: string, auth: LocationAuth): Promise<void> {
   ensureHomeDir()
-  withFileLockSync(CCCOLLAB_CONFIG_FILE, () => writeLocationAuthInLock(locationName, auth))
+  await withFileLock(CCCOLLAB_CONFIG_FILE, async () => writeLocationAuthInLock(locationName, auth))
 }
 
 /**

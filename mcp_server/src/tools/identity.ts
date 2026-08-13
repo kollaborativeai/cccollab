@@ -422,7 +422,7 @@ async function handleAuthenticate(
       clientId: locationInfo.clerkClientId,
       redirectPort: locationInfo.clerkRedirectPort,
     })
-    saveLocationAuth(targetName, {
+    await saveLocationAuth(targetName, {
       authType: 'clerk',
       url,
       accessToken: tokens.accessToken,
