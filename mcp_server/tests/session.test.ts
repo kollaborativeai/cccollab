@@ -155,6 +155,32 @@ describe('SessionManager', () => {
       expect(sessionKey({ sessionId: 'x'.repeat(10_000) })).toBeNull()
     })
 
+    /**
+     * cc#37 FINDING-37. The guards ran against the TRIMMED id and the RAW one
+     * was returned — so the checks and the accepted value disagreed. What that
+     * let through is exactly what the guards exist to stop: `trim` removes tab,
+     * newline, CR, VT and FF, all inside the U+0000..U+001F range
+     * UNSAFE_SESSION_ID rejects. The broker's unauthenticated loopback
+     * `POST /sessions` sanitizer is this function (`broker.ts`), and its
+     * docstring promises the stored value "must survive sessionKey"; it then
+     * re-served the un-survived value to every session on the machine, typed as
+     * a clean SessionIdentity.
+     */
+    it('returns the trimmed sessionId, so no edge control character survives the guards', () => {
+      expect(sessionKey({ sessionId: 'abc\n' })).toBe('abc')
+      expect(sessionKey({ sessionId: '\tabc' })).toBe('abc')
+      expect(sessionKey({ sessionId: 'abc\r\n' })).toBe('abc')
+      expect(sessionKey({ sessionId: '  abc  ' })).toBe('abc')
+    })
+
+    it('returns a value that is itself within the length bound', () => {
+      // 200 real characters plus padding: accepted (the bound is measured on
+      // the trimmed value) but the returned key must be the 200, not the 202.
+      const key = sessionKey({ sessionId: ` ${'x'.repeat(200)} ` })
+      expect(key).toBe('x'.repeat(200))
+      expect(key).toHaveLength(200)
+    })
+
     it('still accepts an ordinary Claude Code session UUID', () => {
       const uuid = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
       expect(sessionKey({ sessionId: uuid })).toBe(uuid)

@@ -49,6 +49,14 @@ export function sessionKey(identity: SessionIdentity | undefined): string | null
   const trimmed = id.trim()
   // I3: refuse anything that cannot be a sessions-dir filename so the
   // writer is never armed for a key load returns null on and save throws on.
+  //
+  // This allowlist SUBSUMES KAI-401's blocklist, which the KAI-401 merge brings
+  // in alongside it: everything that one rejected (separators, the U+0000..001F
+  // range, `.`/`..`, over-length) fails `SAFE_SESSION_ID` or the length check
+  // here, and this additionally refuses shapes the blocklist allowed. cc#37's
+  // fix on that branch — validate and return the SAME value, `trimmed` rather
+  // than the raw `id` — is the behaviour here already. Do not "restore" the
+  // blocklist form: it is the weaker of the two.
   if (!isSafeSessionId(trimmed)) return null
   return trimmed
 }
