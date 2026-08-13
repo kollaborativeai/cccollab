@@ -709,17 +709,30 @@ export function reconcileFeeds(args: {
   // C1 (KAI-418 review): a brand-new transport after force re-auth has empty
   // cursors. Creating topic feeds without `sinceTs` replays every joined
   // topic's entire history as fresh inbound. Prime to "now" so only future
-  // messages arrive — same exclusive-cursor contract as first join.
+  // messages arrive — same exclusive-cursor contract as first join. TOPICS
+  // ONLY: `ensureTopicSubscription` refuses to re-prime a feed that is already
+  // live, so this cannot move a cursor that is already tracking delivery.
   const swapCursor = Date.now()
   for (const ch of args.context.getSubscribedChannels()) {
     if (ch.location !== args.location) continue
     try {
-      // Channel feeds seed from channelMaxTs; prime via join-time path when
-      // the transport exposes it so swap does not flood channel history either.
-      const maybePrime = args.transport as { primeChannelCursor?: (name: string, ts: number) => void }
-      if (typeof maybePrime.primeChannelCursor === 'function') {
-        maybePrime.primeChannelCursor(ch.name, swapCursor)
-      }
+      // Deliberately NOT primed (cc#34 FINDING-34). A channel cursor is the
+      // DELIVERED high-water mark, and `subscribeChannelMessages` resumes at it
+      // EXCLUSIVE — so advancing it to "now" skips every broadcast that arrived
+      // in (delivered, now]. `joinChannel` states the same invariant for its own
+      // re-join path and honours it; this did not.
+      //
+      // It also could not do the job it was added for. `primeChannelCursor`
+      // resolves the name through `channelIdsByName` and returns early when the
+      // name is not cached (remote.ts) — and a transport swapped in by
+      // `attachLocation` has an empty map, which is the entire case the prime
+      // named. So on a swap it was a no-op, and on every OTHER call — this runs
+      // on every introduce, not only on a swap — it was a silent skip.
+      //
+      // Nothing is needed in its place: with no `sinceTs` the query falls back
+      // to the backend's per-session read cursor, which delivers exactly the
+      // unread broadcasts. Topics have no such fallback, which is why the topic
+      // half below still primes.
       ensureChannelSubscription({ transport: args.transport, channelName: ch.name, messageBus: args.messageBus })
     } catch (err) {
       // Per-feed isolation: one membership must not abort the whole location.
