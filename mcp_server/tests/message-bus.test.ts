@@ -153,13 +153,47 @@ describe('MessageBus', () => {
   })
 
   describe('notify failures', () => {
-    it('swallows notification errors and emits notify:error', async () => {
+    // This used to assert `resolves`, and that was correct while nothing acted
+    // on the result. The ack-on-delivery fix made the resolution load-bearing:
+    // `subscribeChannelMessages` advances the read cursor over every row whose
+    // push RESOLVED, and the cursor is the session's only record of what it has
+    // seen. A swallowed notification error therefore buried the message below
+    // the cursor forever — silently, since `notify:error` has no listener in
+    // production code and MessageBus has no logger. The failure has to reach
+    // the caller for the ack to be able to stop.
+    it('rejects when the notification fails, so the caller can withhold the ack', async () => {
       const failingMcp = { notification: vi.fn().mockRejectedValue(new Error('disconnected')) }
       const failingBus = new MessageBus(failingMcp as never)
       const onError = vi.fn()
       failingBus.on('notify:error', onError)
-      await expect(failingBus.push(createMessage())).resolves.toBeUndefined()
+      await expect(failingBus.push(createMessage())).rejects.toThrow('disconnected')
       expect(onError).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not poison the stream queue for the next message', async () => {
+      const mcp = {
+        notification: vi.fn().mockRejectedValueOnce(new Error('disconnected')).mockResolvedValue(undefined),
+      }
+      const bus = new MessageBus(mcp as never)
+      await expect(bus.push(createMessage({ text: 'first' }))).rejects.toThrow('disconnected')
+      // Same stream key: the second message must still be delivered.
+      await expect(bus.push(createMessage({ text: 'second' }))).resolves.toBeUndefined()
+      expect(mcp.notification).toHaveBeenCalledTimes(2)
+    })
+
+    // I6 / C2 interaction: dedup must not claim success on a retry of a
+    // message whose first notify failed. Recording dedup before notify made
+    // the second push resolve without notifying — and the channel ack path
+    // then advanced past an undelivered row.
+    it('re-notifies after a failed push instead of resolving as a dedup hit', async () => {
+      const mcp = {
+        notification: vi.fn().mockRejectedValueOnce(new Error('disconnected')).mockResolvedValue(undefined),
+      }
+      const bus = new MessageBus(mcp as never)
+      const msg = createMessage({ text: 'retry-me' })
+      await expect(bus.push(msg)).rejects.toThrow('disconnected')
+      await expect(bus.push(msg)).resolves.toBeUndefined()
+      expect(mcp.notification).toHaveBeenCalledTimes(2)
     })
   })
 })

@@ -2,7 +2,8 @@ import type { ConvexClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
-import type { ParsedMessage } from '../types.js'
+import { renderInboundText } from '../attachments.js'
+import type { InboundImage, ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
   TopicNameConflictError,
@@ -211,6 +212,37 @@ export const HEARTBEAT_INTERVAL_MS = 60_000
 const DEDUP_CAPACITY = 10_000
 
 /**
+ * Max parallel attachment materialisations on a single history/join page (I5).
+ * Unbounded Promise.all on a full page × MAX_INBOUND_IMAGE_BYTES spikes RAM/FD.
+ */
+const HISTORY_ATTACHMENT_CONCURRENCY = 3
+
+/**
+ * Map `items` with at most `concurrency` async workers in flight.
+ * Preserves result order. Used for history/join image materialisation.
+ */
+export async function mapPool<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return []
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Math.min(Math.max(1, concurrency), items.length)
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      for (;;) {
+        const index = next++
+        if (index >= items.length) return
+        results[index] = await fn(items[index]!, index)
+      }
+    }),
+  )
+  return results
+}
+
+/**
  * Bounded FIFO id-set used to dedupe already-delivered messages across the
  * lifetime of a single subscription. Per-`_id` lookups are O(1); eviction
  * is O(1) amortised. Grows monotonically until it hits `capacity`, then
@@ -299,8 +331,16 @@ export class RemoteTransport implements Transport {
 
   /** Highest `ts` per channel id. Mirrors `topicMaxTs` - seeds the
    *  reactive `listByChannel` query's `sinceTs` so the initial batch
-   *  doesn't replay pre-subscribe broadcasts. */
+   *  doesn't replay pre-subscribe broadcasts. Advanced only after
+   *  successful delivery (C2). */
   private readonly channelMaxTs = new Map<string, number>()
+
+  /** Message ids currently mid-delivery for any channel subscription.
+   *  Concurrent onUpdate must not re-call onEvent for the same id. */
+  private readonly channelInFlight = new Set<string>()
+
+  /** Same as channelInFlight for topic live subscriptions (I2). */
+  private readonly topicInFlight = new Set<string>()
 
   /** Handle for the periodic `updateLastSeen` ping started once `introduce`
    *  sets `sessionId`. Cleared on `shutdown`. */
@@ -462,14 +502,13 @@ export class RemoteTransport implements Transport {
       })) as { channelId?: string; latestTs?: number }
       if (typeof res?.channelId === 'string') {
         this.channelIdsByName.set(args.channel, res.channelId)
-        // Seed the per-channel cursor with the channel's ts at join time so
-        // `subscribeChannelMessages` starts the reactive feed past existing
-        // history instead of replaying it as fresh inbound notifications.
-        // Monotonic non-decreasing: a later rejoin can't regress it.
-        if (typeof res.latestTs === 'number') {
-          const prior = this.channelMaxTs.get(res.channelId) ?? 0
-          if (res.latestTs > prior) this.channelMaxTs.set(res.channelId, res.latestTs)
-        }
+        // Do NOT seed channelMaxTs from joinChannel's latestTs. That value is
+        // the channel head, not what this session has acked. Passing it as
+        // exclusive sinceTs overrides the server session cursor
+        // (lastDeliveredTs) and skips unacked rows after a failed delivery or
+        // restart. When sinceTs is omitted, listByChannel uses the server
+        // cursor. Local channelMaxTs advances only after successful delivery
+        // (and via primeChannelCursor for history already shown).
       }
       return { subscriberCount: 0 }
     } catch (err) {
@@ -715,11 +754,13 @@ export class RemoteTransport implements Transport {
       const rows = (await this.client.query(
         fn<'query'>(this.refs.messages.queries.listByTopic),
         this.orgScopedArgs({ topicId: args.topicId }),
-      )) as Array<{ fromSessionId: string; text: string; ts: number }>
+      )) as Array<{ fromSessionId: string; text: string; ts: number; images?: InboundImage[] }>
+      // This history is handed straight to the model, and its caller primes the
+      // reactive cursor past it — so anything dropped here is dropped for good.
       return {
-        history: rows.map((r) => ({
+        history: await mapPool(rows, HISTORY_ATTACHMENT_CONCURRENCY, async (r) => ({
           sender: r.fromSessionId,
-          text: r.text,
+          text: (await renderInboundText({ text: r.text, images: r.images, ts: r.ts })).text,
           ts: new Date(r.ts).toISOString(),
         })),
       }
@@ -825,17 +866,35 @@ export class RemoteTransport implements Transport {
 
   // ─── Message history ──────────────────────────────────────────────────
 
-  private static toHistoryPage(raw: {
-    messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+  /**
+   * Maps a raw history page and materialises its attachments.
+   *
+   * The download happens HERE, on read, not when the message was sent — this is
+   * the catch-up path, so a session that was offline at send time gets the
+   * bytes the moment it asks for history. The resulting on-disk paths are
+   * appended to each message's text using the same block the live path uses, so
+   * a session sees identical framing whether an image arrived live or was read
+   * back from history.
+   */
+  private static async toHistoryPage(raw: {
+    messages: Array<{
+      fromSessionId: string
+      senderSessionName?: string
+      text: string
+      ts: number
+      images?: InboundImage[]
+    }>
     hasMore: boolean
-  }): TransportHistoryPage {
+  }): Promise<TransportHistoryPage> {
+    // Cap concurrent attachment downloads per page (I5).
+    const messages = await mapPool(raw.messages, HISTORY_ATTACHMENT_CONCURRENCY, async (m) => ({
+      sender: m.fromSessionId,
+      senderSessionName: m.senderSessionName,
+      text: (await renderInboundText({ text: m.text, images: m.images, ts: m.ts })).text,
+      ts: m.ts,
+    }))
     return {
-      messages: raw.messages.map((m) => ({
-        sender: m.fromSessionId,
-        senderSessionName: m.senderSessionName,
-        text: m.text,
-        ts: m.ts,
-      })),
+      messages,
       hasMore: raw.hasMore,
       oldestTs: raw.messages.length > 0 ? raw.messages[0]!.ts : undefined,
     }
@@ -868,10 +927,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readChannelHistory),
         this.orgScopedArgs({ channelId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readChannelMessages', err)
       return { messages: [], hasMore: false }
@@ -885,10 +950,16 @@ export class RemoteTransport implements Transport {
         fn<'query'>(this.refs.messages.queries.readTopicHistory),
         this.orgScopedArgs({ topicId: args.topicId, limit: args.limit, before: args.before }),
       )) as {
-        messages: Array<{ fromSessionId: string; senderSessionName?: string; text: string; ts: number }>
+        messages: Array<{
+          fromSessionId: string
+          senderSessionName?: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
         hasMore: boolean
       }
-      return RemoteTransport.toHistoryPage(raw)
+      return await RemoteTransport.toHistoryPage(raw)
     } catch (err) {
       this.registerFailure('readTopicMessages', err)
       return { messages: [], hasMore: false }
@@ -918,7 +989,7 @@ export class RemoteTransport implements Transport {
    */
   subscribeTopicMessages(
     args: { topicId: string; channelName: string },
-    onEvent: (msg: ParsedMessage) => void,
+    onEvent: (msg: ParsedMessage) => void | Promise<void>,
   ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     // Narrow the reactive window server-side with the EXCLUSIVE `sinceTs`
@@ -927,6 +998,9 @@ export class RemoteTransport implements Transport {
     // to the user on join, so that boundary message is not replayed. The
     // `_id` dedup below still guards against the same row appearing in
     // successive onUpdate batches within one subscription.
+    //
+    // onEvent may return a promise; local seen / topicMaxTs advance only after
+    // it fulfills (I2) — same contract as the channel path (C2).
     const startingTs = this.topicMaxTs.get(args.topicId)
     const baseArgs: Record<string, unknown> =
       startingTs === undefined ? { topicId: args.topicId } : { topicId: args.topicId, sinceTs: startingTs }
@@ -937,26 +1011,61 @@ export class RemoteTransport implements Transport {
       fn<'query'>(this.refs.messages.queries.listByTopic),
       queryArgs,
       (rows) => {
-        const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
+        const arr = rows as Array<{
+          _id: string
+          fromSessionId: string
+          text: string
+          ts: number
+          images?: InboundImage[]
+        }>
+        const deliveries: Array<{ id: string; ts: number; done: Promise<void> }> = []
         for (const row of arr) {
           if (seen.has(row._id)) continue
-          seen.add(row._id)
-          const prior = this.topicMaxTs.get(args.topicId) ?? 0
-          if (row.ts > prior) this.topicMaxTs.set(args.topicId, row.ts)
-          // Skip self-echo: messages this session just sent shouldn't push
-          // back into our own Claude. The cursor advance above still
-          // happens so the next reconnect doesn't re-deliver our own row.
-          // Mirrors the local broker's `isExactSelf` drop.
-          if (row.fromSessionId === ownSessionId) continue
-          onEvent({
-            sender: row.fromSessionId,
-            text: row.text,
-            ts: new Date(row.ts).toISOString(),
-            channel: args.channelName,
-            channelName: args.channelName,
-            threadTs: args.topicId,
+          if (this.topicInFlight.has(row._id)) continue
+          // Skip self-echo: own topic sends shouldn't push back. Still count
+          // as delivered so the watermark advances past our own row.
+          if (row.fromSessionId === ownSessionId) {
+            deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve() })
+            continue
+          }
+          this.topicInFlight.add(row._id)
+          const delivered = Promise.resolve(
+            onEvent({
+              sender: row.fromSessionId,
+              text: row.text,
+              ts: new Date(row.ts).toISOString(),
+              channel: args.channelName,
+              channelName: args.channelName,
+              threadTs: args.topicId,
+              images: row.images,
+            }),
+          ).finally(() => {
+            this.topicInFlight.delete(row._id)
           })
+          // The ack loop below stops at the FIRST rejection, so every later
+          // entry is never awaited. Park an inert handler now or those
+          // rejections are unhandled — fatal under Node's default
+          // `--unhandled-rejections=throw` (cc#66). Attaching a handler does
+          // not stop `delivered` itself rejecting for the awaiting loop.
+          void delivered.catch(() => {})
+          deliveries.push({ id: row._id, ts: row.ts, done: delivered })
         }
+        if (deliveries.length === 0) return
+        // Advance topicMaxTs / seen only after successful delivery, stop at
+        // the first failure — same as the channel path. No server ack for
+        // topics; local watermark is the only resubscribe gate.
+        void (async () => {
+          for (const delivery of deliveries) {
+            try {
+              await delivery.done
+            } catch {
+              break
+            }
+            seen.add(delivery.id)
+            const prior = this.topicMaxTs.get(args.topicId) ?? 0
+            if (delivery.ts > prior) this.topicMaxTs.set(args.topicId, delivery.ts)
+          }
+        })()
       },
       (err) => {
         this.registerSubscriptionFailure('subscribeTopicMessages', err)
@@ -977,7 +1086,14 @@ export class RemoteTransport implements Transport {
    * `leave_channel` / shutdown; tracked internally via `trackUnsubscribe`
    * so a `shutdown()` still sweeps it if the caller drops the reference.
    */
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  subscribeChannelMessages(
+    args: { channelName: string },
+    // May return a promise that settles when the message has actually been
+    // DELIVERED. The ack below waits on it: the read cursor is the session's
+    // only record of what it has seen, so advancing it over a message still in
+    // flight is how a message is lost for good.
+    onEvent: (msg: ParsedMessage) => void | Promise<void>,
+  ): () => void {
     if (!this.enabled || this.shutdownStarted) return () => {}
     const seen = new BoundedIdSet(DEDUP_CAPACITY)
 
@@ -998,44 +1114,81 @@ export class RemoteTransport implements Transport {
       // don't want to hard-fail if the order is ever violated.
       const queryArgs: { channelId: string; sessionId?: string; sinceTs?: number } =
         sessionId !== null ? { channelId, sessionId } : { channelId }
-      // Narrow the initial reactive batch past the channel's join-time
-      // history. `channelMaxTs` is seeded by `joinChannel` (and advanced by
-      // this callback). An explicit `sinceTs` overrides the server-side
-      // read cursor, so a first-ever join — which has no cursor yet — does
-      // not replay the channel's whole broadcast history.
+      // Narrow the reactive window only after we have a local high-water mark
+      // from successful deliveries (or primeChannelCursor for history already
+      // shown). An explicit sinceTs overrides the server session cursor, so
+      // we must never set it above a ts we have actually delivered.
       const startingTs = this.channelMaxTs.get(channelId)
       if (startingTs !== undefined) queryArgs.sinceTs = startingTs
       innerUnsubscribe = this.client.onUpdate(
         fn<'query'>(this.refs.messages.queries.listByChannel),
         queryArgs,
         (rows) => {
-          const arr = rows as Array<{ _id: string; fromSessionId: string; text: string; ts: number }>
-          let highestTsInBatch = 0
+          const arr = rows as Array<{
+            _id: string
+            fromSessionId: string
+            text: string
+            ts: number
+            images?: InboundImage[]
+          }>
+          // Each row's id/ts paired with the promise that settles when it has
+          // been delivered. Rows arrive in ascending ts order, so this list is
+          // the order the cursor may advance through.
+          //
+          // Do NOT mark seen or advance channelMaxTs until delivery succeeds.
+          // Marking early made a failed notify unrecoverable in-process (id
+          // never re-emitted) and pushed exclusive sinceTs past unacked rows
+          // on resubscribe.
+          const deliveries: Array<{ id: string; ts: number; done: Promise<void> }> = []
           for (const row of arr) {
             if (seen.has(row._id)) continue
-            seen.add(row._id)
-            const prior = this.channelMaxTs.get(channelId) ?? 0
-            if (row.ts > prior) this.channelMaxTs.set(channelId, row.ts)
-            if (row.ts > highestTsInBatch) highestTsInBatch = row.ts
+            if (this.channelInFlight.has(row._id)) continue
             // Skip self-echo: own broadcasts shouldn't push back to our
-            // own Claude. Cursor + ack advance above still happens so
-            // we don't re-deliver our own row on reconnect. Mirrors the
-            // local broker's self-broadcast drop.
-            if (sessionId !== null && row.fromSessionId === sessionId) continue
-            onEvent({
-              sender: row.fromSessionId,
-              text: row.text,
-              ts: new Date(row.ts).toISOString(),
-              channel: args.channelName,
-              channelName: args.channelName,
-              threadTs: undefined,
+            // own Claude. Still count as delivered for ack/seen/maxTs so we
+            // don't re-offer our own row on reconnect. Mirrors the local
+            // broker's self-broadcast drop.
+            if (sessionId !== null && row.fromSessionId === sessionId) {
+              deliveries.push({ id: row._id, ts: row.ts, done: Promise.resolve() })
+              continue
+            }
+            this.channelInFlight.add(row._id)
+            const delivered = Promise.resolve(
+              onEvent({
+                sender: row.fromSessionId,
+                text: row.text,
+                ts: new Date(row.ts).toISOString(),
+                channel: args.channelName,
+                channelName: args.channelName,
+                threadTs: undefined,
+                images: row.images,
+              }),
+            ).finally(() => {
+              this.channelInFlight.delete(row._id)
             })
+            // See the topic path: the ack loop breaks at the first rejection,
+            // leaving later entries unawaited. Without this handler a batch
+            // with two or more failed deliveries takes the process down
+            // (cc#66). `delivered` still rejects for the awaiting loop.
+            void delivered.catch(() => {})
+            deliveries.push({ id: row._id, ts: row.ts, done: delivered })
           }
-          // Ack the batch's highest ts so subsequent subscribes (incl.
-          // MCP restarts) skip re-delivering it. Fire-and-forget; a
-          // failure here is non-fatal - the NEXT successful ack bumps
-          // the cursor to cover this batch's ts too (acks are monotonic
-          // and idempotent).
+          // Ack the highest ts that was actually DELIVERED, once it has been.
+          //
+          // Not the batch maximum, and not synchronously. `onEvent` hands the
+          // row to MessageBus, which downloads any attachments before notifying
+          // — so the old synchronous ack advanced the cursor over messages the
+          // session had not been shown. Kill the process in that window (an
+          // /exit, an OOM, a restart) and those messages are below the cursor
+          // forever: `listByChannel` is bounded by it and never returns them
+          // again. Silent, permanent loss.
+          //
+          // Stops at the FIRST failure rather than acking the last success:
+          // acking past a gap buries exactly the message that failed. Local
+          // seen / channelMaxTs advance only on success for the same reason.
+          //
+          // Fire-and-forget at the mutation itself; a failure there is non-fatal
+          // — the NEXT successful ack bumps the cursor to cover this batch too
+          // (acks are monotonic and idempotent).
           //
           // Critically: ack failures MUST NOT trip the degradation
           // circuit. A transient UNAUTHENTICATED during auth-refresh or
@@ -1043,17 +1196,32 @@ export class RemoteTransport implements Transport {
           // kill the whole transport for the session. The reactive
           // listByChannel subscription's own error path still degrades
           // on persistent failure, which is the right signal.
-          if (highestTsInBatch > 0 && sessionId !== null) {
-            void this.client
-              .mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
-                sessionId,
-                channelId,
-                ts: highestTsInBatch,
-              })
-              .catch((err: unknown) => {
+          if (deliveries.length > 0) {
+            void (async () => {
+              let ackTs = 0
+              for (const delivery of deliveries) {
+                try {
+                  await delivery.done
+                } catch {
+                  break
+                }
+                seen.add(delivery.id)
+                const prior = this.channelMaxTs.get(channelId) ?? 0
+                if (delivery.ts > prior) this.channelMaxTs.set(channelId, delivery.ts)
+                if (delivery.ts > ackTs) ackTs = delivery.ts
+              }
+              if (ackTs === 0 || sessionId === null) return
+              try {
+                await this.client.mutation(fn<'mutation'>(this.refs.messages.mutations.ackChannel), {
+                  sessionId,
+                  channelId,
+                  ts: ackTs,
+                })
+              } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err)
                 this.log(`ackChannel failed (non-fatal, cursor will advance on next ack): ${msg}`)
-              })
+              }
+            })()
           }
         },
         (err) => {

@@ -1,7 +1,20 @@
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const CCCOLLAB_HOME = join(homedir(), '.cccollab')
+
+/**
+ * An unguessable token identifying THIS server process, for state that belongs
+ * to one session rather than to the OS user — currently the delivered-image
+ * directory (see `attachments.imagesDirForSession`).
+ *
+ * Per process, not per profile: `PROFILE` exists to isolate test brokers and
+ * resolves to `"default"` in production, so it would put every real session back
+ * in one directory. Random rather than derived from the pid, because a pid is
+ * both guessable and reused.
+ */
+export const SESSION_SCOPE = `s-${randomBytes(9).toString('hex')}`
 export const CCCOLLAB_RUN_DIR = join(CCCOLLAB_HOME, 'run')
 export const CCCOLLAB_LOGS_DIR = join(CCCOLLAB_HOME, 'logs')
 

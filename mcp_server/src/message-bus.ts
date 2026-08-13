@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { renderInboundText } from './attachments.js'
 import type { ParsedMessage } from './types.js'
 
 /**
@@ -43,12 +44,62 @@ function dedupKey(msg: ParsedMessage): string {
   const threadOrChannel = msg.threadTs ?? msg.channel
   const ts = Date.parse(msg.ts)
   const secondBucket = Number.isNaN(ts) ? msg.ts : String(Math.floor(ts / 1000))
-  return `${msg.sender}|${threadOrChannel}|${secondBucket}|${msg.text}`
+  return `${msg.sender}|${threadOrChannel}|${secondBucket}|${msg.text}|${imageIdentity(msg)}`
+}
+
+/**
+ * The attachment half of the dedup key.
+ *
+ * Without it the key was `sender|stream|second|text`, and two screenshots pasted
+ * in the same second by the same person — with the same caption, or the empty
+ * one the web UI sends by default — collapsed to a single key. That was survivable
+ * while a dedup hit merely skipped a notification. C2 made `push`'s resolution the
+ * thing that advances `seen` / `channelMaxTs` / `topicMaxTs` / `ackChannel`, so the
+ * hit stopped being a skip and became an ACK: the second image was never shown and
+ * the cursor moved past it, which on a channel is persisted server-side. Measured
+ * on the real path (`dedup-images.test.ts`): one notification for two rows, and the
+ * resubscribe cursor advanced to the dropped row's own `ts`.
+ *
+ * Keyed on the storage urls, in order, because that is what already identifies a
+ * distinct stored file elsewhere in this codebase (`imageFileName`'s digest). Two
+ * genuinely identical arrivals — the same message reaching both transports — still
+ * produce the same identity and still dedupe, which is the case the window exists
+ * for. A non-array or malformed `images` contributes the empty identity rather than
+ * throwing: this runs on every push, and `remote.ts` casts wire rows with a bare
+ * `as` at five sites.
+ */
+function imageIdentity(msg: ParsedMessage): string {
+  if (!Array.isArray(msg.images) || msg.images.length === 0) return ''
+  return msg.images.map((image) => String(image?.url ?? '')).join(',')
 }
 
 export class MessageBus extends EventEmitter {
   private readonly mcp: Server
   private readonly dedupSeen = new Map<string, number>()
+  /**
+   * One in-flight delivery chain PER STREAM, keyed by topic when there is one
+   * and by channel otherwise. Dedup stays synchronous at the head of `push`, so
+   * ordering within a stream is decided by call order rather than by how long
+   * each message's attachments take to fetch.
+   *
+   * Per stream, not per process. Ordering is only meaningful between messages a
+   * reader will relate to each other — the screenshot and the sentence about it
+   * — and that relation does not cross channels. A single process-wide chain
+   * bought the ordering that matters by making every channel wait behind every
+   * download: measured, a 2-image message on one channel and a text-only
+   * "PROD IS DOWN" on another both landed at t+1603ms.
+   *
+   * Head-of-line blocking within one stream is bounded by
+   * `MESSAGE_DOWNLOAD_BUDGET_MS` (attachments.ts) — a whole-message budget, not
+   * a per-fetch timeout, because images are fetched sequentially and n images
+   * used to mean n × the per-fetch timeout. It is paid only by later messages
+   * in the SAME stream.
+   *
+   * ponytail: a map of promise chains, not a queue class — each link is released
+   * as it settles, and a stream's entry is dropped once it goes idle, so a
+   * long-lived process does not retain one promise per channel it has ever seen.
+   */
+  private readonly tails = new Map<string, Promise<void>>()
 
   constructor(mcp: Server) {
     super()
@@ -76,8 +127,10 @@ export class MessageBus extends EventEmitter {
       this.emit('dedup:dropped', { msg, source, previousTs: last })
       return
     }
-    this.dedupSeen.set(key, now)
-    if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
+    // Do NOT record dedup until delivery succeeds. Recording first (I6) made a
+    // failed notify look like a successful no-op on retry within DEDUP_WINDOW_MS
+    // — and once C2 advances seen/ack only after push resolves, that false
+    // success permanently acks a message the session never saw.
 
     const meta: Record<string, string> = {
       sender: msg.sender,
@@ -90,14 +143,62 @@ export class MessageBus extends EventEmitter {
       meta.thread_ts = msg.threadTs
     }
 
+    // Delivery is serialised behind whatever is already in flight FOR THIS
+    // STREAM. Callers fire `void push(...)` once per row from a subscription
+    // callback, so before attachments existed the notifications went out in row
+    // order simply because nothing awaited in between. Materialising an image
+    // inserts a network round-trip, and without this queue every later
+    // text-only message overtakes it: the session reads "so revert the
+    // migration" before it is shown the screenshot that sentence is about.
+    // A different channel has no such relation and waits for nothing.
+    const streamKey = msg.threadTs ?? msg.channel
+    const tail = this.tails.get(streamKey) ?? Promise.resolve()
+    const delivery = tail.then(async () => {
+      await this.deliver(msg, source, meta)
+      // Only a successful notify claims the dedup key.
+      this.dedupSeen.set(key, Date.now())
+      if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
+    })
+    // One failed delivery must not poison the queue for the next message.
+    const settled = delivery.catch(() => {})
+    this.tails.set(streamKey, settled)
+    // Drop the entry once this stream goes idle. Guarded on identity so a
+    // message pushed while this one was in flight keeps its place in line.
+    void settled.then(() => {
+      if (this.tails.get(streamKey) === settled) this.tails.delete(streamKey)
+    })
+    return delivery
+  }
+
+  /** Everything after dedup: materialise attachments, then notify. */
+  private async deliver(msg: ParsedMessage, source: MessageSource, meta: Record<string, string>): Promise<void> {
+    // A url in the content would be fetched as a web page and flattened to
+    // text, so the session can only SEE an image if it has a file to read.
+    // Downloading here (rather than at send time) is also what lets a session
+    // that was offline receive the image whenever it comes back.
+    const { text: content, saved } = await renderInboundText({
+      text: msg.text,
+      images: msg.images,
+      ts: Date.parse(msg.ts) || Date.now(),
+    })
+    if (saved.length > 0) meta.images = String(saved.length)
+
     try {
       await this.mcp.notification({
         method: 'notifications/claude/channel',
-        params: { content: msg.text, meta },
+        params: { content, meta },
       })
     } catch (err) {
       this.emit('notify:error', { msg, source, err })
-      return
+      // RETHROW. The caller advances the session's read cursor over every row
+      // whose push resolved, and that cursor is the only record of what has
+      // been seen — so swallowing here acked a message the session was never
+      // shown and buried it permanently. `notify:error` cannot substitute: it
+      // has no listener in production code and this class has no logger, so a
+      // swallowed failure is invisible at every layer. The queue is protected
+      // separately in `push` (`tails` holds the caught promise), so rejecting
+      // stops the ack without stalling the next message.
+      throw err
     }
 
     this.emit(`channel:${msg.channel}`, msg)
