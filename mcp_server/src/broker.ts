@@ -4,7 +4,14 @@ import type { AddressInfo } from 'node:net'
 import { writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import crypto from 'node:crypto'
-import { PROFILE, BROKER_RENDEZVOUS_FILE, CCCOLLAB_RUN_DIR, CCCOLLAB_LOGS_DIR } from './constants.js'
+import {
+  PROFILE,
+  BROKER_RENDEZVOUS_FILE,
+  CCCOLLAB_RUN_DIR,
+  CCCOLLAB_LOGS_DIR,
+  DEFAULT_BROKER_HEARTBEAT_MS,
+  parsePositiveInt,
+} from './constants.js'
 import { removeRendezvous } from './broker-discovery.js'
 import { clampHistoryLimit, pageTopicHistory } from './history-paging.js'
 
@@ -30,8 +37,8 @@ const BROKER_ID = crypto.randomUUID()
 function positiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name]
   if (raw === undefined) return fallback
-  const n = Number(raw)
-  if (!Number.isFinite(n) || n < 1) {
+  const n = parsePositiveInt(raw)
+  if (n === undefined) {
     // The broker is typically spawned with stdio ignored, so a bare throw is a
     // 10s hang and a generic rendezvous timeout that names neither variable
     // nor value. Write the reason to the log file before dying so the operator
@@ -43,7 +50,7 @@ function positiveIntEnv(name: string, fallback: number): number {
     }
     throw new Error(`${name} must be an integer >= 1, got ${JSON.stringify(raw)}`)
   }
-  return Math.floor(n)
+  return n
 }
 
 /** Events retained for replay to a reconnecting client. Bounded: a client that
@@ -53,9 +60,11 @@ const REPLAY_CAPACITY = positiveIntEnv('CCCOLLAB_REPLAY_CAPACITY', 1000)
 /** How often every open SSE stream gets a comment frame. Its job is to make
  *  silence MEAN something: a client can only tell "quiet but healthy" from
  *  "wedged" if a healthy stream is never silent for long. The listener's read
- *  deadline is sized against this (see broker-event-listener.ts), so shortening
- *  one without the other turns an idle stream into a reconnect loop. */
-const HEARTBEAT_MS = positiveIntEnv('CCCOLLAB_HEARTBEAT_MS', 15_000)
+ *  deadline is DERIVED from this same variable (`readDeadlineMsFor` in
+ *  broker-event-listener.ts) rather than tracking it by hand: while it was a
+ *  literal on that side, raising this knob past the deadline made every session
+ *  reconnect-loop against a healthy broker (cc#35). */
+const HEARTBEAT_MS = positiveIntEnv('CCCOLLAB_HEARTBEAT_MS', DEFAULT_BROKER_HEARTBEAT_MS)
 const replayBuffer: Array<{ seq: number; data: string }> = []
 let lastSeq = 0
 

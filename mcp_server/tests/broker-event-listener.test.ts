@@ -37,15 +37,81 @@ describe('BrokerEventListener (channel-aware)', () => {
     }
     listener.processLocalEvent(event)
     await vi.waitFor(() => {
+      // S10: watcher must get threadTs/topicName so it can act on the new topic.
+      // RED: drop threadTs/topicName from the topic_created push → this fails.
       expect(mockBus.push).toHaveBeenCalledWith(
         expect.objectContaining({
           sender: 'tester',
           text: expect.stringContaining('Auth discussion'),
           channel: 'default',
           channelName: 'default',
+          threadTs: 'uuid-1',
+          topicName: 'Auth discussion',
         }),
       )
     })
+  })
+
+  /**
+   * cc#35 pr-test I3 / code-reviewer S7: gap WARNING fans out once per LOCAL
+   * subscription only. Remote-only and zero-local must not invent a channel.
+   * RED: filter with bare `'local'` string that drifts, or push a hardcoded
+   * fallback channel → multi-local count / remote-only / zero-local fail.
+   */
+  it('stream_gap WARNING fans out to every local channel and skips remote-only', async () => {
+    const gap: BrokerLocalEvent = {
+      source: 'local',
+      type: 'stream_gap',
+      reason: 'buffer overflow',
+    }
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const bus = createMockMessageBus()
+
+    // two local + one remote (fresh context: beforeEach already has "default")
+    const multi = new ActiveContext()
+    multi.joinChannel('alpha', 'manual', 'local')
+    multi.joinChannel('beta', 'manual', 'local')
+    multi.joinChannel('gamma', 'manual', 'flatout')
+    const multiListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: multi,
+    })
+    multiListener.processLocalEvent(gap)
+    await vi.waitFor(() => expect(bus.push).toHaveBeenCalledTimes(2))
+    const channels = bus.push.mock.calls.map((c) => (c[0] as { channel: string }).channel).sort()
+    expect(channels).toEqual(['alpha', 'beta'])
+    expect(multiListener.mayHaveMissedEvents()).toBe(true)
+
+    // remote-only: flag set, no push destination
+    bus.push.mockClear()
+    const remoteOnly = new ActiveContext()
+    remoteOnly.joinChannel('only-remote', 'manual', 'flatout')
+    const remoteListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: remoteOnly,
+    })
+    remoteListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(remoteListener.mayHaveMissedEvents()).toBe(true)
+
+    // zero channels
+    bus.push.mockClear()
+    const emptyListener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: bus as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+    emptyListener.processLocalEvent(gap)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(bus.push).not.toHaveBeenCalled()
+    expect(emptyListener.mayHaveMissedEvents()).toBe(true)
   })
 
   it('drops topic_created for a channel we are not subscribed to', async () => {
@@ -681,6 +747,52 @@ describe('BrokerEventListener reconnect cursor (KAI-414)', () => {
       await new Promise<void>((r) => server.close(() => r()))
     }
   }, 15_000)
+
+  /**
+   * cc#35 pr-test I6: reconnectPending coalesces end+close+error into one
+   * reconnect. Without it, a single socket teardown can schedule N timers and
+   * open N parallel SSE streams.
+   * RED: remove `if (this.reconnectPending) return` → connections exceeds 2
+   * before the delay window closes.
+   */
+  it('reconnectPending coalesces multiple teardowns into a single reconnect', async () => {
+    let connections = 0
+    const server = http.createServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write('id: b1:0\ndata: ' + JSON.stringify({ source: 'local', type: 'stream_hello' }) + '\n\n')
+      if (connections === 1) {
+        // One destroy fires end + close (and sometimes error). Without the
+        // guard that is 2–3 scheduled reconnects → 2–3 parallel sockets.
+        setTimeout(() => res.destroy(), 20)
+      }
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('orchestrator')
+    const listener = new BrokerEventListener({
+      brokerUrl: `http://127.0.0.1:${port}`,
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(connections).toBe(1), { timeout: 5000 })
+      // After destroy, exactly one reconnect should land (connections === 2).
+      // RECONNECT_DELAY_MS is 2000; wait past it once.
+      await vi.waitFor(() => expect(connections).toBe(2), { timeout: 5000 })
+      // Brief settle: a double-scheduled reconnect would open a third socket.
+      await new Promise<void>((r) => setTimeout(r, 500))
+      expect(connections).toBe(2)
+    } finally {
+      listener.stop()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 15_000)
 })
 
 /**
@@ -829,4 +941,86 @@ describe('BrokerEventListener stream health (KAI-414)', () => {
       await server.close()
     }
   }, 20_000)
+
+  // cc#35 coverage gap. `res.on('close')` is the backstop for "every teardown
+  // that emits neither 'end' nor 'error' — and there are several", and deleting
+  // it left the whole suite green: every teardown the other tests produce is
+  // already covered by 'end' or 'error'. Measured on this Node build, exactly
+  // one shape fires 'close' alone — destroying the RESPONSE rather than the
+  // request (server-side resets and FINs all raise 'error' or 'end' first) — so
+  // that is the shape driven here, through the real listener and a real socket.
+  // Without the backstop, `scheduleReconnect` never runs after such a teardown:
+  // the listener stops reconnecting AND, because that is the one place that
+  // clears it, `whoami` keeps reporting a healthy watch on a socket that is gone.
+  it('reconnects after a teardown that emits neither end nor error', async () => {
+    let connections = 0
+    const server = await startServer((_req, res) => {
+      connections += 1
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(SSE_HELLO)
+    })
+    // A deadline far past the end of this test: a reconnect observed below can
+    // then only have come from the teardown handler, never from the watchdog.
+    const listener = makeListener(server.port, 60_000)
+    const realGet = http.get
+    let captured: http.IncomingMessage | undefined
+    const getSpy = vi.spyOn(http, 'get').mockImplementation((...args: Parameters<typeof http.get>) => {
+      const req = realGet(...args)
+      req.once('response', (res: http.IncomingMessage) => {
+        captured = res
+      })
+      return req
+    })
+
+    try {
+      await listener.start()
+      await vi.waitFor(() => expect(listener.isConnected()).toBe(true), { timeout: 5000, interval: 10 })
+      expect(connections).toBe(1)
+
+      captured!.destroy()
+
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 25 })
+    } finally {
+      getSpy.mockRestore()
+      listener.stop()
+      await server.close()
+    }
+  }, 20_000)
+
+  // cc#35 FINDING-35. The deadline and the broker's heartbeat are a matched
+  // pair: the deadline is only correct while it outlasts two beats. The
+  // heartbeat is user-configurable (CCCOLLAB_HEARTBEAT_MS) and the deadline was
+  // a 40s literal, so raising the heartbeat past 40s made every session
+  // reconnect-loop against a healthy broker — proven at scale-model: 1
+  // connection in 7s when sized correctly, 4 when not. Asserted on the value
+  // the listener will ACTUALLY use, not on the derivation helper alone, so
+  // hardcoding the deadline again fails here rather than passing a green helper.
+  it('sizes its read deadline against CCCOLLAB_HEARTBEAT_MS, so a raised heartbeat cannot reconnect-loop', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      process.env.CCCOLLAB_HEARTBEAT_MS = '60000'
+      expect(makeListener(1).readDeadlineMs).toBeGreaterThan(2 * 60_000)
+
+      // Down as well as up: a shortened heartbeat must not leave a deadline so
+      // long that a wedged stream goes unnoticed for minutes.
+      process.env.CCCOLLAB_HEARTBEAT_MS = '1000'
+      expect(makeListener(1).readDeadlineMs).toBeLessThan(40_000)
+    } finally {
+      if (previous === undefined) delete process.env.CCCOLLAB_HEARTBEAT_MS
+      else process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
+  })
+
+  // Calibration pin, not a RED proof: the derivation must reproduce the 40s
+  // that shipped, so deriving the pair changes nothing for anyone who never
+  // set the variable.
+  it('leaves the default read deadline at 40s — two 15s beats plus headroom', () => {
+    const previous = process.env.CCCOLLAB_HEARTBEAT_MS
+    try {
+      delete process.env.CCCOLLAB_HEARTBEAT_MS
+      expect(makeListener(1).readDeadlineMs).toBe(40_000)
+    } finally {
+      if (previous !== undefined) process.env.CCCOLLAB_HEARTBEAT_MS = previous
+    }
+  })
 })
