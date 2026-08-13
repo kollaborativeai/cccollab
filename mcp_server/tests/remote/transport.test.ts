@@ -468,6 +468,56 @@ describe('RemoteTransport — organizations', () => {
     expect(transport.enabled).toBe(true)
   })
 
+  /**
+   * cc#31 FINDING-31a. Production does NOT throw the object payload the test
+   * above uses: `requireCccollabParticipant` reaches
+   * `throw new ConvexError('Requires member or higher')` — a bare STRING
+   * payload. The classifier used to read only `err.message` for that shape, and
+   * `err.message` is the field a deployment is free to mask. KAI-434 is this
+   * repo's own precedent: a classifier tuned to text production had already
+   * replaced with "Server Error".
+   */
+  it('classifies a role refusal from the payload when the message is masked', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        // Masked message, intact payload: the shape a redacting deployment produces.
+        throw Object.assign(new Error('[Request ID: 8f2c] Server Error'), {
+          data: 'Requires member or higher',
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await expect(transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' })).rejects.toBeInstanceOf(
+      OrganizationRejectedError,
+    )
+    // Unclassified, this would have counted against the breaker as a transport
+    // fault — and the tool layer would have reported the introduce as a success.
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('surfaces the backend refusal text, not the client stacktrace, for a string payload', async () => {
+    // What the sync client puts in `err.message` for a ConvexError: the refusal
+    // plus server frames (createHybridErrorStacktrace). The tool layer
+    // interpolates this straight into the agent's context.
+    const hybrid =
+      '[CONVEX M(cccollab/sessions:introduce)] Uncaught ConvexError: Requires member or higher\n' +
+      '    at requireOrganizationPermission (../convex/utils.ts:1029:41)\n' +
+      '    at handler (../convex/cccollab/sessions.ts:336:5)\n  Called by client'
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error(hybrid), { data: 'Requires member or higher' })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(OrganizationRejectedError)
+    expect((err as Error).message).toBe('Requires member or higher')
+    expect((err as Error).message).not.toMatch(/convex\/utils\.ts|at handler|Called by client/)
+  })
+
   it('introduce raises OrganizationRejectedError when the backend validator refuses a slug', async () => {
     // A backend whose introduce validator is still `v.id('organizations')`
     // rejects any slug before the handler runs. Deterministic, not transient.

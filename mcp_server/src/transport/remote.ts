@@ -1275,9 +1275,31 @@ function extractConvexErrorCode(err: unknown): string | null {
   return null
 }
 
+/**
+ * The refusal text the BACKEND sent, preferred over anything the client
+ * assembled.
+ *
+ * `err.data` is the ConvexError payload, and Convex preserves it across the
+ * wire in both of the shapes this backend throws: `ConvexError({code, message})`
+ * gives an object, and `ConvexError('Requires member or higher')`
+ * (`frontend/src/convex/utils.ts`, reached from `requireCccollabParticipant`)
+ * gives a bare STRING. Only the object shape used to be read, so every
+ * string-payload refusal fell through to `err.message` — which on the sync
+ * client is `createHybridErrorStacktrace`: the refusal text *plus* server file
+ * paths and line numbers, which the tool layer then interpolates into the
+ * agent's context (cc#31 FINDING-31a).
+ *
+ * Reading the payload is also what makes classification structural rather than
+ * textual. `err.message` is the field a deployment is free to mask — KAI-434
+ * was exactly that failure, a classifier matching text production had replaced
+ * with "Server Error" — while the payload survives. `isOrganizationRejection`
+ * consumes this, so a masked message no longer downgrades a hard role refusal
+ * into a transient fault that `introduce` swallows and reports as success.
+ */
 function extractConvexErrorMessage(err: unknown): string {
   if (typeof err === 'object' && err !== null && 'data' in err) {
     const data = (err as { data: unknown }).data
+    if (typeof data === 'string' && data !== '') return data
     if (typeof data === 'object' && data !== null && 'message' in data) {
       const message = (data as { message: unknown }).message
       if (typeof message === 'string') return message
