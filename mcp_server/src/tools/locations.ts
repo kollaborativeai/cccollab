@@ -2,6 +2,7 @@ import type { ResolvedLocation } from '../config/resolve.js'
 import type { ActiveContext } from '../context.js'
 import type { TransportRouter } from '../transport/router.js'
 import { RemoteTransport } from '../transport/remote.js'
+import { transportHealth } from '../transport/health.js'
 
 /** Access-token freshness, derived from `accessTokenExpiresAt` without a
  *  network call. `none` means there is no access token at all. A token can
@@ -107,9 +108,10 @@ export interface LocationToolDeps {
 export function handleListLocations(deps: LocationToolDeps, now: number = Date.now()): string {
   const attached = new Map<string, { enabled: boolean; degradation?: string }>()
   for (const transport of deps.router.all()) {
-    const maybeDegraded = transport as Partial<RemoteTransport>
-    const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : undefined
-    attached.set(transport.source, { enabled: transport.enabled, ...(degradation ? { degradation } : {}) })
+    // Same reader `whoami` uses. Reading `degradation` alone here is what made
+    // this tool report a clean bill of health for a location whose capability
+    // had been reduced (cc#41 FINDING-41a).
+    attached.set(transport.source, transportHealth(transport))
   }
 
   const summaries = summarizeLocations({

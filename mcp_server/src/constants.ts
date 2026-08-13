@@ -39,6 +39,18 @@ export const CCCOLLAB_CONFIG_FILE = join(CCCOLLAB_HOME, 'config.json')
  * deliberately NOT baked here (KAI-316): it lives only in the worker's
  * upstream config, so the client never carries it.
  */
+/**
+ * How long a registration's last liveness signal may be before
+ * `list_sessions` treats it as dead and drops it (KAI-515).
+ *
+ * Shared rather than duplicated because two layers must agree on it: the
+ * tool layer applies it to decide what to show, and the transport layer
+ * measures its own heartbeat against it to know when a stalled heartbeat
+ * has stopped being a blip and started making this session invisible to
+ * its peers. Change it here and both follow.
+ */
+export const SESSION_STALE_MS = 5 * 60_000
+
 export const DEFAULT_REMOTE_LOCATION_NAME = 'remote'
 export const DEFAULT_REMOTE_URL = 'https://collab.kollaborativeai.com'
 export const DEFAULT_CLERK_ISSUER = 'https://clerk.kollaborativeai.com'

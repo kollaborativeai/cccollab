@@ -362,34 +362,163 @@ describe('Dual transport: graceful degradation', () => {
 })
 
 describe('Dual transport: list_sessions merging', () => {
-  it('unions channels from both transports, tagging each with its location', async () => {
+  // Ids shaped the way each transport really issues them. The remote
+  // backend mints Convex `Id<'cccollabSessions'>`; the local broker mints
+  // none at all (`/sessions` GET reports name/objective/registeredAt/
+  // channels only). Seeding a remote row *without* an id would be a state
+  // production cannot reach — and it is the one state that still lands on
+  // `mergeSessions`'s display-name fallback, which would merge the caller's
+  // two rows for the wrong reason and hide a regression in the `self` key.
+  const REMOTE_OWN_ID = 'k5711aaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const REMOTE_PEER_ID = 'k9922bbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+  /**
+   * KAI-516's Expected Result, end to end at the tool layer: one process
+   * that introduced itself on two transports is *one* session, and its
+   * entry lists what it holds at each location.
+   *
+   * The fixture models what real transports emit — each one flags the row
+   * that is its own registration, because each one holds the identity its
+   * own `introduce` handed back. Nothing here keys off the display name;
+   * that is not an identity (see the next test).
+   */
+  it('reports the caller once, unioning the channels it holds at each location', async () => {
     const local = new FakeTransport('local')
     const remote = new FakeTransport('remote')
     local.registerSession({
-      name: 'alice',
+      name: 'architect',
       objective: 'Design API',
-      channels: ['dev'],
+      channels: ['kai'],
       registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
     })
     remote.registerSession({
-      name: 'alice',
-      channels: ['cccollab'],
+      id: REMOTE_OWN_ID,
+      name: 'architect',
+      channels: ['product'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    remote.registerSession({
+      id: REMOTE_PEER_ID,
+      name: 'reviewer',
+      channels: [],
       registeredAt: '2026-01-01T00:00:00Z',
     })
     const deps = makeDeps([local, remote])
-    deps.context.joinChannel('dev', 'manual', 'local')
-    deps.context.joinChannel('cccollab', 'manual', 'remote')
+    deps.context.joinChannel('kai', 'manual', 'local')
+    deps.context.joinChannel('product', 'manual', 'remote')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result.filter((s: { name: string }) => s.name === 'architect')).toHaveLength(1)
+    expect(result[0]).toMatchObject({
+      name: 'architect',
+      objective: 'Design API',
+      channels: [
+        { name: 'kai', location: 'local' },
+        { name: 'product', location: 'remote' },
+      ],
+    })
+    expect(result).toHaveLength(2)
+  })
+
+  it("tags a peer's id with the location that issued it", async () => {
+    // An id is only an address at the location that minted it — Convex
+    // `_id`s are per deployment, broker uuids per broker, and neither
+    // resolves anywhere else. Locations are named by the user's config,
+    // so "remote" is one possible name and not a category the output can
+    // assume.
+    const remote = new FakeTransport('kai-prod')
+    remote.registerSession({
+      id: REMOTE_PEER_ID,
+      name: 'reviewer',
+      channels: [],
+      registeredAt: '2026-01-01T00:00:00Z',
+    })
+    const deps = makeDeps([remote])
+    deps.context.joinChannel('product', 'manual', 'kai-prod')
 
     const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
     expect(result).toHaveLength(1)
-    expect(result[0]).toMatchObject({
-      name: 'alice',
-      objective: 'Design API',
-      channels: [
-        { name: 'dev', location: 'local' },
-        { name: 'cccollab', location: 'remote' },
-      ],
+    expect(result[0]).toMatchObject({ id: REMOTE_PEER_ID, location: 'kai-prod' })
+  })
+
+  it('tags the merged entry with the location that issued the id it kept', async () => {
+    // Our own registrations collapse into one entry spanning every
+    // location we attached to, but the entry carries a single id. Which
+    // location that id came from is not derivable from the entry — the
+    // channels span all of them and the local broker mints no id at all —
+    // so the merge has to record it as the id is taken. Tagging it
+    // afterwards, or on each merge, would name whichever transport was
+    // merged last: an address handed to a location that never issued it.
+    const local = new FakeTransport('local')
+    const kai = new FakeTransport('kai-prod')
+    const acme = new FakeTransport('acme-prod')
+    local.registerSession({ name: 'architect', channels: ['kai'], registeredAt: '2026-01-01T00:00:00Z', self: true })
+    kai.registerSession({
+      id: REMOTE_OWN_ID,
+      name: 'architect',
+      channels: ['product'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
     })
+    acme.registerSession({
+      id: 'k3300cccccccccccccccccccccccccc',
+      name: 'architect',
+      channels: ['ops'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    const deps = makeDeps([local, kai, acme])
+    deps.context.joinChannel('kai', 'manual', 'local')
+    deps.context.joinChannel('product', 'manual', 'kai-prod')
+    deps.context.joinChannel('ops', 'manual', 'acme-prod')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ id: REMOTE_OWN_ID, location: 'kai-prod' })
+  })
+
+  it('omits location for a registration the transport reports without an id', async () => {
+    // The local broker issues no id today. There is nothing to address,
+    // so there is no address space to name either — an entry must not
+    // carry a bare `location` that no `id` belongs to.
+    const local = new FakeTransport('local')
+    local.registerSession({ name: 'reviewer', channels: ['kai'], registeredAt: '2026-01-01T00:00:00Z' })
+    const deps = makeDeps([local])
+    deps.context.joinChannel('kai', 'manual', 'local')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(1)
+    expect(Object.keys(result[0])).not.toContain('id')
+    expect(Object.keys(result[0])).not.toContain('location')
+  })
+
+  it('keeps a peer that merely shares the caller’s display name separate', async () => {
+    // Session names are unique per (user, organization) only, so two users
+    // in one org can both run "architect". Merging on the name invents a
+    // session that does not exist — and since KAI-516 fills the caller's
+    // row in, it also hands that stranger the caller's real memberships.
+    const local = new FakeTransport('local')
+    const remote = new FakeTransport('remote')
+    local.registerSession({
+      name: 'architect',
+      channels: ['kai'],
+      registeredAt: '2026-01-01T00:00:00Z',
+      self: true,
+    })
+    remote.registerSession({
+      id: REMOTE_PEER_ID,
+      name: 'architect',
+      channels: [],
+      registeredAt: '2026-01-02T00:00:00Z',
+    })
+    const deps = makeDeps([local, remote])
+    deps.context.joinChannel('kai', 'manual', 'local')
+
+    const result = JSON.parse(await handleTopicTool('list_sessions', {}, deps))
+    expect(result).toHaveLength(2)
+    expect(result.map((s: { channels: unknown[] }) => s.channels)).toEqual([[{ name: 'kai', location: 'local' }], []])
   })
 })
 

@@ -2,6 +2,8 @@ import type { ConvexClient } from 'convex/browser'
 import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
+import { SESSION_STALE_MS } from '../constants.js'
+import { normalizeChannelName } from '../context.js'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
@@ -192,6 +194,11 @@ function fn<K extends 'query' | 'mutation' | 'action'>(target: unknown): Functio
 const DEGRADATION_WINDOW_MS = 60_000
 const DEGRADATION_THRESHOLD = 3
 
+/** Capability keys for {@link RemoteTransport.partialDegradation}. Named
+ *  so a second reduced capability can never silently overwrite a first. */
+const OWN_CHANNELS_CAPABILITY = 'ownChannelMemberships'
+const HEARTBEAT_CAPABILITY = 'livenessReporting'
+
 /**
  * How often an introduced remote session pings `sessions.mutations.updateLastSeen`
  * so the backend can distinguish a live registration from a dead one
@@ -200,6 +207,18 @@ const DEGRADATION_THRESHOLD = 3
  * couple of minutes, long enough not to spam the backend.
  */
 export const HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
+ * Consecutive failed heartbeats after which liveness reporting counts as
+ * stalled rather than blipped.
+ *
+ * Derived, not chosen: once this many pings in a row have missed, our last
+ * reported `lastSeen` is `SESSION_STALE_MS` old, which is exactly when
+ * `list_sessions` starts dropping a registration. Below it the session is
+ * still live to everyone; at it, we have gone invisible to our peers while
+ * the transport reports itself perfectly healthy.
+ */
+const HEARTBEAT_STALL_THRESHOLD = Math.ceil(SESSION_STALE_MS / HEARTBEAT_INTERVAL_MS)
 
 /**
  * Per-subscription cap on the message-id dedup set. Each `onUpdate` call
@@ -263,6 +282,19 @@ export class RemoteTransport implements Transport {
   private sessionId: string | null = null
   private readonly recentFailures: number[] = []
   private degradationReason: string | null = null
+  /** Capabilities that are silently reduced while the transport otherwise
+   *  works, keyed by capability so two unrelated problems don't clobber
+   *  each other. Distinct from `degradationReason`, which means the
+   *  transport disabled itself: these keep `enabled === true` and every
+   *  other operation running. Surfaced by `whoami` through
+   *  `partialDegradation`; entries clear themselves when the capability
+   *  recovers. */
+  private readonly partialDegradations = new Map<string, string>()
+  /** Consecutive failed heartbeats since the last successful one. Counted
+   *  rather than windowed: heartbeats are one minute apart, so a rolling
+   *  60s failure window can never hold more than one and a permanently
+   *  frozen heartbeat would never be nameable. */
+  private consecutiveHeartbeatFailures = 0
   private readonly log: (message: string) => void
   /** True once `shutdown()` has started. Subsequent shutdowns are no-ops;
    *  subsequent subscribe calls return a no-op unsubscribe. */
@@ -315,8 +347,12 @@ export class RemoteTransport implements Transport {
 
   /**
    * Merges this session's `sessionId` into a read query's argument object.
-   * KAI's queries require the sessionId to resolve the caller's
-   * organization. A no-op when no session has been introduced yet.
+   * KAI's queries require it, and what it scopes depends on the query: for
+   * most it resolves the caller's organization, but for some — notably
+   * `channels.listForUser` — the session id *is* the scope, and the query
+   * returns nothing meaningful without it. Never drop it on the assumption
+   * that the caller's identity alone is enough. A no-op when no session has
+   * been introduced yet.
    */
   private orgScopedArgs(args: Record<string, unknown>): Record<string, unknown> {
     if (this.sessionId !== null) {
@@ -328,6 +364,36 @@ export class RemoteTransport implements Transport {
   /** Human-readable reason the transport self-disabled, or null. */
   get degradation(): string | null {
     return this.degradationReason
+  }
+
+  /**
+   * Human-readable reason the transport is impaired *without* being
+   * disabled — one capability silently reduced while everything else
+   * works — or null when nothing is. Several at once are joined.
+   *
+   * Deliberately a separate surface from {@link degradation}: callers that
+   * ask "did this location switch itself off" must keep getting `null`
+   * here, and `enabled` stays `true` throughout. `whoami` merges the two
+   * for display, because from the user's side "answering, but not with
+   * everything" is the fact worth seeing.
+   */
+  get partialDegradation(): string | null {
+    const reasons = [...this.partialDegradations.values()]
+    return reasons.length === 0 ? null : reasons.join('; ')
+  }
+
+  /** Record (or refresh) a reduced capability. Logs the first time a
+   *  capability goes bad so the escalation is greppable, then stays quiet
+   *  while it remains bad — this is a status, not a per-tick alarm. */
+  private setPartialDegradation(capability: string, reason: string): void {
+    const isNew = !this.partialDegradations.has(capability)
+    this.partialDegradations.set(capability, reason)
+    if (isNew) this.log(reason)
+  }
+
+  /** Mark a capability healthy again (no-op when it already was). */
+  private clearPartialDegradation(capability: string): void {
+    this.partialDegradations.delete(capability)
   }
 
   /**
@@ -434,6 +500,17 @@ export class RemoteTransport implements Transport {
    * reported. Route those two cases through `registerFailure` like every
    * other mutation in this class; only the generic-transient case stays
    * swallowed here.
+   *
+   * "Transient" has to be earned, though. A deployment 5xx, an OCC
+   * conflict on the session doc or a network partition is neither
+   * function-not-found nor auth, and repeating forever it is not a blip:
+   * after `HEARTBEAT_STALL_THRESHOLD` consecutive misses this session has
+   * gone stale to every peer while the transport still reports itself
+   * healthy. The rolling `recentFailures` window cannot see that — it is
+   * 60s wide and heartbeats are 60s apart, so it can never hold more than
+   * one — so count consecutive failures instead and name the state. Still
+   * no self-disable: everything else the transport does keeps working, and
+   * a successful ping clears it.
    */
   private async sendHeartbeat(): Promise<void> {
     if (!this.enabled || this.sessionId === null) return
@@ -441,13 +518,23 @@ export class RemoteTransport implements Transport {
       await this.client.mutation(fn<'mutation'>(this.refs.sessions.mutations.updateLastSeen), {
         sessionId: this.sessionId,
       })
+      this.consecutiveHeartbeatFailures = 0
+      this.clearPartialDegradation(HEARTBEAT_CAPABILITY)
     } catch (err) {
       if (isFunctionNotFoundError(err) || isAuthError(err)) {
         this.registerFailure('heartbeat', err)
         return
       }
       const msg = err instanceof Error ? err.message : String(err)
+      this.consecutiveHeartbeatFailures += 1
       this.log(`heartbeat failed (non-fatal, transient): ${msg}`)
+      if (this.consecutiveHeartbeatFailures >= HEARTBEAT_STALL_THRESHOLD) {
+        this.setPartialDegradation(
+          HEARTBEAT_CAPABILITY,
+          `Liveness reporting stalled: ${this.consecutiveHeartbeatFailures} consecutive heartbeat failures ` +
+            `(last: ${msg}) — peers will see this session as stale`,
+        )
+      }
     }
   }
 
@@ -806,19 +893,115 @@ export class RemoteTransport implements Transport {
          *  pre-dating the field would have it null. */
         lastSeenAt?: number
       }>
+      // `listByChannel` doesn't denormalize channel memberships per session,
+      // so no row arrives carrying any. Two independent facts fill that in.
+      //
+      // The first is the scope of the call itself. Asked for a channel,
+      // `listByChannel` resolves it and returns only sessions holding a
+      // presence row in it, so every row it reports is a member of
+      // `args.channel` by construction — peers included. Reporting `[]`
+      // there is not "unknown", it is a claim the query result disproves.
+      // `TransportSession.channels` has no way to say "unknown", so `[]`
+      // reads as "in no channel" one layer up. Unscoped, no such fact
+      // exists: the rows are simply everyone we can see, so peers stay
+      // empty rather than guessing.
+      //
+      // The channel name needs no normalisation here — `handleListSessions`
+      // runs `normalizeChannelName` before it reaches any transport.
+      const scopedChannel = args.channel
+      // The second is our own membership list: `channels.listForUser` is
+      // declared `args: { sessionId: v.id('cccollabSessions') }` and reads
+      // `cccollabSessionChannels` by that exact id — it is session-scoped,
+      // not merely scoped to the authenticated user, so the id we pass is
+      // the scope and not incidental. It is the only source for channels
+      // outside the one this call was scoped to, and only for us.
+      //
+      // Our own row is the one whose Convex `_id` equals the id our own
+      // `introduce` returned — never the one whose name matches ours.
+      // Session names are unique per (user, organization), so a peer of
+      // another user in this org can carry the same display name; matching
+      // on it would both leak our memberships onto their row and, one layer
+      // up, fold them into our entry in `list_sessions`.
+      const isOwnRow = (r: { _id: string }): boolean => this.sessionId !== null && r._id === this.sessionId
+      const ownChannels = rows.some(isOwnRow) ? await this.listOwnChannelNames() : []
+      // Union, not replace. `listOwnChannelNames` degrades to `[]` on
+      // failure, and taking it as the whole truth would leave our own row
+      // claiming fewer channels than the peers listed beside it — inside
+      // the very channel the call was scoped to.
+      const ownRowChannels = scopedChannel === undefined ? ownChannels : [...new Set([...ownChannels, scopedChannel])]
       return rows.map((r) => ({
         id: r._id,
         name: r.sessionName,
         objective: r.objective,
         machine: r.machine,
-        // listByChannel doesn't denormalize channel memberships per
-        // session today; leave empty so the shape stays stable.
-        channels: [],
+        channels: isOwnRow(r) ? ownRowChannels : scopedChannel === undefined ? [] : [scopedChannel],
         registeredAt: new Date(r.createdAt).toISOString(),
         lastSeen: typeof r.lastSeenAt === 'number' ? new Date(r.lastSeenAt).toISOString() : undefined,
+        // Omitted rather than `false` on peers: the tool layer treats the
+        // flag's presence as "this transport vouches that this row is us".
+        ...(isOwnRow(r) ? { self: true } : {}),
       }))
     } catch (err) {
       this.registerFailure('listSessions', err)
+      return []
+    }
+  }
+
+  /**
+   * Channel names *this session* is present in, per `channels.listForUser`.
+   * Used to fill in the caller's own row in `listSessions`.
+   *
+   * Presence, not subscription: `listForUserImpl` reads
+   * `cccollabSessionChannels`, which is per-session. A user running several
+   * sessions has one set of channel memberships but a genuinely different
+   * presence set per session, so this is the calling session's answer and
+   * nobody else's — not even the same user's other sessions.
+   *
+   * Returns the backend's `normalizedName`: the same canonical (trimmed,
+   * lowercased) form `normalizeChannelName` produces at the tool layer, and
+   * the form every other channel string in this result already carries.
+   * Returning the display name instead lists a mixed-case channel TWICE on
+   * the caller's row — `new Set` cannot dedupe "Backend-Team" against
+   * "backend-team", and `mergeSessions` keys channels by
+   * `${location}::${name}`, so both spellings survive to the tool output
+   * while every peer row shows one. Deployments predating the field fall
+   * back to `name`.
+   *
+   * Best-effort and isolated from the degradation circuit breaker: this is
+   * an enrichment on top of `listByChannel`'s data, not the data itself, so
+   * a failure here (including a missing function on an older backend) must
+   * not trip `registerFailure` and disable the entire transport over a
+   * nice-to-have.
+   *
+   * Isolated is not the same as invisible, though. This is the only caller
+   * of `channels.listForUser` anywhere, and its failure produces a wrong
+   * answer that looks exactly like a right one: the caller reported in no
+   * channels, or — on the scoped path, where the requested channel is
+   * folded back in — reported in precisely the one channel a genuine
+   * newcomer would show. So the catch always logs, and a structural
+   * failure records a sticky partial degradation `whoami` surfaces.
+   */
+  private async listOwnChannelNames(): Promise<string[]> {
+    try {
+      const rows = (await this.client.query(
+        fn<'query'>(this.refs.channels.queries.listForUser),
+        this.orgScopedArgs({}),
+      )) as Array<{ name: string; normalizedName?: string }>
+      this.clearPartialDegradation(OWN_CHANNELS_CAPABILITY)
+      // Normalize the fallback too. A legacy row predating `normalizedName`
+      // would otherwise return "Backend-Team" raw and sit alongside the
+      // scoped "backend-team" in the caller's own row — the exact
+      // own-row/channel mismatch this ticket exists to remove.
+      return rows.map((r) => r.normalizedName ?? normalizeChannelName(r.name))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      this.log(`channels.listForUser failed; own row under-reports its channels: ${msg}`)
+      if (isFunctionNotFoundError(err)) {
+        this.setPartialDegradation(
+          OWN_CHANNELS_CAPABILITY,
+          `Own channel memberships unavailable: channels.listForUser not found on deployment (${msg})`,
+        )
+      }
       return []
     }
   }

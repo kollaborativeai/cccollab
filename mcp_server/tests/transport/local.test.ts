@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -119,6 +119,131 @@ describe('LocalTransport: message history reads', () => {
       const second = await transport.readTopicMessages({ topicId: id, limit: 2, before: first.oldestTs })
       expect(second.messages.map((m) => m.text)).toEqual(['p1'])
       expect(second.hasMore).toBe(false)
+    })
+  })
+
+  describe('listSessions', () => {
+    it('flags the row for the session this transport introduced, and no other', async () => {
+      // A transport is the only authority on which row is its own: it holds
+      // the identity its own `introduce` established. The tool layer needs
+      // that flag to merge one process's registrations across locations
+      // without guessing from display names.
+      await post(port, '/sessions', { name: 'lt-sess-peer' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-peer', channel: 'lt-ch-sessions' })
+
+      const transport = new LocalTransport(port)
+      await transport.introduce({ sessionName: 'lt-sess-own' })
+      await transport.joinChannel({ sessionName: 'lt-sess-own', channel: 'lt-ch-sessions' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-sessions' })
+      expect(rows.map((s) => [s.name, s.self === true])).toEqual(
+        expect.arrayContaining([
+          ['lt-sess-own', true],
+          ['lt-sess-peer', false],
+        ]),
+      )
+    })
+
+    it('flags nothing before introduce — an un-introduced transport has no own row', async () => {
+      await post(port, '/sessions', { name: 'lt-sess-other' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-other', channel: 'lt-ch-anon' })
+
+      const rows = await new LocalTransport(port).listSessions({ channel: 'lt-ch-anon' })
+      expect(rows).not.toHaveLength(0)
+      expect(rows.some((s) => s.self === true)).toBe(false)
+    })
+
+    // C2 (KAI-516 review): the only assignment to `ownSessionName` used to
+    // sit AFTER the awaited POST, and both `introduce` call sites swallow
+    // the throw (server.ts's startup introduce, tools/identity.ts's fan-out).
+    // The broker meanwhile creates the row implicitly on join, so it holds a
+    // row that IS ours which this transport would never flag — a phantom
+    // second peer for one process, for the life of that process.
+    it('C2: flags its own row after a FAILED introduce, once a later join creates the row', async () => {
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      const transport = new LocalTransport(port)
+      await expect(transport.introduce({ sessionName: 'lt-sess-c2' })).rejects.toThrow(/broker unreachable/)
+      vi.unstubAllGlobals()
+
+      // What server.ts does next regardless: auto-join. The broker's
+      // ensureSession() materialises the row here.
+      await transport.joinChannel({ sessionName: 'lt-sess-c2', channel: 'lt-ch-c2' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2' })
+      expect(rows.map((s) => s.name)).toContain('lt-sess-c2')
+      expect(rows.find((s) => s.name === 'lt-sess-c2')?.self).toBe(true)
+    })
+
+    // The same hole reached the other way: `session.displayName` falls back
+    // to the username, and server.ts only introduces when `hasName()`. An
+    // un-named session that auto-joins a configured channel therefore
+    // registers with the broker without any introduce at all.
+    it('C2: adopts the name a channel join registers when introduce never ran', async () => {
+      const transport = new LocalTransport(port)
+      await transport.joinChannel({ sessionName: 'lt-sess-c2-nointro', channel: 'lt-ch-c2-nointro' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2-nointro' })
+      expect(rows.find((s) => s.name === 'lt-sess-c2-nointro')?.self).toBe(true)
+    })
+
+    // cc#41 FINDING-41b: the two C2 tests above both reach `ownSessionName`
+    // through `joinChannel`, which claims it too — so neither one holds the
+    // EAGER claim in `introduce`, and moving that assignment back after the
+    // awaited POST left the whole suite green. This is the case with no join
+    // to fall back on: the POST reached the broker and only the response was
+    // lost (a dropped connection, a timeout), so the row is ours and this
+    // process must recognise it or `list_sessions` shows the caller twice for
+    // the life of the process.
+    it('C2: flags its own row after a FAILED introduce, with no join to fall back on', async () => {
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      const transport = new LocalTransport(port)
+      await expect(transport.introduce({ sessionName: 'lt-sess-c2-nojoin' })).rejects.toThrow(/broker unreachable/)
+      vi.unstubAllGlobals()
+
+      // The row materialises without THIS transport joining anything.
+      await post(port, '/sessions', { name: 'lt-sess-c2-nojoin' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-c2-nojoin', channel: 'lt-ch-c2-nojoin' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2-nojoin' })
+      expect(rows.map((s) => s.name)).toContain('lt-sess-c2-nojoin')
+      expect(rows.find((s) => s.name === 'lt-sess-c2-nojoin')?.self).toBe(true)
+    })
+  })
+
+  // I3 (KAI-516 review): server.ts swallows the startup introduce, and this
+  // PR made `self` depend on it. A failure there must be visible somewhere —
+  // `whoami` reads this getter off every transport in the router.
+  describe('degradation', () => {
+    it('I3: reports a failed introduce, and clears it once one succeeds', async () => {
+      const transport = new LocalTransport(port)
+      expect(transport.degradation).toBeNull()
+
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      await expect(transport.introduce({ sessionName: 'lt-sess-i3' })).rejects.toThrow()
+      vi.unstubAllGlobals()
+
+      expect(transport.degradation).toMatch(/introduce failed/i)
+
+      await transport.introduce({ sessionName: 'lt-sess-i3' })
+      expect(transport.degradation).toBeNull()
     })
   })
 })

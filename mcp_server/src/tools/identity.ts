@@ -7,6 +7,7 @@ import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import { transportHealth } from '../transport/health.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 import { driftWarning, type VersionState } from '../plugin-version.js'
@@ -99,12 +100,21 @@ export async function handleIdentityTool(
       // it can attribute messages and list us in `list_sessions`. Each
       // introduce() is best-effort; a transient failure on one transport
       // must not prevent the other from registering.
+      //
+      // Failures are non-fatal for the tool result, but they are not
+      // self-healing: remote `sessionId` / local registration only get
+      // written inside a successful `introduce` (local also adopts the
+      // name on join for own-row detection — KAI-516). Other tools do
+      // not re-register; a later successful `introduce` is what recovers
+      // a failed remote. Callers that swallow without checking `whoami`
+      // will see silent no-ops on that location until then.
       for (const transport of deps.router.enabled()) {
         try {
           await transport.introduce({ sessionName: displayName, objective, organizationId: organization })
-        } catch {
-          // Non-fatal: a subsequent introduce or tool call will
-          // re-register.
+        } catch (err) {
+          console.error(
+            `[cccollab] introduce on ${transport.source} failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
       }
 
@@ -196,9 +206,18 @@ export async function handleIdentityTool(
  * including the reserved `"local"` location, so callers can tell at a
  * glance which transports are live and which have self-disabled.
  *
- * `degradation` is only set on transports that expose it (the remote
+ * `degradation` is only set on transports that expose it: the remote
  * transport carries it for auth / function-not-found / repeated-failure
- * cases). The local transport has no degradation surface.
+ * cases, the local transport for an introduce its (swallowing) caller in
+ * `server.ts` would otherwise drop on the floor.
+ *
+ * A transport can also be impaired without being disabled — one capability
+ * silently reduced while everything else works. Those report through
+ * `partialDegradation` and land in the same field, so a location can read
+ * `{ enabled: true, degradation: "..." }`. Keeping them in one field is
+ * deliberate: `whoami` is the surface a user checks when an answer looks
+ * wrong, and "working, but not telling you everything" is exactly what
+ * they need to see there.
  *
  * `organization` is `"local"` for the local broker, the bound
  * organization name for a remote transport (via `getBoundOrganizationName`),
@@ -216,8 +235,12 @@ async function buildLocationStates(
 ): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
+      // One reader for both health surfaces — see `transportHealth`. Hand-rolling
+      // it here is what left `list_locations` blind to `partialDegradation`
+      // (cc#41 FINDING-41a).
+      const { enabled, degradation: degradationText } = transportHealth(transport)
+      const degradation = degradationText ?? null
       const maybeDegraded = transport as Partial<RemoteTransport>
-      const degradation = typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -227,7 +250,7 @@ async function buildLocationStates(
       }
 
       const state: { enabled: boolean; degradation?: string; organization?: string } = {
-        enabled: transport.enabled,
+        enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
       }

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ConvexClient } from 'convex/browser'
+import { getFunctionName } from 'convex/server'
 
 import { RemoteTransport, HEARTBEAT_INTERVAL_MS } from '../../src/transport/remote.js'
 
@@ -544,6 +545,506 @@ describe('RemoteTransport read-history methods', () => {
   })
 })
 
+describe('RemoteTransport.listSessions', () => {
+  it("fills in the caller's own row from channels.listForUser; other rows stay empty", async () => {
+    // KAI-516: `sessions.listByChannel` doesn't denormalize channel
+    // membership per session, so every row it reports comes back with
+    // no channels — including the caller's own. The transport can at
+    // least resolve its own memberships via `channels.listForUser`
+    // (session-scoped) and patch them onto its own row.
+    //
+    // The peer is listed FIRST on purpose. `listByChannel` orders rows by
+    // presence-row insertion order, so the caller is at index 0 only if
+    // they joined first — matching by position would pass on a fixture
+    // that puts us there, and leak our memberships onto whoever happens
+    // to lead the list in production.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        return [{ name: 'kai' }, { name: 'product' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toEqual([
+      {
+        id: 'session_2',
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+      },
+      {
+        id: 'session_1',
+        name: 'laptop',
+        objective: undefined,
+        machine: undefined,
+        channels: ['kai', 'product'],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+        // Flagged for the tool layer: this row is *us* at this location,
+        // established by `_id`, not by the display name. It is what lets
+        // list_sessions collapse our local and remote registrations into
+        // one entry instead of reporting a phantom second peer.
+        self: true,
+      },
+    ])
+  })
+
+  it('cc#41: normalizes a legacy row that has no normalizedName', async () => {
+    // Rows predating `normalizedName` fall back to the raw `name`. Returned
+    // unnormalized, "Backend-Team" sits next to the scoped "backend-team"
+    // in the caller's own row — the own-row channel mismatch KAI-516 exists
+    // to remove.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        // One modern row, one legacy row with no normalizedName.
+        return [{ name: 'kai', normalizedName: 'kai' }, { name: '  Backend-Team  ' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions[0]!.channels).toEqual(['kai', 'backend-team'])
+  })
+
+  it('scopes channels.listForUser to this session id — the backend rejects the call without it', async () => {
+    // `channels.listForUser` is declared `args: { sessionId: v.id('cccollabSessions') }`
+    // and resolves memberships from `cccollabSessionChannels` by that id.
+    // Drop the argument and Convex raises an ArgumentValidationError that
+    // `listOwnChannelNames`'s catch swallows, so the fix degrades to
+    // `channels: []` in production with no error and no failing test.
+    // Two comments near the call site describe the query as
+    // identity-scoped rather than session-scoped, which is exactly the
+    // reasoning that would make the argument look removable.
+    let listForUserArgs: Record<string, unknown> | undefined
+    const queryMock = vi.fn(async (ref: unknown, args: Record<string, unknown>) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        listForUserArgs = args
+        return [{ name: 'kai' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    await transport.listSessions({})
+
+    // `undefined` here would mean the query never ran at all, which is
+    // just as broken as running it unscoped — both yield `channels: []`.
+    expect(listForUserArgs).toEqual({ sessionId: 'session_1' })
+  })
+
+  it('returns no channels for anyone before introduce (no sessionId yet)', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => undefined),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toEqual([
+      {
+        id: 'session_2',
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+      },
+    ])
+    // channels.listForUser must not be called when we have no sessionId.
+    expect(queryMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips the channels.listForUser round-trip when the caller has no own row in the result', async () => {
+    // e.g. `listSessions({channel})` scoped to a channel this session hasn't
+    // joined. Fetching our own memberships would be wasted work, since the
+    // result is only ever used for channels *outside* the scoped one, and
+    // only on a row matching our own sessionId.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        throw new Error('must not be called — no own row present')
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    expect(sessions).toEqual([
+      {
+        id: 'session_2',
+        name: 'peer',
+        objective: undefined,
+        machine: undefined,
+        // `dev`, not `[]`: `listByChannel` only returned this row because
+        // the peer holds a presence row in the channel we scoped to.
+        channels: ['dev'],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+      },
+    ])
+    // The planted throw above cannot prove the skip on its own:
+    // `listOwnChannelNames` catches it and returns `[]`, which is the same
+    // output as skipping, so the assertion above is byte-identical either
+    // way. Only the absence of the call distinguishes them.
+    const queried = queryMock.mock.calls.map(([ref]) => getFunctionName(ref as Parameters<typeof getFunctionName>[0]))
+    expect(queried).not.toContain('cccollab/channels:listForUser')
+  })
+
+  it('reports every row of a channel-scoped call as a member of that channel', async () => {
+    // KAI-516 repro §3. `sessions.listByChannel` resolves the requested
+    // channel and returns only sessions holding a presence row in it, so
+    // membership is not unknown for these rows — it is the reason each one
+    // is in the result. Peers included: reporting `[]` for them states
+    // "in no channel", which the query result itself disproves.
+    //
+    // The caller's own row keeps the memberships `channels.listForUser`
+    // resolved, with the scoped channel folded in rather than repeated —
+    // it is already in that list when the query succeeds.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        return [{ name: 'kai' }, { name: 'product' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'product' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels }))).toEqual([
+      { name: 'peer', channels: ['product'] },
+      { name: 'laptop', channels: ['kai', 'product'] },
+    ])
+  })
+
+  it("keeps the caller's own row a superset of its peers' when channels.listForUser degrades", async () => {
+    // The enrichment is best-effort and returns `[]` on failure. Taken as
+    // the whole truth it would leave us claiming *fewer* channels than the
+    // peers listed next to us — inside the very channel this call was
+    // scoped to, which we are provably in, since our own row came back
+    // from `listByChannel` for it. The scoped channel is a fact about
+    // every row, so it must survive the degradation on ours too.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        throw new Error('Could not find function channels:listForUser on deployment')
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels, self: s.self }))).toEqual([
+      { name: 'laptop', channels: ['dev'], self: true },
+      { name: 'peer', channels: ['dev'], self: undefined },
+    ])
+    expect(transport.enabled).toBe(true)
+  })
+
+  it('degrades to empty channels (not the whole transport) when channels.listForUser fails', async () => {
+    // The enrichment is best-effort: a failure here (including a missing
+    // function on an older backend) must not trip the shared degradation
+    // circuit breaker, since `listByChannel` — the actual data — still works.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        throw new Error('Could not find function channels:listForUser on deployment')
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions).toEqual([
+      {
+        id: 'session_1',
+        name: 'laptop',
+        objective: undefined,
+        machine: undefined,
+        channels: [],
+        registeredAt: new Date(1_700_000_000_000).toISOString(),
+        lastSeen: undefined,
+        // Still our row — only its memberships are missing. Identity does
+        // not depend on the enrichment query, so the tool layer can still
+        // merge this location's entry into our single one.
+        self: true,
+      },
+    ])
+    // The transport itself must stay enabled — this failure is isolated.
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  // C3 (KAI-516 review): the catch in `listOwnChannelNames` was bare —
+  // no log, no counter, no marker. This diff is the ONLY consumer of
+  // `channels.listForUser`, so if the backend renames or drops it, every
+  // `list_sessions` reports the caller in zero channels forever while
+  // `whoami` shows the location healthy and nothing reaches stderr. Worse
+  // on the scoped path: `[...new Set([...ownChannels, scopedChannel])]`
+  // makes the broken own row byte-identical to a healthy row for someone
+  // genuinely in only that channel, so there is no observable difference
+  // left anywhere.
+  it('C3: logs and records a partial degradation when channels.listForUser is missing from the deployment', async () => {
+    const log: string[] = []
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        throw new SchemaDriftError('Could not find function channels:listForUser on deployment')
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    // The wrong answer this produces is indistinguishable from a right
+    // one, so the log line is the only evidence the operator ever gets.
+    expect(log.filter((l) => /listForUser/i.test(l))).not.toHaveLength(0)
+    // Sticky, and surfaced by whoami: a structural failure does not
+    // resolve itself between calls the way a network blip does.
+    expect(transport.partialDegradation).toMatch(/channel memberships/i)
+    // Still isolated: an enrichment failure must not disable the location.
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+    expect(sessions.map((s) => s.name)).toEqual(['laptop'])
+  })
+
+  it('C3: logs a transient channels.listForUser failure without marking the location degraded', async () => {
+    const log: string[] = []
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') throw new Error('socket hang up')
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: (m) => log.push(m) })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    await transport.listSessions({ channel: 'dev' })
+
+    expect(log.filter((l) => /listForUser/i.test(l))).not.toHaveLength(0)
+    // A blip is not a standing capability loss — the next call may well
+    // succeed, so it must not stick to the location's status.
+    expect(transport.partialDegradation).toBeNull()
+    expect(transport.enabled).toBe(true)
+  })
+
+  // I1 (KAI-516 review): `rows.map((r) => r.name)` takes the DISPLAY name
+  // while `scopedChannel` arrives already lowercased by
+  // `normalizeChannelName`, so `new Set([...])` cannot dedupe them and
+  // `mergeSessions`' `${location}::${name}` key keeps both spellings all
+  // the way to the tool output.
+  it('I1: lists a mixed-case channel once on the own row, using the backend normalizedName', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        // What the backend actually returns: `listForUserImpl` maps to
+        // `{_id, name, normalizedName}` — the display name keeps its
+        // original casing, the normalized one is what every other layer
+        // compares against.
+        return [{ _id: 'chan_1', name: 'Backend-Team', normalizedName: 'backend-team' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'backend-team' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels }))).toEqual([
+      { name: 'laptop', channels: ['backend-team'] },
+      { name: 'peer', channels: ['backend-team'] },
+    ])
+  })
+
+  // S1 (KAI-516 review): pinned, not changed. The caller's own row lists
+  // every channel it holds at this location, including ones outside the
+  // requested scope, while peer rows are confined to the scope. That
+  // asymmetry is deliberate (it is the caller's own data, and it is the
+  // only place those memberships are knowable), but it was not stated
+  // anywhere the caller could read it — the `list_sessions` description
+  // promised a plain union. The description now says so; this pins the
+  // behaviour it describes.
+  it('S1: reports the own row unscoped and peer rows scoped on a channel-scoped call', async () => {
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [
+          { _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 },
+          { _id: 'session_2', sessionName: 'peer', createdAt: 1_700_000_000_000 },
+        ]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        return [
+          { _id: 'chan_1', name: 'dev', normalizedName: 'dev' },
+          { _id: 'chan_2', name: 'secret-ops', normalizedName: 'secret-ops' },
+        ]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({ channel: 'dev' })
+
+    expect(sessions.map((s) => ({ name: s.name, channels: s.channels }))).toEqual([
+      { name: 'laptop', channels: ['dev', 'secret-ops'] },
+      { name: 'peer', channels: ['dev'] },
+    ])
+  })
+})
+
 describe('RemoteTransport.listTopics', () => {
   it('passes through the per-topic messageCount reported by the backend', async () => {
     // The org-scoped KAI backend's `topics.listByChannel` reports a
@@ -827,6 +1328,67 @@ describe('RemoteTransport heartbeat', () => {
 
     expect(transport.enabled).toBe(false)
     expect(transport.degradation).toMatch(/function not found/i)
+  })
+
+  // I4 (KAI-516 review): the generic branch pushed nothing onto
+  // `recentFailures`, and it never could have mattered if it did —
+  // heartbeats are a minute apart and the failure window is 60s, so a
+  // rolling count can hold at most one. A deployment 5xx, an OCC conflict
+  // on the session doc or a network partition therefore left `enabled:
+  // true` and `degradation: null` forever while liveness silently stopped
+  // being reported: the caller goes stale to every peer, and one stderr
+  // line per tick was the only trace. Counting CONSECUTIVE failures is
+  // what makes a sustained freeze nameable.
+  //
+  // Deliberately NOT a self-disable: the spec above ("does not trip the
+  // degradation circuit when a heartbeat call fails transiently") is
+  // right that a blip must not kill a working transport, and it still
+  // passes. This adds a name for the state, not a kill switch.
+  it('I4: names a sustained heartbeat stall in partialDegradation while leaving the transport enabled', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        throw new Error('deployment returned 502')
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    // Four consecutive misses is still a blip.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 4)
+    expect(transport.partialDegradation).toBeNull()
+
+    // The fifth means our last reported liveness is now SESSION_STALE_MS
+    // old — the point at which `list_sessions` drops a registration.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    expect(transport.partialDegradation).toMatch(/liveness|heartbeat/i)
+    expect(transport.enabled).toBe(true)
+    expect(transport.degradation).toBeNull()
+  })
+
+  it('I4: clears the stall note once a heartbeat succeeds again', async () => {
+    let mutationCount = 0
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        mutationCount += 1
+        if (mutationCount === 1) return 'session_abc'
+        // Calls 2..6 are five consecutive failed heartbeats; call 7 lands.
+        if (mutationCount <= 6) throw new Error('deployment returned 502')
+        return undefined
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    await transport.introduce({ sessionName: 'tester' })
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 5)
+    expect(transport.partialDegradation).not.toBeNull()
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    expect(transport.partialDegradation).toBeNull()
   })
 
   it('trips the degradation circuit when a heartbeat call hits an auth error', async () => {
