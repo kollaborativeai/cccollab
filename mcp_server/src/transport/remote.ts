@@ -3,6 +3,7 @@ import type { FunctionReference } from 'convex/server'
 import { anyApi } from 'convex/server'
 
 import { SESSION_STALE_MS } from '../constants.js'
+import { normalizeChannelName } from '../context.js'
 import type { ParsedMessage } from '../types.js'
 import {
   BROKER_UUID_PATTERN,
@@ -987,7 +988,11 @@ export class RemoteTransport implements Transport {
         this.orgScopedArgs({}),
       )) as Array<{ name: string; normalizedName?: string }>
       this.clearPartialDegradation(OWN_CHANNELS_CAPABILITY)
-      return rows.map((r) => r.normalizedName ?? r.name)
+      // Normalize the fallback too. A legacy row predating `normalizedName`
+      // would otherwise return "Backend-Team" raw and sit alongside the
+      // scoped "backend-team" in the caller's own row — the exact
+      // own-row/channel mismatch this ticket exists to remove.
+      return rows.map((r) => r.normalizedName ?? normalizeChannelName(r.name))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       this.log(`channels.listForUser failed; own row under-reports its channels: ${msg}`)

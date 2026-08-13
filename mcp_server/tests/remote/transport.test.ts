@@ -610,6 +610,37 @@ describe('RemoteTransport.listSessions', () => {
     ])
   })
 
+  it('cc#41: normalizes a legacy row that has no normalizedName', async () => {
+    // Rows predating `normalizedName` fall back to the raw `name`. Returned
+    // unnormalized, "Backend-Team" sits next to the scoped "backend-team"
+    // in the caller's own row — the own-row channel mismatch KAI-516 exists
+    // to remove.
+    const queryMock = vi.fn(async (ref: unknown) => {
+      const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0])
+      if (name === 'cccollab/topics:listJoinedForSession') return []
+      if (name === 'cccollab/sessions:listByChannel') {
+        return [{ _id: 'session_1', sessionName: 'laptop', createdAt: 1_700_000_000_000 }]
+      }
+      if (name === 'cccollab/channels:listForUser') {
+        // One modern row, one legacy row with no normalizedName.
+        return [{ name: 'kai', normalizedName: 'kai' }, { name: '  Backend-Team  ' }]
+      }
+      throw new Error(`unexpected query: ${name}`)
+    })
+    const stub = {
+      query: queryMock,
+      mutation: vi.fn(async () => 'session_1'),
+      onUpdate: vi.fn(() => () => {}),
+      setAuth: vi.fn(),
+    }
+    const transport = new RemoteTransport({ client: stub as unknown as ConvexClient, log: () => {} })
+    await transport.introduce({ sessionName: 'laptop' })
+
+    const sessions = await transport.listSessions({})
+
+    expect(sessions[0]!.channels).toEqual(['kai', 'backend-team'])
+  })
+
   it('scopes channels.listForUser to this session id — the backend rejects the call without it', async () => {
     // `channels.listForUser` is declared `args: { sessionId: v.id('cccollabSessions') }`
     // and resolves memberships from `cccollabSessionChannels` by that id.
