@@ -191,6 +191,35 @@ describe('LocalTransport: message history reads', () => {
       const rows = await transport.listSessions({ channel: 'lt-ch-c2-nointro' })
       expect(rows.find((s) => s.name === 'lt-sess-c2-nointro')?.self).toBe(true)
     })
+
+    // cc#41 FINDING-41b: the two C2 tests above both reach `ownSessionName`
+    // through `joinChannel`, which claims it too — so neither one holds the
+    // EAGER claim in `introduce`, and moving that assignment back after the
+    // awaited POST left the whole suite green. This is the case with no join
+    // to fall back on: the POST reached the broker and only the response was
+    // lost (a dropped connection, a timeout), so the row is ours and this
+    // process must recognise it or `list_sessions` shows the caller twice for
+    // the life of the process.
+    it('C2: flags its own row after a FAILED introduce, with no join to fall back on', async () => {
+      const realFetch = globalThis.fetch
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith('/sessions') && init?.method === 'POST') {
+          throw new Error('broker unreachable at startup')
+        }
+        return realFetch(input, init)
+      })
+      const transport = new LocalTransport(port)
+      await expect(transport.introduce({ sessionName: 'lt-sess-c2-nojoin' })).rejects.toThrow(/broker unreachable/)
+      vi.unstubAllGlobals()
+
+      // The row materialises without THIS transport joining anything.
+      await post(port, '/sessions', { name: 'lt-sess-c2-nojoin' })
+      await post(port, '/channels/join', { sessionId: 'lt-sess-c2-nojoin', channel: 'lt-ch-c2-nojoin' })
+
+      const rows = await transport.listSessions({ channel: 'lt-ch-c2-nojoin' })
+      expect(rows.map((s) => s.name)).toContain('lt-sess-c2-nojoin')
+      expect(rows.find((s) => s.name === 'lt-sess-c2-nojoin')?.self).toBe(true)
+    })
   })
 
   // I3 (KAI-516 review): server.ts swallows the startup introduce, and this

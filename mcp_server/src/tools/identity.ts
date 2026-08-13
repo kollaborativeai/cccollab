@@ -7,6 +7,7 @@ import type { RemoteTransport } from '../transport/remote.js'
 import { runClerkPkce } from '../remote/auth-clerk.js'
 import { saveLocationAuth } from '../config/save.js'
 import { attachLocation, type AttachCtx } from '../transport/attach.js'
+import { transportHealth } from '../transport/health.js'
 import type { AttachDiagnostics } from '../transport/diagnostics.js'
 import { resolveConfig, type ResolvedLocation } from '../config/resolve.js'
 
@@ -210,14 +211,12 @@ async function buildLocationStates(
 ): Promise<Record<string, { enabled: boolean; degradation?: string; organization?: string }>> {
   const entries = await Promise.all(
     router.all().map(async (transport) => {
+      // One reader for both health surfaces — see `transportHealth`. Hand-rolling
+      // it here is what left `list_locations` blind to `partialDegradation`
+      // (cc#41 FINDING-41a).
+      const { enabled, degradation: degradationText } = transportHealth(transport)
+      const degradation = degradationText ?? null
       const maybeDegraded = transport as Partial<RemoteTransport>
-      // A self-disable outranks a reduced capability: the location is not
-      // "answering, but quietly incomplete", it is off, and that is the
-      // actionable fact. Fall through to the partial note only when the
-      // transport is still serving.
-      const degradation =
-        (typeof maybeDegraded.degradation === 'string' ? maybeDegraded.degradation : null) ??
-        (typeof maybeDegraded.partialDegradation === 'string' ? maybeDegraded.partialDegradation : null)
 
       let organization: string | undefined
       if (transport.source === LOCAL_LOCATION) {
@@ -227,7 +226,7 @@ async function buildLocationStates(
       }
 
       const state: { enabled: boolean; degradation?: string; organization?: string } = {
-        enabled: transport.enabled,
+        enabled,
         ...(degradation ? { degradation } : {}),
         ...(organization ? { organization } : {}),
       }
