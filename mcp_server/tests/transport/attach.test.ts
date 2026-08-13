@@ -61,6 +61,10 @@ class FakeRemoteTransport implements Transport {
   shutdown = vi.fn(async (): Promise<void> => {
     this.shutdownCalled = true
     this.enabled = false
+    // A transport owns the lifecycle of its own feeds (KAI-418), so shutting it
+    // down detaches them. attachLocation no longer sweeps shared maps for this.
+    for (const sub of this.subscribedTopics.values()) sub.unsubscribeCalled = true
+    for (const sub of this.subscribedChannels.values()) sub.unsubscribeCalled = true
   })
   private readonly topicIds = new Set<string>()
   private readonly topics = new Map<string, TransportTopic>()
@@ -134,10 +138,9 @@ class FakeRemoteTransport implements Transport {
     return this.topicIds.has(topicId)
   }
 
-  subscribeTopicMessages(
-    args: { topicId: string; channelName: string },
-    onEvent: (msg: ParsedMessage) => void,
-  ): () => void {
+  subscribeTopicMessages(args: { topicId: string; channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    // Match real RemoteTransport: first-call wins, later calls are no-ops.
+    if (this.subscribedTopics.has(args.topicId)) return
     const entry = {
       channelName: args.channelName,
       onEvent,
@@ -145,11 +148,6 @@ class FakeRemoteTransport implements Transport {
       unsubscribeCalled: false,
     }
     this.subscribedTopics.set(args.topicId, entry)
-    return () => {
-      entry.unsubscribeCalled = true
-      // Match real behaviour: first-call wins, subsequent invocations
-      // are no-ops. We keep the entry in the map so tests can inspect it.
-    }
   }
 
   primeTopicCursor(topicId: string, ts: number): void {
@@ -157,12 +155,29 @@ class FakeRemoteTransport implements Transport {
     if (ts > prior) this.primedCursors.set(topicId, ts)
   }
 
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  /** Feed-registry surface so ensure* can skip already-live feeds (KAI-418). */
+  hasLiveTopicFeed(topicId: string): boolean {
+    const sub = this.subscribedTopics.get(topicId)
+    return sub !== undefined && !sub.unsubscribeCalled
+  }
+  hasLiveChannelFeed(name: string): boolean {
+    const sub = this.subscribedChannels.get(name)
+    return sub !== undefined && !sub.unsubscribeCalled
+  }
+  forgetTopicFeed(topicId: string): void {
+    this.subscribedTopics.delete(topicId)
+  }
+  forgetChannelFeed(name: string): void {
+    this.subscribedChannels.delete(name)
+  }
+  suspendedFeeds(): string[] {
+    return []
+  }
+
+  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): void {
+    if (this.subscribedChannels.has(args.channelName)) return
     const entry = { onEvent, unsubscribeCalled: false }
     this.subscribedChannels.set(args.channelName, entry)
-    return () => {
-      entry.unsubscribeCalled = true
-    }
   }
 
   /** Expose the topic cache so tests can pre-populate for listTopics. */
@@ -181,8 +196,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
   session.setName('architect')
   const context = new ActiveContext()
   const router = new TransportRouter([])
-  const remoteTopicUnsubscribes = new Map<string, () => void>()
-  const remoteChannelUnsubscribes = new Map<string, () => void>()
   const busPushes: ParsedMessage[] = []
   // Minimal MessageBus stand-in. attachLocation only calls `push`.
   const bus = {
@@ -197,8 +210,6 @@ function makeCtx(location: ResolvedLocation, overrides: Partial<AttachCtx> = {})
     context,
     router,
     messageBus: bus,
-    remoteTopicUnsubscribes,
-    remoteChannelUnsubscribes,
     resolved: { locations: [location], activeLocation: undefined, activeChannel: undefined, activeTopic: undefined },
     transportFactory: (loc) => new FakeRemoteTransport(loc.name),
     bus,
@@ -273,9 +284,11 @@ describe('attachLocation', () => {
 
     const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.joinChannel).toHaveBeenCalledWith({ sessionName: 'architect', channel: 'dev' })
-    // The subscription map key must match what the context (and therefore every
-    // later lookup: leave_channel, the stale check) will ask for.
-    expect([...ctx.remoteChannelUnsubscribes.keys()]).toEqual(['acme::dev'])
+    // The feed must be registered under the NORMALIZED channel name — the same
+    // one the context (and therefore leave_channel, the deaf check, ...) will
+    // later ask for. A raw config key like "Dev" used to key the shared map
+    // under `acme::Dev` while every later lookup asked for `acme::dev`.
+    expect([...transport.subscribedChannels.keys()]).toEqual(['dev'])
     expect(ctx.context.isChannelSubscribed('dev', 'acme')).toBe(true)
   })
 
@@ -425,10 +438,9 @@ describe('attachLocation', () => {
     const [topicId, sub] = [...transport.subscribedTopics.entries()][0]!
     expect(sub.channelName).toBe('dev')
 
-    // The per-topic subscription key is stored in remoteTopicUnsubscribes
-    // so the shutdown / teardown paths can find it.
-    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
-    expect(ctx.remoteTopicUnsubscribes.has(`acme::${topicId}`)).toBe(true)
+    // The feed is registered on the TRANSPORT, which owns its lifecycle.
+    expect(transport.subscribedTopics.size).toBe(1)
+    expect(transport.subscribedTopics.has(topicId)).toBe(true)
 
     // Fire a fake topic message through the subscription callback. It
     // must reach MessageBus.push with the location as the source tag.
@@ -492,8 +504,8 @@ describe('attachLocation', () => {
     const transport = ctx.router.get('acme') as FakeRemoteTransport
     expect(transport.subscribedChannels.size).toBe(1)
     const sub = transport.subscribedChannels.get('dev')!
-    expect(ctx.remoteChannelUnsubscribes.size).toBe(1)
-    expect(ctx.remoteChannelUnsubscribes.has('acme::dev')).toBe(true)
+    expect(transport.subscribedChannels.size).toBe(1)
+    expect(transport.subscribedChannels.has('dev')).toBe(true)
 
     sub.onEvent({
       sender: 'peer',
@@ -517,8 +529,7 @@ describe('attachLocation', () => {
     expect(first.ok).toBe(true)
 
     const originalTransport = ctx.router.get('acme') as FakeRemoteTransport
-    const topicKey = [...ctx.remoteTopicUnsubscribes.keys()][0]!
-    const topicId = topicKey.slice('acme::'.length)
+    const topicId = [...originalTransport.subscribedTopics.keys()][0]!
     const priorSub = originalTransport.subscribedTopics.get(topicId)!
 
     // Replace-in-place attach (what `authenticate({force:true})` does).
@@ -527,12 +538,43 @@ describe('attachLocation', () => {
     const second = await attachLocation('acme', ctx)
     expect(second.ok).toBe(true)
 
-    // Prior topic subscription was torn down, the map no longer points at
-    // it, and the replacement has its own.
+    // The prior transport's feed went down with the prior transport (its own
+    // shutdown detaches it), and the replacement has its own.
     expect(priorSub.unsubscribeCalled).toBe(true)
-    expect(ctx.remoteTopicUnsubscribes.size).toBe(1)
-    expect([...ctx.remoteTopicUnsubscribes.keys()][0]!.startsWith('acme::')).toBe(true)
+    expect(originalTransport.shutdownCalled).toBe(true)
     expect(replacement.subscribedTopics.size).toBe(1)
+  })
+
+  /**
+   * C1 (KAI-418 review): reconcileFeeds after a transport swap must prime
+   * topic cursors. Without sinceTs, a runtime-joined topic replays its whole
+   * history as fresh inbound. Config-only topics are primed on the other path
+   * and hid this for the test above.
+   */
+  it('reconcileFeeds after swap primes a runtime-joined topic cursor (no history flood)', async () => {
+    const ctx = makeCtx(location)
+    const first = await attachLocation('acme', ctx)
+    expect(first.ok).toBe(true)
+    const original = ctx.router.get('acme') as FakeRemoteTransport
+
+    // Runtime join: in context, not in cccollab.json.
+    const runtimeTopicId = 'topic-runtime-joined'
+    ctx.context.joinTopic(runtimeTopicId, 'RuntimeAuth', 'dev', 'acme')
+    // Simulate tool path creating a feed on the original transport.
+    original.subscribeTopicMessages({ topicId: runtimeTopicId, channelName: 'dev' }, () => {})
+
+    const before = Date.now()
+    const replacement = new FakeRemoteTransport('acme')
+    ctx.transportFactory = () => replacement
+    const second = await attachLocation('acme', ctx)
+    expect(second.ok).toBe(true)
+
+    // Config topic + runtime topic should both be on the replacement.
+    expect(replacement.subscribedTopics.has(runtimeTopicId)).toBe(true)
+    const primed = replacement.primedCursors.get(runtimeTopicId)
+    expect(primed).toBeDefined()
+    // Cursor must be at-or-after swap time — not undefined (history flood).
+    expect(primed!).toBeGreaterThanOrEqual(before - 1000)
   })
 })
 
@@ -609,7 +651,7 @@ describe('planStartupAttachments', () => {
   it('mirrors the real polluted config: local active + dormant KAI remotes → attach nothing, all quiet', () => {
     const locations = [
       loc({ name: 'remote' }), // KAI, constructable, dormant
-      loc({ name: 'selfhosted', clerkIssuer: undefined, clerkClientId: undefined }), // remote deploy, no Clerk pointer, dormant
+      loc({ name: 'selfhosted', clerkIssuer: undefined, clerkClientId: undefined }), // KAI deploy, no Clerk pointer, dormant
       localLoc([{ name: 'cccollab', topics: [] }]),
     ]
     const plan = planStartupAttachments(locations, 'local')
@@ -688,8 +730,6 @@ describe('ensureLazyAttach', () => {
       context,
       router,
       messageBus: bus,
-      remoteTopicUnsubscribes: new Map<string, () => void>(),
-      remoteChannelUnsubscribes: new Map<string, () => void>(),
       inflight: new Map<string, Promise<void>>(),
       candidates: locations.filter((l) => !l.isLocal).map((l) => l.name),
       resolve,
@@ -854,5 +894,45 @@ describe('ensureLazyAttach', () => {
     await ensureLazyAttach('remote', ctx, { force: true }) // explicit recovery
     expect(ctx.router.has('remote')).toBe(true)
     expect(factory).toHaveBeenCalledTimes(2)
+  })
+})
+
+/**
+ * The organization a location is bound to must survive an attach.
+ *
+ * `attachLocation` used to introduce with NO organizationId and never record
+ * one, so the session's per-location org binding stayed permanently undefined —
+ * and BOTH org-change detectors are gated on a KNOWN previous org, so neither
+ * could ever fire. An ordinary `introduce({ same name, organization: 'org_X' })`
+ * then rebound the row and suspended every topic feed while the org-change
+ * DISCARD rule stayed silent, so the topics were re-joined by their OLD-ORG ids
+ * -> backend org assertion -> registerFailure x3 -> transport disabled. The heal
+ * path became the kill path.
+ */
+describe('attachLocation — organization binding', () => {
+  it('introduces with the org the location is already bound to, and keeps it recorded', async () => {
+    const location: ResolvedLocation = {
+      name: 'acme',
+      isLocal: false,
+      url: 'https://example.convex.cloud',
+      accessToken: 'a',
+      refreshToken: 'r',
+      channels: [],
+    }
+    const ctx = makeCtx(location)
+    // The session already knows this location is on org_1 (an earlier introduce
+    // recorded it). A re-attach — e.g. `authenticate` swapping the transport in
+    // place — must not silently forget that.
+    ctx.session.setOrganizationFor('acme', 'org_1')
+    const transport = new FakeRemoteTransport('acme')
+    ctx.transportFactory = () => transport
+
+    const result = await attachLocation('acme', ctx)
+
+    expect(result.ok).toBe(true)
+    expect(transport.introduce).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionName: 'architect', organizationId: 'org_1' }),
+    )
+    expect(ctx.session.getOrganizationFor('acme')).toBe('org_1')
   })
 })
