@@ -533,6 +533,31 @@ describe('RemoteTransport — organizations', () => {
     )
   })
 
+  /**
+   * cc#31 FINDING-31b. I7 narrowed "every ArgumentValidationError is an org
+   * rejection" to "only when the message names organizationId", and nothing
+   * held the narrowing: deleting `&& /organizationId/i.test(message)` left the
+   * whole suite green. Unheld, a validator tightening on an unrelated argument
+   * sends the agent to fix an organization that was never the problem, while
+   * the transport that IS misbehaving stays uncounted by the breaker and marked
+   * healthy.
+   */
+  it('does not treat an ArgumentValidationError about another argument as an org rejection (I7)', async () => {
+    const { client } = makeStubClient(
+      async () => [],
+      async () => {
+        throw Object.assign(new Error('Invalid argument `machine`: expected string, got number'), {
+          name: 'ArgumentValidationError',
+        })
+      },
+    )
+    const transport = new RemoteTransport({ client, log: () => {} })
+    const err = await transport.introduce({ sessionName: 'reviewer', organizationId: 'acme' }).catch((e: unknown) => e)
+
+    expect(err).not.toBeInstanceOf(OrganizationRejectedError)
+    expect((err as Error).message).toMatch(/machine/)
+  })
+
   it('introduce rethrows a transient failure as-is, so the tool layer keeps treating it as non-fatal', async () => {
     const { client } = makeStubClient(
       async () => [],
