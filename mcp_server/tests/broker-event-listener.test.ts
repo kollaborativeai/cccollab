@@ -8,6 +8,45 @@ function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
 }
 
+describe('cc#39: connect never leaves a second live SSE stream', () => {
+  // `server.ts` awaits `mcp.connect()` — which makes tools callable — before
+  // `listener.start()`. An `introduce` landing in that window calls
+  // `reconnectForIdentity()`, which opens a stream; `start()` then calls
+  // `connect()` again and overwrites `currentRequest` without destroying the
+  // first. Both stay live and every event arrives twice.
+  it('destroys the previous request when connect runs again', async () => {
+    const destroyed: number[] = []
+    let n = 0
+    const spy = vi.spyOn(http, 'get').mockImplementation(((_url: string, _opts: unknown) => {
+      const id = n++
+      return {
+        on: () => {},
+        destroy: () => destroyed.push(id),
+        setTimeout: () => {},
+      } as unknown as http.ClientRequest
+    }) as unknown as typeof http.get)
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const listener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+    })
+
+    // An introduce beats start() to the punch, then start() runs.
+    listener.reconnectForIdentity()
+    await listener.start()
+
+    spy.mockRestore()
+
+    // Two connects happened; the first stream must not still be open.
+    expect(n).toBe(2)
+    expect(destroyed).toContain(0)
+  })
+})
+
 describe('BrokerEventListener (channel-aware)', () => {
   let listener: BrokerEventListener
   let mockBus: ReturnType<typeof createMockMessageBus>

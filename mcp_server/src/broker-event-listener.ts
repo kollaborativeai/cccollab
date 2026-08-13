@@ -86,6 +86,19 @@ export class BrokerEventListener {
   private connect(): void {
     if (this.stopped) return
 
+    // Never leave a live request behind. `reconnectForIdentity` tears its own
+    // predecessor down, but `start()` does not: `server.ts` awaits
+    // `mcp.connect()` — which makes tools callable — BEFORE `listener.start()`,
+    // so an `introduce` arriving in that window opens a stream that `start()`
+    // then orphans by overwriting `currentRequest`. Two live streams duplicate
+    // every event for the life of the process. Making the teardown belong to
+    // `connect` itself closes it for every caller, present and future (cc#39).
+    if (this.currentRequest) {
+      const superseded = this.currentRequest
+      this.currentRequest = null
+      superseded.destroy()
+    }
+
     // Identify the stream: without a name the broker treats this connection as
     // anonymous and withholds every channel-tagged event (KAI-446).
     const qs = this.session.hasName() ? `?sessionId=${encodeURIComponent(this.session.displayName)}` : ''
