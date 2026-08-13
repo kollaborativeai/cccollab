@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import http from 'node:http'
 import { BrokerEventListener, type BrokerLocalEvent } from '../src/broker-event-listener.js'
 import { SessionManager } from '../src/session.js'
 import { ActiveContext } from '../src/context.js'
@@ -6,6 +7,57 @@ import { ActiveContext } from '../src/context.js'
 function createMockMessageBus() {
   return { push: vi.fn().mockResolvedValue(undefined) }
 }
+
+describe('cc#43: the hold-token never travels in a URL', () => {
+  // The hold-token is a capability: it authorizes DM send, DM read,
+  // re-registration and deletion. In a query string it lands in the connect
+  // line this listener appends to ~/.cccollab/logs/debug.log, and in anything
+  // else that captures a URL. The broker's `extractHoldToken` accepts
+  // Authorization: Bearer, so the header costs nothing.
+  const SECRET = 'hold-tok-SECRETVALUE123'
+
+  function startAndCapture() {
+    const captured: { url?: string; headers?: Record<string, string> } = {}
+    const spy = vi.spyOn(http, 'get').mockImplementation(((url: string, opts: unknown) => {
+      captured.url = String(url)
+      captured.headers = (opts as { headers?: Record<string, string> })?.headers
+      return { on: () => {}, destroy: () => {}, setTimeout: () => {} } as unknown as http.ClientRequest
+    }) as unknown as typeof http.get)
+
+    const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
+    session.setName('architect')
+    const listener = new BrokerEventListener({
+      brokerUrl: 'http://localhost:7850',
+      messageBus: createMockMessageBus() as never,
+      sessionManager: session,
+      context: new ActiveContext(),
+      sessionId: () => 'id-us',
+      sessionToken: () => SECRET,
+    })
+    void listener.start()
+    spy.mockRestore()
+    return captured
+  }
+
+  it('puts the token in an Authorization header, not the query string', () => {
+    const captured = startAndCapture()
+    expect(captured.url).not.toContain(SECRET)
+    expect(captured.headers?.Authorization).toBe(`Bearer ${SECRET}`)
+  })
+
+  it('does not write the token into the debug log', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { CCCOLLAB_LOGS_DIR } = await import('../src/constants.js')
+    const logFile = join(CCCOLLAB_LOGS_DIR, 'debug.log')
+    const before = existsSync(logFile) ? readFileSync(logFile, 'utf-8').length : 0
+
+    startAndCapture()
+
+    const after = existsSync(logFile) ? readFileSync(logFile, 'utf-8').slice(before) : ''
+    expect(after).not.toContain(SECRET)
+  })
+})
 
 describe('BrokerEventListener (channel-aware)', () => {
   let listener: BrokerEventListener
@@ -24,6 +76,8 @@ describe('BrokerEventListener (channel-aware)', () => {
       messageBus: mockBus as never,
       sessionManager: session,
       context,
+      // DM gate requires addressed toId === this registration (cc#43 C4/I3).
+      sessionId: () => 'id-us',
     })
   })
 
@@ -245,5 +299,60 @@ describe('BrokerEventListener (channel-aware)', () => {
     listener.processLocalEvent(event)
     await new Promise<void>((r) => setTimeout(r, 50))
     expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  it('pushes a dm event addressed to us regardless of channel subscription', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-sender',
+      fromName: 'other-session',
+      toId: 'id-us',
+      text: 'private hello',
+    }
+    listener.processLocalEvent(event)
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'other-session', text: 'private hello', kind: 'dm' }),
+      )
+    })
+  })
+
+  it('drops a dm event whose fromId is our own registration id (self-send)', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-us',
+      fromName: 'architect',
+      toId: 'id-us',
+      text: 'should not surface',
+    }
+    listener.processLocalEvent(event)
+    await new Promise<void>((r) => setTimeout(r, 50))
+    expect(mockBus.push).not.toHaveBeenCalled()
+  })
+
+  /**
+   * cc#43 I3: twin sessions may share a display name (AC2). Self-drop must
+   * use registration id, not name — otherwise two "reviewer" sessions never
+   * surface each other's DMs.
+   *
+   * RED: restore `isExactSelf(event.fromName)` as the DM drop → this fails.
+   */
+  it('surfaces a dm from a twin session that shares our display name', async () => {
+    const event: BrokerLocalEvent = {
+      source: 'local',
+      type: 'dm',
+      fromId: 'id-twin-other',
+      fromName: 'architect', // same display name as this listener
+      toId: 'id-us',
+      text: 'hello twin',
+    }
+    listener.processLocalEvent(event)
+    await vi.waitFor(() => {
+      expect(mockBus.push).toHaveBeenCalledWith(
+        expect.objectContaining({ sender: 'architect', text: 'hello twin', kind: 'dm' }),
+      )
+    })
   })
 })

@@ -114,21 +114,30 @@ describe('Identity Tools', () => {
     })
 
     it('introduce sets display name on session', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+      })
       vi.stubGlobal('fetch', mockFetch)
       await handleIdentityTool('introduce', { name: 'architect' }, deps)
       expect(deps.session.displayName).toBe('architect')
     })
 
     it('introduce returns JSON with name', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+      })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(await handleIdentityTool('introduce', { name: 'architect' }, deps))
       expect(result).toEqual({ name: 'architect' })
     })
 
     it('introduce includes objective in JSON when provided', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+      })
       vi.stubGlobal('fetch', mockFetch)
       const result = JSON.parse(
         await handleIdentityTool('introduce', { name: 'architect', objective: 'reviewing auth module' }, deps),
@@ -137,7 +146,10 @@ describe('Identity Tools', () => {
     })
 
     it('introduce re-registers already-subscribed channels with broker', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+      })
       vi.stubGlobal('fetch', mockFetch)
       deps.context.joinChannel('default', 'fallback', 'local')
       await handleIdentityTool('introduce', { name: 'architect' }, deps)
@@ -145,7 +157,8 @@ describe('Identity Tools', () => {
       expect(channelJoinCall).toBeDefined()
       const body = JSON.parse((channelJoinCall![1]! as RequestInit).body as string)
       expect(body.channel).toBe('default')
-      expect(body.sessionId).toBe('architect')
+      // Channel membership is keyed by registration id now (KAI-514).
+      expect(body.sessionId).toBe('test-registration-id')
     })
 
     it('throws on unknown tool', async () => {
@@ -154,7 +167,10 @@ describe('Identity Tools', () => {
 
     describe('whoami', () => {
       it('reports active channel with location and subscriptions with source+location', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         deps.context.joinChannel('project_x', 'manual', 'local')
@@ -171,7 +187,10 @@ describe('Identity Tools', () => {
       })
 
       it('omits activeTopic when none set', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
@@ -180,7 +199,10 @@ describe('Identity Tools', () => {
       })
 
       it('reports active topic with channel and location', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
         deps.context.joinChannel('default', 'fallback', 'local')
         deps.context.joinTopic('uuid-1', 'Auth refactor', 'default', 'local')
@@ -195,7 +217,10 @@ describe('Identity Tools', () => {
       })
 
       it('includes the locations map with the local transport enabled by default', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
         await handleIdentityTool('introduce', { name: 'architect' }, deps)
         const result = JSON.parse(await handleIdentityTool('whoami', {}, deps))
@@ -208,7 +233,10 @@ describe('Identity Tools', () => {
         // whoami must still report it as ✗ degraded, sourced from the
         // separate diagnostics registry, so the user can see *why* it's
         // missing without the plugin having bricked.
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
         const diagnostics = new AttachDiagnostics()
         diagnostics.recordFailure('personal', 'introduce() failed for "personal": Server Error')
@@ -227,7 +255,10 @@ describe('Identity Tools', () => {
 
     describe('introduce — organization argument', () => {
       beforeEach(() => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
       })
 
@@ -257,7 +288,10 @@ describe('Identity Tools', () => {
 
     describe('whoami — organization', () => {
       beforeEach(() => {
-        const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ok: true, id: 'test-registration-id', token: 'test-hold-token' }),
+        })
         vi.stubGlobal('fetch', mockFetch)
       })
 

@@ -80,6 +80,22 @@ describe('MessageBus', () => {
       })
     })
 
+    it('tags a dm message with kind:dm and omits the synthetic channel fields', async () => {
+      await bus.push(createMessage({ kind: 'dm', channel: 'dm:id-a|id-b', channelName: undefined }))
+      expect(mockMcp.notification).toHaveBeenCalledWith({
+        method: 'notifications/claude/channel',
+        params: {
+          content: 'hello world',
+          meta: {
+            sender: 'stefan | dispatcher',
+            kind: 'dm',
+            ts: '2026-04-19T05:00:00.000Z',
+            source: 'local',
+          },
+        },
+      })
+    })
+
     it('tags remote source when passed', async () => {
       await bus.push(createMessage(), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledWith(
@@ -149,6 +165,29 @@ describe('MessageBus', () => {
       await bus.push(createMessage({ threadTs: 't1' }), 'local')
       await bus.push(createMessage({ threadTs: 't2' }), 'remote')
       expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+    })
+
+    // KAI-514 AC3: the broker answers `delivered: true` per send, so two
+    // identical DMs in the same second must produce two wakes. Dedup exists
+    // for the same message arriving over both transports; a DM has only one
+    // transport, so dropping the second one turns a `delivered: true` into a
+    // lie about a wake that never happened.
+    it('never drops a repeated dm - two identical DMs in one second wake twice', async () => {
+      const dropped = vi.fn()
+      bus.on('dedup:dropped', dropped)
+      const dm = { kind: 'dm' as const, channel: 'dm:id-a|id-b', channelName: undefined, text: 'ping' }
+      await bus.push(createMessage({ ...dm, ts: '2026-04-19T05:00:00.000Z' }), 'local')
+      await bus.push(createMessage({ ...dm, ts: '2026-04-19T05:00:00.900Z' }), 'local')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(2)
+      expect(dropped).not.toHaveBeenCalled()
+    })
+
+    it('still dedupes channel traffic while dm traffic is exempt', async () => {
+      await bus.push(createMessage({ kind: 'dm', channel: 'dm:id-a|id-b' }), 'local')
+      await bus.push(createMessage({ kind: 'dm', channel: 'dm:id-a|id-b' }), 'local')
+      await bus.push(createMessage(), 'local')
+      await bus.push(createMessage(), 'remote')
+      expect(mockMcp.notification).toHaveBeenCalledTimes(3)
     })
   })
 

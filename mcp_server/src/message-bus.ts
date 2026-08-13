@@ -65,26 +65,43 @@ export class MessageBus extends EventEmitter {
    *
    * Errors while sending the MCP notification are logged via an event
    * and swallowed on purpose - a transient MCP SDK hiccup must not
-   * crash the server or break the inbound subscription.
+   * crash the server or break the inbound subscription. For DMs this
+   * means broker `delivered:true` (SSE write) can still leave the model
+   * unwoken; history remains on the broker for `read_session_messages`
+   * (cc#43 I5 — AC3 is SSE-level, not model-level).
    */
   async push(msg: ParsedMessage, source: MessageSource = 'local'): Promise<void> {
-    const key = dedupKey(msg)
     const now = Date.now()
-    this.vacuum(now)
-    const last = this.dedupSeen.get(key)
-    if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
-      this.emit('dedup:dropped', { msg, source, previousTs: last })
-      return
+    // DMs are exempt: dedup exists for one message arriving over BOTH
+    // transports, and a DM has only one delivery path (the local broker's
+    // private lane). Deduping it would drop a genuine second send that the
+    // broker already answered `delivered: true` for - an SSE wake the
+    // caller was told happened (KAI-514 AC3 / cc#43 I5).
+    if (msg.kind !== 'dm') {
+      const key = dedupKey(msg)
+      this.vacuum(now)
+      const last = this.dedupSeen.get(key)
+      if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
+        this.emit('dedup:dropped', { msg, source, previousTs: last })
+        return
+      }
+      this.dedupSeen.set(key, now)
+      if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
     }
-    this.dedupSeen.set(key, now)
-    if (this.dedupSeen.size > MAX_DEDUP_ENTRIES) this.trimOldest()
 
     const meta: Record<string, string> = {
       sender: msg.sender,
-      channel: msg.channelName ?? msg.channel,
-      channel_id: msg.channel,
       ts: msg.ts,
       source,
+    }
+    if (msg.kind === 'dm') {
+      // A DM has no real channel - `msg.channel` is a synthetic dedup
+      // partition key (see broker-event-listener.ts), not something to
+      // surface to the client.
+      meta.kind = 'dm'
+    } else {
+      meta.channel = msg.channelName ?? msg.channel
+      meta.channel_id = msg.channel
     }
     if (msg.threadTs) {
       meta.thread_ts = msg.threadTs

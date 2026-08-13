@@ -3,27 +3,28 @@ import { handleChannelTool, type ChannelToolDeps } from '../../src/tools/channel
 import { SessionManager } from '../../src/session.js'
 import { ActiveContext } from '../../src/context.js'
 import { LocalTransport } from '../../src/transport/local.js'
+import { registeredLocalTransport } from '../fixtures/registered-local-transport.js'
 import { TransportRouter } from '../../src/transport/router.js'
 import { ensureLazyAttach } from '../../src/transport/attach.js'
 import type { MessageBus } from '../../src/message-bus.js'
 import type { Transport } from '../../src/transport/index.js'
 import type { ResolvedLocation } from '../../src/config/resolve.js'
 
-function createDeps(): ChannelToolDeps {
+async function createDeps(): Promise<ChannelToolDeps> {
   const context = new ActiveContext()
   const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
   session.setName('architect')
   // Local-only router. Wraps `fetch(http://127.0.0.1:7850/...)`. Tests
   // mock `global.fetch` and assert URLs / bodies. Remote-transport
   // cases are covered in the dual-transport integration tests.
-  const transport = new LocalTransport(7850)
+  const transport = await registeredLocalTransport(7850)
   return { session, context, router: new TransportRouter([transport]) }
 }
 
 describe('Channel Tools', () => {
   describe('requires name', () => {
     it('rejects when session has no name', async () => {
-      const deps = createDeps()
+      const deps = await createDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const noName = { ...deps, session }
       const result = JSON.parse(await handleChannelTool('join_channel', { name: 'x' }, noName))
@@ -31,7 +32,7 @@ describe('Channel Tools', () => {
     })
 
     it('allows list_channels without name', async () => {
-      const deps = createDeps()
+      const deps = await createDeps()
       const session = new SessionManager({ username: 'stefan', cwd: '/projects/dispatcher' })
       const depsNoName = { ...deps, session }
       depsNoName.context.joinChannel('default', 'fallback', 'local')
@@ -60,8 +61,8 @@ describe('Channel Tools', () => {
 
   describe('join_channel', () => {
     let deps: ChannelToolDeps
-    beforeEach(() => {
-      deps = createDeps()
+    beforeEach(async () => {
+      deps = await createDeps()
     })
     afterEach(() => {
       vi.unstubAllGlobals()
@@ -76,7 +77,8 @@ describe('Channel Tools', () => {
       expect(deps.context.getActiveChannel()).toBe('project_x')
       const body = JSON.parse((mockFetch.mock.calls[0]![1]! as RequestInit).body as string)
       expect(body.channel).toBe('project_x')
-      expect(body.sessionId).toBe('architect')
+      // Addressed by registration id, never the display name (KAI-514).
+      expect(body.sessionId).toBe('test-registration-id')
     })
 
     it('does not change active channel when already have one', async () => {
@@ -96,8 +98,8 @@ describe('Channel Tools', () => {
 
   describe('leave_channel', () => {
     let deps: ChannelToolDeps
-    beforeEach(() => {
-      deps = createDeps()
+    beforeEach(async () => {
+      deps = await createDeps()
     })
     afterEach(() => {
       vi.unstubAllGlobals()
@@ -136,8 +138,8 @@ describe('Channel Tools', () => {
 
   describe('set_active_channel', () => {
     let deps: ChannelToolDeps
-    beforeEach(() => {
-      deps = createDeps()
+    beforeEach(async () => {
+      deps = await createDeps()
     })
 
     it('sets active channel when subscribed', async () => {
@@ -157,8 +159,8 @@ describe('Channel Tools', () => {
 
   describe('list_channels', () => {
     let deps: ChannelToolDeps
-    beforeEach(() => {
-      deps = createDeps()
+    beforeEach(async () => {
+      deps = await createDeps()
     })
     afterEach(() => {
       vi.unstubAllGlobals()
@@ -478,7 +480,7 @@ describe('Channel Tools', () => {
     })
 
     it('surfaces a "not supported" error on the local transport instead of a silent empty page', async () => {
-      const deps = createDeps()
+      const deps = await createDeps()
       deps.context.joinChannel('dev', 'manual', 'local')
       // The tool layer lets the transport error propagate; server.ts turns it
       // into an MCP error result. Regression guard for KAI-371.
@@ -490,8 +492,8 @@ describe('Channel Tools', () => {
 
   describe('send_message_to_channel', () => {
     let deps: ChannelToolDeps
-    beforeEach(() => {
-      deps = createDeps()
+    beforeEach(async () => {
+      deps = await createDeps()
     })
     afterEach(() => {
       vi.unstubAllGlobals()
