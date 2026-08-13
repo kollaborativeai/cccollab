@@ -1042,6 +1042,12 @@ export class RemoteTransport implements Transport {
           ).finally(() => {
             this.topicInFlight.delete(row._id)
           })
+          // The ack loop below stops at the FIRST rejection, so every later
+          // entry is never awaited. Park an inert handler now or those
+          // rejections are unhandled — fatal under Node's default
+          // `--unhandled-rejections=throw` (cc#66). Attaching a handler does
+          // not stop `delivered` itself rejecting for the awaiting loop.
+          void delivered.catch(() => {})
           deliveries.push({ id: row._id, ts: row.ts, done: delivered })
         }
         if (deliveries.length === 0) return
@@ -1159,6 +1165,11 @@ export class RemoteTransport implements Transport {
             ).finally(() => {
               this.channelInFlight.delete(row._id)
             })
+            // See the topic path: the ack loop breaks at the first rejection,
+            // leaving later entries unawaited. Without this handler a batch
+            // with two or more failed deliveries takes the process down
+            // (cc#66). `delivered` still rejects for the awaiting loop.
+            void delivered.catch(() => {})
             deliveries.push({ id: row._id, ts: row.ts, done: delivered })
           }
           // Ack the highest ts that was actually DELIVERED, once it has been.

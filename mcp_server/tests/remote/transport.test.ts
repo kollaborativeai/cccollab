@@ -533,6 +533,38 @@ describe('RemoteTransport.subscribeChannelMessages with server-side ack cursor',
     expect(acks).toEqual([1])
   })
 
+  it('cc#66: two failed deliveries in one batch leave no unhandled rejection', async () => {
+    // The ack loop breaks at the FIRST rejection, so every later entry is
+    // never awaited. Without an inert handler parked at creation time those
+    // promises reject with nobody listening, which Node reports as
+    // `unhandledRejection` — fatal under the default
+    // `--unhandled-rejections=throw`. One MCP disconnect spanning a
+    // multi-row batch is enough to reach it.
+    const { transport, callbacks } = await readyTransport()
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      transport.subscribeChannelMessages({ channelName: 'dev' }, () => Promise.reject(new Error('disconnected')))
+
+      callbacks[0]!([
+        { _id: 'm1', fromSessionId: 'alice', text: 'first', ts: 1 },
+        { _id: 'm2', fromSessionId: 'alice', text: 'second', ts: 2 },
+        { _id: 'm3', fromSessionId: 'alice', text: 'third', ts: 3 },
+      ])
+      await settle()
+      // unhandledRejection is raised on a later macrotask, not a microtask.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('re-offers a row whose delivery failed when the same onUpdate batch is re-fired', async () => {
     // C2: seen must not advance before delivery settles. If m2 fails, a later
     // onUpdate that still includes m2 must call onEvent again — not treat m2

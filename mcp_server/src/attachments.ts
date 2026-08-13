@@ -128,6 +128,10 @@ const IMAGE_SIGNATURES: Record<string, Array<number | null>> = {
 }
 
 function hasImageSignature(body: Uint8Array, mimeType: string): boolean {
+  // `mimeType` is sender-controlled, so an own-property check is required:
+  // a plain index would resolve Object.prototype members and make
+  // `constructor` / `toString` look like a supported type (cc#66).
+  if (!Object.hasOwn(IMAGE_SIGNATURES, mimeType)) return false
   const signature = IMAGE_SIGNATURES[mimeType]
   if (signature === undefined) return false
   if (body.byteLength < signature.length) return false
@@ -247,7 +251,10 @@ function describeImageName(image: InboundImage): string {
  * the type a file claims on disk is the type we actually validated.
  */
 export function safeImageName(raw: string, mimeType: string): string {
-  const extension = IMAGE_EXTENSIONS[mimeType] ?? 'bin'
+  // Own-property check: `mimeType` is sender-controlled and a bare index
+  // returns Object.prototype members, so `constructor` produced a filename
+  // containing the whole function source (cc#66).
+  const extension = Object.hasOwn(IMAGE_EXTENSIONS, mimeType) ? IMAGE_EXTENSIONS[mimeType] : 'bin'
   const base = (raw.split(/[/\\]/).pop() ?? '')
     .replace(/[^A-Za-z0-9._\- ]/g, '_')
     // Whitespace shares the class with the dots on purpose: this ran before
@@ -415,7 +422,7 @@ export async function saveInboundImages(
         }
       }
 
-      if (IMAGE_EXTENSIONS[image.mimeType] === undefined) {
+      if (!Object.hasOwn(IMAGE_EXTENSIONS, image.mimeType)) {
         failed.push({ name, reason: `unsupported type ${image.mimeType}` })
         continue
       }

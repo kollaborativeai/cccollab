@@ -103,6 +103,24 @@ describe('safeImageName', () => {
   })
 })
 
+describe('cc#66: sender-controlled mimeType cannot reach Object.prototype', () => {
+  // `IMAGE_EXTENSIONS` / `IMAGE_SIGNATURES` are plain object literals and the
+  // mimeType comes off the wire. A bare index lookup resolves inherited
+  // members, so 'constructor' read as a supported type and produced a
+  // filename containing the whole function source.
+  it('treats "constructor" as an unsupported type, not as an extension', () => {
+    expect(safeImageName('shot', 'constructor')).toBe('shot.bin')
+  })
+
+  it('treats "toString" as an unsupported type, not as an extension', () => {
+    expect(safeImageName('shot', 'toString')).toBe('shot.bin')
+  })
+
+  it('still resolves a genuinely supported type', () => {
+    expect(safeImageName('shot', 'image/png')).toBe('shot.png')
+  })
+})
+
 describe('imageFileName', () => {
   const args = { ts: 1785345346071, url: 'https://files.example/s/abc', name: 'shot.png', mimeType: 'image/png' }
 
