@@ -214,7 +214,7 @@ describe('Channel Tools', () => {
         await handleChannelTool('join_channel', { name: 'kai', location: 'flatout', watch: true }, remoteDeps),
       )
       expect(result.error).toMatch(/local/i)
-      expect(result.error).toContain('KAI-413')
+      expect(result.error).toContain('KAI-425')
       // The failed watch must not leave a half-subscribed channel behind.
       expect(remoteDeps.context.isChannelWatched('kai', 'flatout')).toBe(false)
     })

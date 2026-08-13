@@ -207,24 +207,24 @@ describe('ActiveContext', () => {
   describe('channel watch mode', () => {
     it('a freshly subscribed channel is not watched', () => {
       ctx.joinChannel('kai', 'manual')
-      expect(ctx.isChannelWatched('kai')).toBe(false)
+      expect(ctx.isChannelWatched('kai', 'local')).toBe(false)
     })
 
     it('joinChannel with watch: true marks the channel watched', () => {
       ctx.joinChannel('kai', 'manual', 'local', true)
-      expect(ctx.isChannelWatched('kai')).toBe(true)
+      expect(ctx.isChannelWatched('kai', 'local')).toBe(true)
     })
 
     it('re-joining without a watch argument leaves the flag untouched', () => {
       ctx.joinChannel('kai', 'manual', 'local', true)
       ctx.joinChannel('kai', 'manual', 'local')
-      expect(ctx.isChannelWatched('kai')).toBe(true)
+      expect(ctx.isChannelWatched('kai', 'local')).toBe(true)
     })
 
     it('joinChannel with watch: false turns watching off', () => {
       ctx.joinChannel('kai', 'manual', 'local', true)
       ctx.joinChannel('kai', 'manual', 'local', false)
-      expect(ctx.isChannelWatched('kai')).toBe(false)
+      expect(ctx.isChannelWatched('kai', 'local')).toBe(false)
     })
 
     it('watching is per channel+location, not per name', () => {
@@ -237,7 +237,7 @@ describe('ActiveContext', () => {
     it('leaving a watched channel clears the watch', () => {
       ctx.joinChannel('kai', 'manual', 'local', true)
       ctx.leaveChannel('kai', 'local')
-      expect(ctx.isChannelWatched('kai')).toBe(false)
+      expect(ctx.isChannelWatched('kai', 'local')).toBe(false)
     })
 
     it('getSubscribedChannels reports the watching flag', () => {
@@ -250,27 +250,20 @@ describe('ActiveContext', () => {
     })
 
     it('an unsubscribed channel is never watched', () => {
-      expect(ctx.isChannelWatched('nope')).toBe(false)
+      expect(ctx.isChannelWatched('nope', 'local')).toBe(false)
     })
 
-    it('isChannelWatched with no location is true if ANY subscription of that name is watched', () => {
-      ctx.joinChannel('kai', 'manual', 'local', true)
-      ctx.joinChannel('kai', 'manual', 'flatout')
-      expect(ctx.isChannelWatched('kai')).toBe(true)
-    })
-
-    it('isChannelWatched with no location is false when no subscription of that name is watched', () => {
-      ctx.joinChannel('kai', 'manual', 'local')
-      ctx.joinChannel('kai', 'manual', 'flatout')
-      expect(ctx.isChannelWatched('kai')).toBe(false)
-    })
+    // NOTE: the name-only, location-blind form of isChannelWatched was removed
+    // in KAI-413 — it was a cross-org leak (a watched local "default" answered
+    // true for a remote "default"). `location` is now required; the
+    // per-location behavior is covered by 'watching is per channel+location'.
 
     // The tool layer refuses `watch: true` on a remote (and on an unstated
     // location when remotes exist). The state layer itself does NOT enforce
     // that — `joinChannel('kai','manual','flatout', true)` succeeds and
-    // reports watching:true. That is intentional for KAI-413 (remote watch);
-    // this test pins the state-layer fact so nobody re-claims it is enforced
-    // here after reading the older comment.
+    // reports watching:true. Full remote watch (per-topic MESSAGE fan-out)
+    // is KAI-425; KAI-413 only delivered topic-CREATED parity. This test
+    // pins the state-layer fact so nobody re-claims watch is enforced here.
     it('state layer allows watch on a non-local channel (tool layer refuses it)', () => {
       expect(() => ctx.joinChannel('kai', 'manual', 'flatout', true)).not.toThrow()
       expect(ctx.isChannelWatched('kai', 'flatout')).toBe(true)
