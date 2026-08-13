@@ -6,6 +6,7 @@ import { TransportRouter } from '../../src/transport/router.js'
 import {
   attachLocation,
   defaultTransportFactory,
+  ensureChannelSubscription,
   ensureLazyAttach,
   planStartupAttachments,
   type AttachCtx,
@@ -157,7 +158,19 @@ class FakeRemoteTransport implements Transport {
     if (ts > prior) this.primedCursors.set(topicId, ts)
   }
 
-  subscribeChannelMessages(args: { channelName: string }, onEvent: (msg: ParsedMessage) => void): () => void {
+  /** How many times a channel feed was opened — the observable that says
+   *  whether a later `ensure` actually RETRIED (KAI-438 C3). */
+  channelSubscribeCount = 0
+  /** The miss callback the real transport fires when `channels.queries.listAll`
+   *  finds no matching row, captured so a test can drive that case. */
+  lastChannelLookupMiss: ((channelName: string) => void) | undefined
+
+  subscribeChannelMessages(
+    args: { channelName: string; onLookupMiss?: (channelName: string) => void },
+    onEvent: (msg: ParsedMessage) => void,
+  ): () => void {
+    this.channelSubscribeCount += 1
+    this.lastChannelLookupMiss = args.onLookupMiss
     const entry = { onEvent, unsubscribeCalled: false }
     this.subscribedChannels.set(args.channelName, entry)
     return () => {
@@ -826,5 +839,48 @@ describe('ensureLazyAttach', () => {
     await ensureLazyAttach('remote', ctx, { force: true }) // explicit recovery
     expect(ctx.router.has('remote')).toBe(true)
     expect(factory).toHaveBeenCalledTimes(2)
+  })
+})
+
+/**
+ * cc#40 FINDING-40. The C3 eviction — `args.map.delete(key)` inside
+ * `onLookupMiss` — was deletable with the whole suite green. The PRODUCER half
+ * is covered (`transport.test.ts` asserts the real transport fires
+ * `onLookupMiss` when `listAll` finds no match); what the callback DOES was
+ * not, so a refactor that kept the callback and dropped the eviction passed CI.
+ *
+ * Coverage only: the eviction is present and correct at head. What it prevents
+ * is a session that calls `join_channel` before the backend row exists caching
+ * a blind feed FOREVER — every later `ensureChannelSubscription` sees the entry
+ * and returns, the channel gets created, other members post, and this session
+ * receives nothing for the life of the process while `whoami` reports a healthy
+ * transport. That is the exact "cached permanent silence" the commit set out to
+ * remove.
+ */
+describe('ensureChannelSubscription lookup-miss eviction (KAI-438 C3)', () => {
+  it('retries on a later ensure after the backend reported no such channel', () => {
+    const transport = new FakeRemoteTransport('remote')
+    const map = new Map<string, () => void>()
+    const messageBus = { push: vi.fn(async () => {}) } as unknown as MessageBus
+    const ensure = (): void =>
+      ensureChannelSubscription({ transport, locationName: 'remote', channelName: 'dev', messageBus, map })
+
+    ensure()
+    expect(transport.channelSubscribeCount).toBe(1)
+    expect(map.has('remote::dev')).toBe(true)
+
+    // The control: while the entry stands, ensure is idempotent. Without this,
+    // a "retry" assertion below could pass on a transport that simply
+    // resubscribes every time, which would prove nothing about the eviction.
+    ensure()
+    expect(transport.channelSubscribeCount).toBe(1)
+
+    // The backend has no such channel yet — the real transport opens no feed
+    // and reports the miss.
+    transport.lastChannelLookupMiss?.('dev')
+    expect(map.has('remote::dev')).toBe(false)
+
+    ensure()
+    expect(transport.channelSubscribeCount).toBe(2)
   })
 })
