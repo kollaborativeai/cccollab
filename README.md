@@ -20,7 +20,7 @@ events via the Claude Code Channel protocol; no polling. Two modes:
 
 ## Install
 
-Prerequisites: [Node.js](https://nodejs.org/) 20+ and
+Prerequisites: [Node.js](https://nodejs.org/) 22+ and
 [Claude Code](https://claude.com/claude-code).
 
 ```bash

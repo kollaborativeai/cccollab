@@ -571,7 +571,7 @@ __metadata:
     "@eslint/js": "npm:^10.0.1"
     "@modelcontextprotocol/sdk": "npm:^1.29.0"
     "@types/node": "npm:^25.6.0"
-    convex: "npm:^1.35.1"
+    convex: "npm:^1.51.0"
     cosmiconfig: "npm:^9.0.1"
     deepmerge: "npm:^4.3.1"
     eslint: "npm:^10.2.1"
@@ -1361,17 +1361,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"convex@npm:^1.35.1":
-  version: 1.35.1
-  resolution: "convex@npm:1.35.1"
+"convex@npm:^1.51.0":
+  version: 1.51.0
+  resolution: "convex@npm:1.51.0"
   dependencies:
     esbuild: "npm:0.27.0"
     prettier: "npm:^3.0.0"
-    ws: "npm:8.18.0"
+    ws: "npm:8.21.0"
   peerDependencies:
     "@auth0/auth0-react": ^2.0.1
     "@clerk/clerk-react": ^4.12.8 || ^5.0.0
-    "@clerk/react": ^6.0.0
+    "@clerk/react": ^6.4.3
     react: ^18.0.0 || ^19.0.0-0 || ^19.0.0
   peerDependenciesMeta:
     "@auth0/auth0-react":
@@ -1384,7 +1384,7 @@ __metadata:
       optional: true
   bin:
     convex: bin/main.js
-  checksum: 10c0/c31c02bcd777ce3afc460d19b8885cd3d765011106a8804a4e21f00f727e23c9639263917a4232bad86b3988e0f66955957810a5302a1b17d9f1d4dcac4cc676
+  checksum: 10c0/6dfe66f02c682a917cfc83e4766776250b8dbfef856585544e4ff721e8eb78268fb787f759cd77e0724fc3ebb3f6727cd4854e1093132a3607824a38fdd7a8eb
   languageName: node
   linkType: hard
 

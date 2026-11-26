@@ -9,12 +9,12 @@ err() {
 }
 
 # 1. Prereqs
-command -v node >/dev/null 2>&1 || err "Node.js 20+ is required. Install: https://nodejs.org"
+command -v node >/dev/null 2>&1 || err "Node.js 22+ is required. Install: https://nodejs.org"
 command -v npm >/dev/null 2>&1 || err "npm is required (ships with Node.js)."
 command -v claude >/dev/null 2>&1 || err "claude (Claude Code CLI) is required. Install: https://claude.com/claude-code"
 
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
-[ "$NODE_MAJOR" -ge 20 ] || err "Node.js 20+ is required (found $(node --version))."
+[ "$NODE_MAJOR" -ge 22 ] || err "Node.js 22+ is required (found $(node --version))."
 
 # 2. Remove the scope mapping written by the pre-npmjs installer.
 #
